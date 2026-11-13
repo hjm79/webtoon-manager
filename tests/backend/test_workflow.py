@@ -135,6 +135,48 @@ def kakao_scope():
     assert [ep.number for ep in plan.to_download] == [2]
 
 
+async def kakao_preview_records():
+    title_id = 90123411
+    title = "카카오 회차 조회 검증"
+    episodes = [Episode(n + 2000, f"{n}화", n, f"{n}화", n != 3, n != 3, 1, n == 4)
+                for n in range(1, 5)]
+
+    async def listing(self, requested_id):
+        assert requested_id == title_id
+        return {"title": title}, episodes
+
+    async def check(client, expected_owned):
+        response = await client.post("/api/workflow/preview", json={"platform": "kakao", "title_id": str(title_id)})
+        assert response.status_code == 200, response.text
+        result = response.json()
+        assert result["title"] == title and result["available_count"] == 2
+        assert {row["episode_no"] for row in result["episodes"] if row["owned"]} == expected_owned
+        assert [row["available"] for row in result["episodes"]] == [True, True, False, False]
+
+    with patch.object(workflow.kakao_page_download.KakaoPageClient, "list_episodes", listing):
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=main.app), base_url="http://test") as client:
+            assert repository.get_kakao_webtoon(title_id) is None
+            assert repository.get_kakao_downloaded_numbers(title_id) is None
+            await check(client, set())
+            assert repository.get_kakao_webtoon(title_id) is None
+
+            repository.upsert_new_kakao_webtoon(title_id, title)
+            await check(client, set())
+            assert repository.get_kakao_downloaded_numbers(title_id) is None
+
+            repository.set_kakao_downloaded_numbers(title_id, set())
+            await check(client, set())
+            assert repository.get_kakao_downloaded_numbers(title_id) == set()
+
+            folder = workflow.kakao_page_download.series_folder(workflow.download_roots.kakao_root(get_settings()), title)
+            folder.mkdir(parents=True)
+            with zipfile.ZipFile(folder / "0002_2화.zip", "w") as archive:
+                archive.writestr("0001.jpg", b"test-image")
+            repository.set_kakao_downloaded_numbers(title_id, {3})
+            await check(client, {2, 3})
+            assert repository.get_kakao_downloaded_numbers(title_id) == {3}
+
+
 async def api_contract():
     async def hidden(*_):
         return {"444"}
@@ -339,6 +381,7 @@ async def restart_status():
 scope_rules()
 asyncio.run(automatic_retry())
 kakao_scope()
+asyncio.run(kakao_preview_records())
 asyncio.run(api_contract())
 asyncio.run(one_title_admission())
 asyncio.run(archive_failure())

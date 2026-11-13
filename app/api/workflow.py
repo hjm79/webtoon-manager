@@ -158,7 +158,7 @@ async def _preview(platform: str, title_id: str) -> dict:
             raise HTTPException(400, "단행본은 구독 대상에서 제외됩니다.")
         folder = kakao_page_download.series_folder(download_roots.kakao_root(settings), title)
         existing = await asyncio.to_thread(kakao_page_download.scan_existing_files, folder)
-        owned = {f.number for f in existing} | repository.get_kakao_downloaded_numbers(int(title_id))
+        owned = {f.number for f in existing} | (repository.get_kakao_downloaded_numbers(int(title_id)) or set())
         episodes = [{"episode_no": row.number, "subtitle": row.subtitle,
                      "available": row.accessible and not row.hidden, "owned": row.number in owned} for row in rows]
     return {"platform": platform, "title_id": title_id, "title": title, "episodes": episodes,
