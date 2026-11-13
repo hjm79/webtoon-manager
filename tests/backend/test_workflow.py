@@ -224,8 +224,12 @@ async def api_contract():
                 payload["title_id"] = "555"
                 payload["start_now"] = True
                 response = await client.post("/api/workflow/subscribe", json=payload)
-                assert response.status_code == 409 and repository.get("555") is None
-                assert repository.get_setting("subscription_scope:naver:555") is None
+                assert response.status_code == 200 and response.json()["execution"] == "queued"
+                assert repository.get("555") is not None
+                assert subscription_scope.get("naver", "555")["pending_initial"] == [4, 5]
+                assert repository.list_download_queue()[0]["title_id"] == "555"
+                await dj.stop_queued_downloads()
+                repository.update_download_queue(repository.list_download_queue()[0]["id"])
             finally:
                 dj._download_claimed_platforms.clear()
             folder = Path(get_settings().download_root) / "새 구독"
@@ -504,12 +508,12 @@ async def edit_scope_contract():
             def broken_queue(*_):
                 raise RuntimeError("queue unavailable")
             for owner, name in ((webtoons, "_to_out"), (workflow, "next_run_at")):
-                with patch.object(owner, name, broken_queue), patch.object(dj, "enqueue_reserved_title") as enqueue:
+                with patch.object(owner, name, broken_queue), patch.object(repository, "enqueue_download") as enqueue:
                     response = await client.post("/api/workflow/scope", json={**payload, "start_now": True})
                     assert response.status_code == 500 and not enqueue.called
                     assert repository.get_setting(f"subscription_scope:naver:{title_id}") == before
                     assert not dj.download_busy()
-            with patch.object(dj, "enqueue_reserved_title", broken_queue):
+            with patch.object(repository, "enqueue_download", broken_queue):
                 response = await client.post("/api/workflow/scope", json={**payload, "start_now": True})
                 assert response.status_code == 500
                 assert repository.get_setting(f"subscription_scope:naver:{title_id}") == before
@@ -521,7 +525,7 @@ async def edit_scope_contract():
             with patch.object(dj, "_run_download_job_impl", one):
                 response = await client.post("/api/workflow/scope", json={**payload, "start_now": True})
                 assert response.status_code == 200 and response.json()["execution"] == "queued"
-                await asyncio.gather(*dj._single_title_tasks)
+                await dj._queue_worker_task
             assert calls == [({"naver"}, title_id)] and not dj.download_busy()
 
     kakao_id = 950003

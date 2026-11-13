@@ -11,6 +11,45 @@ let workflowReaderCloseTimer = null;
 let workflowReaderClosing = false;
 let workflowStatusPending = false;
 let workflowStatusTimer = null;
+let workflowPreviewGeneration = 0;
+let workflowPreviewItem = null;
+
+async function openWorkflowPreview(item) {
+  const generation = ++workflowPreviewGeneration;
+  workflowPreviewItem = item;
+  const dialog = document.getElementById("workflow-preview-dialog");
+  const status = document.getElementById("workflow-preview-status");
+  const list = document.getElementById("workflow-preview-episodes");
+  const subscribe = document.getElementById("workflow-preview-subscribe");
+  document.getElementById("workflow-preview-title").textContent = `${item.title} · 회차 미리보기`;
+  list.replaceChildren(); subscribe.disabled = true;
+  subscribe.textContent = item.subscription === "active" ? "다운로드 범위 변경" : "다운로드 범위 선택 · 구독";
+  status.textContent = "회차 목록을 불러오고 있습니다…";
+  showWorkflowDialog(dialog);
+  try {
+    const data = await apiCall("/api/workflow/preview", { method: "POST", body: JSON.stringify({ platform: item.platform, title_id: String(item.title_id) }) });
+    if (generation !== workflowPreviewGeneration || !dialog.open) return;
+    item.subscription = data.subscription || item.subscription;
+    subscribe.textContent = item.subscription === "active" ? "다운로드 범위 변경" : "다운로드 범위 선택 · 구독";
+    status.textContent = `총 ${(data.episodes || []).length}회차 · 현재 받을 수 있는 회차 ${data.available_count || 0}개`;
+    for (const episode of data.episodes || []) {
+      const row = document.createElement("li");
+      row.textContent = `${episode.episode_no} · ${episode.subtitle} · ${episode.owned ? "이미 받음" : episode.available ? "다운로드 가능" : "현재 받을 수 없음"}`;
+      list.appendChild(row);
+    }
+    if (!list.children.length) status.textContent += " · 표시할 회차가 없습니다.";
+    subscribe.disabled = false;
+  } catch (e) { if (generation === workflowPreviewGeneration) status.textContent = `미리보기를 불러오지 못했습니다: ${e.message}`; }
+}
+
+document.getElementById("workflow-preview-close").addEventListener("click", () => {
+  ++workflowPreviewGeneration; closeWorkflowDialog(document.getElementById("workflow-preview-dialog"));
+});
+document.getElementById("workflow-preview-subscribe").addEventListener("click", () => {
+  const item = workflowPreviewItem;
+  ++workflowPreviewGeneration; closeWorkflowDialog(document.getElementById("workflow-preview-dialog"));
+  if (item) chooseSubscriptionScope(item, { edit: item.subscription === "active" });
+});
 
 function showWorkflowDialog(dialog) {
   if (dialog.open) return;
@@ -55,6 +94,20 @@ function makeWorkflowScopeButton(item) {
   button.dataset.scopeTitleId = item.title_id;
   button.dataset.scopePlatform = item.platform || "naver";
   button.title = `${item.title}의 다운로드 범위 변경`;
+  return button;
+}
+
+function makeWorkflowQueueButton(item) {
+  const button = makeButton("다운로드 추가", async () => {
+    button.disabled = true;
+    try {
+      await apiCall("/api/workflow/queue", { method: "POST", body: JSON.stringify({ platform: item.platform || "naver", title_id: String(item.title_id) }) });
+      refreshWorkflowStatus();
+    } catch (e) { alert(e.message); }
+    finally { button.disabled = false; }
+  });
+  button.title = "저장된 다운로드 범위를 유지하고 대기열에 추가";
+  button.disabled = ["queued", "running", "resting"].includes(item.status);
   return button;
 }
 
@@ -208,13 +261,28 @@ async function searchWorkflow(event) {
       const card = document.createElement("article");
       card.className = "webtoon-card workflow-result-card";
       card.dataset.titleId = item.title_id;
+      card.dataset.platform = item.platform;
+      const cover = makeButton("", () => openWorkflowPreview(item));
+      cover.className = "workflow-preview-cover";
+      cover.setAttribute("aria-label", `${item.title} 회차 미리보기`);
+      const image = document.createElement("img");
+      image.alt = `${item.title} 표지`;
+      image.loading = "lazy"; image.referrerPolicy = "no-referrer";
+      const fallback = workflowReaderUrl(item.thumbnail_url);
+      image.src = item.platform === "kakao" ? `/api/kakao-thumbnail/${encodeURIComponent(item.title_id)}` : fallback?.href || "";
+      image.addEventListener("error", () => {
+        if (item.platform === "kakao" && fallback && !image.dataset.fallback) { image.dataset.fallback = "1"; image.src = fallback.href; }
+        else { const placeholder = document.createElement("div"); placeholder.className = "thumb-placeholder"; placeholder.textContent = "표지 없음"; image.replaceWith(placeholder); }
+      });
+      if (image.getAttribute("src")) cover.appendChild(image);
+      else { const placeholder = document.createElement("div"); placeholder.className = "thumb-placeholder"; placeholder.textContent = "표지 없음"; cover.appendChild(placeholder); }
       const platformLabel = item.platform === "kakao" ? "카카오페이지" : "네이버";
       const info = document.createElement("div");
       info.className = "webtoon-card-body";
-      const heading = document.createElement("strong");
-      heading.textContent = item.title;
+      const heading = makeButton(item.title, () => openWorkflowPreview(item));
+      heading.className = "workflow-result-title";
       const meta = document.createElement("p");
-      meta.className = "hint";
+      meta.className = "webtoon-card-meta";
       meta.textContent = [platformLabel, item.is_paused ? "휴재" : "", item.is_finished ? "완결" : ""].filter(Boolean).join(" · ");
       info.append(heading, meta);
       const actions = document.createElement("div");
@@ -231,8 +299,9 @@ async function searchWorkflow(event) {
         }
       });
       subscribe.disabled = item.subscription === "active";
-      actions.append(subscribe, editScope, makeWorkflowReadButton(item.title, item.platform), makeButton("회차 확인", () => openManualAnalysis(item.platform, item.title_id)));
-      card.append(info, actions);
+      subscribe.dataset.workflowSubscribe = "1";
+      actions.append(subscribe, editScope, makeWorkflowReadButton(item.title, item.platform), makeButton("회차 미리보기", () => openWorkflowPreview(item)));
+      card.append(cover, info, actions);
       results.appendChild(card);
     }
   } catch (e) {
@@ -262,20 +331,22 @@ async function chooseSubscriptionScope(item, { edit = false } = {}) {
   const status = document.getElementById("workflow-subscribe-status");
   const error = document.getElementById("workflow-subscribe-error");
   const submit = document.getElementById("workflow-subscribe-submit");
+  const download = document.getElementById("workflow-subscribe-download");
   document.getElementById("workflow-subscribe-form").reset();
   setWorkflowScopeMode("latest");
   document.getElementById("workflow-subscribe-title").textContent = `${item.title} · ${edit ? "다운로드 범위 변경" : "구독과 다운로드 범위"}`;
   document.getElementById("workflow-scope-legend").textContent = edit ? "앞으로 받을 회차" : "처음 받을 회차";
   document.getElementById("workflow-preserve-hint").classList.toggle("hidden", !edit);
   document.getElementById("workflow-start-hint").textContent = edit
-    ? "체크하지 않으면 범위만 저장하고 기존 다운로드 예약을 유지합니다."
-    : "체크하지 않으면 다음 다운로드 예약에 등록합니다.";
-  submit.textContent = edit ? "범위 저장" : "선택한 범위로 구독";
+    ? "범위만 저장하면 기존 다운로드 예약을 유지합니다. 대기열에 추가하면 현재 작업이 끝난 뒤 선택한 범위로 받습니다."
+    : "구독만 저장하면 다음 예약에 확인합니다. 다운로드 대기열에 추가하면 현재 작업이 끝난 뒤 선택한 범위로 받습니다.";
+  submit.textContent = edit ? "범위 저장" : "구독만 저장";
+  download.textContent = edit ? "저장하고 다운로드 대기열 추가" : "구독하고 다운로드 대기열 추가";
   document.getElementById("workflow-episode-picker").replaceChildren();
   document.getElementById("workflow-episode-picker").classList.add("hidden");
   status.textContent = "받을 수 있는 회차를 확인하고 있습니다…";
   error.textContent = "";
-  submit.disabled = true;
+  submit.disabled = true; download.disabled = true;
   showWorkflowDialog(dialog);
   const result = new Promise((resolve) => { workflowSubscribeResolve = resolve; });
   try {
@@ -303,6 +374,7 @@ async function chooseSubscriptionScope(item, { edit = false } = {}) {
     }
     updateWorkflowEpisodeSelection();
     submit.disabled = false;
+    download.disabled = current?.mode === "future";
   } catch (e) {
     if (generation === workflowSubscribeGeneration) { status.textContent = "회차를 확인하지 못했습니다."; error.textContent = e.message; }
   }
@@ -327,9 +399,8 @@ function setWorkflowScopeMode(mode) {
   document.getElementById("workflow-episode-picker").classList.toggle("hidden", mode !== "selected");
   updateWorkflowEpisodeSelection();
   document.getElementById("workflow-latest-count").disabled = mode !== "latest";
-  const start = document.getElementById("workflow-start-now");
-  start.disabled = mode === "future";
-  if (start.disabled) start.checked = false;
+  document.getElementById("workflow-subscribe-download").disabled = mode === "future"
+    || document.getElementById("workflow-subscribe-submit").disabled;
 }
 
 function updateWorkflowEpisodeSelection() {
@@ -377,6 +448,7 @@ document.getElementById("workflow-subscribe-form").addEventListener("submit", as
   event.preventDefault();
   if (!workflowSubscription) return;
   const submit = document.getElementById("workflow-subscribe-submit");
+  const download = document.getElementById("workflow-subscribe-download");
   const error = document.getElementById("workflow-subscribe-error");
   if (submit.disabled) return;
   const item = workflowSubscription;
@@ -390,7 +462,7 @@ document.getElementById("workflow-subscribe-form").addEventListener("submit", as
     scope.episode_nos = [...document.querySelectorAll('#workflow-episode-picker input:checked')].map((input) => Number(input.value));
     if (!scope.episode_nos.length) { error.textContent = "받을 회차를 하나 이상 선택해주세요."; return; }
   }
-  submit.disabled = true;
+  submit.disabled = true; download.disabled = true;
   workflowSubscribeSaving = true;
   for (const id of ["workflow-subscribe-close", "workflow-subscribe-cancel"]) document.getElementById(id).disabled = true;
   error.textContent = "";
@@ -398,19 +470,25 @@ document.getElementById("workflow-subscribe-form").addEventListener("submit", as
     const payload = {
       platform: item.platform, title_id: String(item.title_id), title: item.title,
       thumbnail_url: item.thumbnail_url || "", author_summary: item.author_summary || "", scope,
-      start_now: mode !== "future" && document.getElementById("workflow-start-now").checked,
+      start_now: mode !== "future" && event.submitter?.id === "workflow-subscribe-download",
     };
     if (item.editing) {
       delete payload.title; delete payload.thumbnail_url; delete payload.author_summary;
     }
     const data = await apiCall(item.editing ? "/api/workflow/scope" : "/api/workflow/subscribe", { method: "POST", body: JSON.stringify(payload) });
     if (workflowSubscription !== item) return;
+    for (const card of document.querySelectorAll("#workflow-search-results .workflow-result-card")) {
+      if (card.dataset.titleId !== String(item.title_id) || card.dataset.platform !== item.platform) continue;
+      const button = card.querySelector("[data-workflow-subscribe]");
+      if (button) { button.textContent = "구독 중"; button.disabled = true; }
+      card.querySelector("[data-scope-title-id]")?.classList.remove("hidden");
+    }
     invalidateListCaches();
     workflowSubscribeSaving = false;
     closeSubscriptionScope(data);
     refreshWorkflowStatus();
     if (!document.getElementById("page-naver-list").classList.contains("hidden")) loadNaverList(false);
-  } catch (e) { if (workflowSubscription === item) { error.textContent = e.message; submit.disabled = false; } }
+  } catch (e) { if (workflowSubscription === item) { error.textContent = e.message; submit.disabled = false; download.disabled = mode === "future"; } }
   finally {
     workflowSubscribeSaving = false;
     for (const id of ["workflow-subscribe-close", "workflow-subscribe-cancel"]) document.getElementById(id).disabled = false;
@@ -440,10 +518,10 @@ function renderWorkflowStatus(data) {
     const text = document.createElement("span");
     const modeLabel = { all: "전체 공개 회차", latest: `최근 ${item.scope?.latest_count || 0}회차부터`, selected: "선택한 회차만", future: "새 회차만" }[item.scope?.mode] || "기존 구독 범위";
     const stateLabel = { available: "받은 회차 있음", idle: "대기 중", scheduled: "예약 대기", queued: "다운로드 대기", running: "다운로드 중", resting: "휴식 중", success: "완료", error: "실패" }[item.status] || "구독 중";
-    text.textContent = `${item.title} · ${stateLabel} · 받은 회차 ${item.downloaded_count || 0}개 · ${modeLabel}`;
+    text.textContent = `${item.title} · ${stateLabel}${item.queue_position ? ` · 대기열 ${item.queue_position}번째` : ""} · 받은 회차 ${item.downloaded_count || 0}개 · ${modeLabel}`;
     const actions = document.createElement("div");
     actions.className = "workflow-subscription-actions";
-    actions.append(makeWorkflowScopeButton(item), makeWorkflowReadButton(item.title, item.platform));
+    actions.append(makeWorkflowScopeButton(item), makeWorkflowQueueButton(item), makeWorkflowReadButton(item.title, item.platform));
     row.append(text, actions); list.appendChild(row);
   }
   if (!list.children.length) list.textContent = "구독한 작품이 없습니다. 통합 검색에서 받을 범위를 선택해 등록해주세요.";

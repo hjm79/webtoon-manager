@@ -7,12 +7,22 @@ const css = fs.readFileSync(path.join(__dirname, "..", "..", "app", "static", "s
 
 // @media (max-width: 640px) { ... } 안쪽 텍스트 / 그 밖의 텍스트
 function mobileBlock(text) {
-  const start = text.indexOf("@media (max-width: 640px) {");
-  if (start < 0) return null;
-  let depth = 0, i = text.indexOf("{", start);
-  const open = i;
-  for (; i < text.length; i++) { if (text[i] === "{") depth++; else if (text[i] === "}" && --depth === 0) break; }
-  return { inside: text.slice(open + 1, i), outside: text.slice(0, start) + text.slice(i + 1) };
+  const query = "@media (max-width: 640px) {";
+  const inside = [], outside = [];
+  let cursor = 0, start;
+  while ((start = text.indexOf(query, cursor)) >= 0) {
+    outside.push(text.slice(cursor, start));
+    const open = text.indexOf("{", start);
+    let depth = 1, end = open + 1;
+    for (; end < text.length && depth; end++) {
+      if (text[end] === "{") depth++;
+      else if (text[end] === "}") depth--;
+    }
+    inside.push(text.slice(open + 1, end - 1));
+    cursor = end;
+  }
+  outside.push(text.slice(cursor));
+  return inside.length ? { inside: inside.join("\n"), outside: outside.join("\n") } : null;
 }
 const ruleOf = (text, selector) => { const m = text.match(new RegExp("(?:^|\\})\\s*" + selector.replace(/[.*+?^${}()|[\]\\>]/g, "\\$&") + "\\s*\\{([^}]*)\\}", "m")); return m ? m[1].replace(/\s+/g, " ").trim() : null; };
 

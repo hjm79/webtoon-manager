@@ -160,7 +160,10 @@ async def subscribe(title_id: str):
 @router.post("/webtoons/{title_id}/unsubscribe", response_model=WebtoonOut)
 async def unsubscribe(title_id: str):
     wt = await asyncio.to_thread(_get_or_404, title_id)
-    await asyncio.to_thread(repository.set_status, title_id, repository.STATUS_UNSUBSCRIBED)
+    try:
+        await asyncio.to_thread(repository.set_scoped_subscription_status, "naver", title_id, repository.STATUS_UNSUBSCRIBED)
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
 
     # 즉시 옮기지 않고 대기열에만 넣는다 — 실제 이동은 다음 아카이빙 스케줄이 돌 때(run_archive_job) 같이 처리된다.
     # 다운로드 도중과 안 겹치게 하는 기존 안전장치(10분 간격 검증 등)를 이 트리거도 그대로 타게 하기 위함.

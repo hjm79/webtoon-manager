@@ -13,6 +13,16 @@ The browser uses one service origin. Collection and the library live in the mana
 
 The viewer needs no published host port. Keep the existing library mounts and database volumes in place: series and chapter identities depend on the library references and filenames, not the public origin.
 
+## Subscription and download queue
+
+The scope dialog offers `구독만 저장` separately from `구독하고 다운로드 대기열 추가`. Saving a new subscription is allowed while another download is running and does not add it to that running batch. An existing subscription's `다운로드 추가` button queues its saved scope without changing it.
+
+`POST /api/workflow/subscribe` uses `start_now: false` for subscription-only storage and `start_now: true` for durable FIFO enqueueing. `POST /api/workflow/queue` enqueues an active subscription by `platform` and `title_id`. The status endpoint returns `queue` and per-subscription `queue_position`. The worker waits for current automatic or manual downloads, executes one queued title at a time, and continues after a failed title. Already-downloaded episodes remain in place and are skipped by the existing downloader.
+
+The `workflow_download_queue` setting persists pending and running items. Startup recovers interrupted running items as queued. Duplicate queue entries and attempts to change a queued title's scope are rejected with 409. Unsubscribing a pending title cancels its queue entry atomically; unsubscribing a title already running from the queue is rejected. Normal and wait-free automatic batches exclude queued titles, and each batch fixes its target subscription snapshot before execution.
+
+Search cards show covers and open an in-page episode preview from the cover, title, or `회차 미리보기` button. Previewing does not subscribe or download.
+
 ## Read-only consumer contract
 
 These paths are suitable for a later My Supporter connection:
@@ -29,7 +39,11 @@ Series list fields include `id`, `title`, `platform`, `chapter_count`, `unread_c
 
 For server-side My Supporter data fetches, the viewer also exposes `GET /viewer/api/supporter/shelf?limit=12` and `GET /viewer/api/supporter/health`. These require the dedicated `SUPPORTER_API_TOKEN` as a Bearer header. An unset token returns 503; a wrong token returns 401. Shared-profile paths cannot call these endpoints. Keep this token on the dashboard server; do not put it in browser URLs or use the scan integration token.
 
+Shelf `coverUrl` values use `GET /viewer/api/supporter/covers/{id}`. Fetch these on the dashboard server with the same Bearer header and serve them through the dashboard's image proxy. Direct browser image tags cannot attach this header. Do not append credentials to URLs. The normal viewer cover endpoint retains its browser authentication. The dedicated endpoint returns `no-store`, rejects unknown or excluded series with 404, and bounds the wait for a single-series cache miss; it does not scan the library.
+
 The shelf returns `items` with `id`, `title`, `platform`, `coverUrl`, `href`, `lastReadAt`, `pageIndex`, `pageOffset`, `chapterCount`, `unreadCount`, `lastChapter`, `latestChapter`, `isNew`, `readingNow`, and `latestUpdatedAt`. Results sort by last-read time, then local file update time; `limit` accepts 1 through 50. `isNew` describes unread local files, not a remote provider's release schedule. The endpoint does not scan archives or change reading state. Public links use the configured viewer `PUBLIC_BASE_URL`; the reader link contains only the series ID so opening it resolves the latest saved position.
+
+When only a legacy reading cursor exists, unread counts include the chapters before that cursor without creating or migrating read-history rows.
 
 ## Authentication boundary
 

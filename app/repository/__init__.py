@@ -14,6 +14,10 @@ from app.repository.common import (
     STATUS_UNREGISTERED,
     STATUS_UNSUBSCRIBED,
 )
+from app.repository.scoped_subscription import (
+    AlreadySubscribedError, activate_scoped_subscription, download_subscription_snapshot,
+    enqueue_download, list_download_queue, set_scoped_subscription_status, update_download_queue,
+)
 from app.repository.naver_webtoons import (
     acknowledge_finish,
     exclude_auto_added_titles,
@@ -154,6 +158,13 @@ from app.repository.backup import (
 )
 
 __all__ = [
+    "AlreadySubscribedError",
+    "activate_scoped_subscription",
+    "download_subscription_snapshot",
+    "enqueue_download",
+    "list_download_queue",
+    "set_scoped_subscription_status",
+    "update_download_queue",
     "AUTHOR_ADDED",
     "AUTHOR_ALREADY_OFF",
     "AUTHOR_ALREADY_ON",

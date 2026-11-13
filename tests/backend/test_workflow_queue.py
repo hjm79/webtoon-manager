@@ -1,0 +1,173 @@
+"""Registration during downloads, persistent FIFO admission and stable batch targets."""
+import asyncio
+from types import SimpleNamespace as NS
+from unittest.mock import patch
+
+import httpx
+
+from app import db, job_status, repository, subscription_scope
+from app.api import workflow, webtoons, kakao_webtoons
+from app.scheduler import download_job as dj
+from app.scheduler import waitfree_job
+import app.main as main
+
+db.get_connection()
+rows = [{"episode_no": n, "subtitle": f"{n}화", "available": n != 5, "owned": False} for n in range(1, 6)]
+
+
+def atomic_registration():
+    scope = subscription_scope.make_choice("naver", "9900", "selected", rows, episode_nos=[2, 4])
+    with db.write_transaction() as conn:
+        conn.execute("CREATE TRIGGER reject_test_scope BEFORE INSERT ON settings "
+                     "WHEN NEW.key = 'subscription_scope:naver:9900' BEGIN SELECT RAISE(ABORT, 'test write failure'); END")
+    try:
+        repository.activate_scoped_subscription("naver", "9900", "실패 원자성", "", "", scope, enqueue=True)
+    except Exception:
+        pass
+    else:
+        raise AssertionError("Injected DB write failure was ignored")
+    assert repository.get("9900") is None
+    assert repository.get_setting("subscription_scope:naver:9900") is None
+    assert repository.list_download_queue() == []
+    with db.write_transaction() as conn:
+        conn.execute("DROP TRIGGER reject_test_scope")
+
+
+async def concurrent_registration():
+    repository.upsert_new("9901", "원래 네이버")
+    repository.upsert_new_kakao_webtoon(9902, "원래 카카오")
+    entered, release = asyncio.Event(), asyncio.Event()
+    runs = []
+    real_sleep = asyncio.sleep
+
+    async def fast_sleep(_):
+        await real_sleep(0)
+
+    async def listing(platform, title_id):
+        return {"platform": platform, "title_id": title_id, "title": f"검증 {title_id}",
+                "episodes": rows, "available_count": 4}
+
+    async def naver(session, settings, title_id, tracker, failures):
+        runs.append(("naver", title_id, subscription_scope.allowed_numbers("naver", title_id, list(range(1, 7)))))
+        if title_id == "9901":
+            entered.set()
+            await release.wait()
+        elif title_id == "9904":
+            raise RuntimeError("first queued title failed")
+
+    async def kakao(settings, failures, *, only=None, skip_waiting=False):
+        assert only is not None, "Kakao phase must use the snapshot captured before the Naver phase"
+        for row in only:
+            title_id = str(row["title_id"])
+            runs.append(("kakao", title_id, subscription_scope.allowed_numbers("kakao", title_id, list(range(1, 7)))))
+
+    async def noop(*args):
+        return None
+
+    async def enrich(title_id, title):
+        return kakao_webtoons.KakaoWebtoonOut(**repository.get_kakao_webtoon(title_id))
+
+    with patch.object(workflow, "_preview", listing), patch.object(workflow, "_require_kakao_login", noop), \
+         patch.object(webtoons, "_trigger_enrich", lambda *a, **kw: None), \
+         patch.object(kakao_webtoons, "enrich_kakao_subscription", enrich), \
+         patch.object(dj, "_download_new_episodes_for_one", naver), \
+         patch.object(dj, "_download_kakao_subscriptions", kakao), \
+         patch.object(dj.cookie_health, "finalize_and_notify", noop), patch.object(dj.asyncio, "sleep", fast_sleep):
+        current = asyncio.create_task(dj.run_download_job("both"))
+        await asyncio.wait_for(entered.wait(), 3)
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=main.app), base_url="http://test") as client:
+            for platform, title_id, numbers, start in (("naver", "9903", [2, 4], False),
+                                                       ("naver", "9904", [3], True),
+                                                       ("kakao", "9905", [2], True)):
+                response = await client.post("/api/workflow/subscribe", json={
+                    "platform": platform, "title_id": title_id, "title": f"검증 {title_id}",
+                    "scope": {"mode": "selected", "episode_nos": numbers}, "start_now": start})
+                assert response.status_code == 200, response.text
+                assert response.json()["execution"] == ("queued" if start else "scheduled")
+                assert subscription_scope.get(platform, title_id)["episode_nos"] == numbers
+            assert [entry["title_id"] for entry in repository.list_download_queue()] == ["9904", "9905"]
+            assert [entry[1] for entry in runs] == ["9901"], runs
+            response = await client.post("/api/workflow/queue", json={"platform": "naver", "title_id": "9901"})
+            assert response.status_code == 409 and "현재 다운로드" in response.text
+            original_scope = repository.get_setting("subscription_scope:naver:9901")
+            repository.set_status("9901", repository.STATUS_UNSUBSCRIBED)
+            for start in (False, True):
+                response = await client.post("/api/workflow/subscribe", json={
+                    "platform": "naver", "title_id": "9901", "title": "진행 중 재구독",
+                    "scope": {"mode": "selected", "episode_nos": [1]}, "start_now": start})
+                assert response.status_code == 409 and "현재 다운로드" in response.text
+                assert repository.get_setting("subscription_scope:naver:9901") == original_scope
+            repository.set_status("9901", repository.STATUS_ACTIVE)
+            response = await client.post("/api/workflow/subscribe", json={
+                "platform": "naver", "title_id": "9904", "title": "중복",
+                "scope": {"mode": "all"}, "start_now": True})
+            assert response.status_code == 409
+            assert len(repository.list_download_queue()) == 2
+            response = await client.post("/api/workflow/queue", json={"platform": "naver", "title_id": "9904"})
+            assert response.status_code == 409 and len(repository.list_download_queue()) == 2
+            response = await client.post("/api/workflow/scope", json={
+                "platform": "naver", "title_id": "9904", "scope": {"mode": "selected", "episode_nos": [1]}})
+            assert response.status_code == 409 and "대기열" in response.text
+            assert subscription_scope.get("naver", "9904")["episode_nos"] == [3]
+            status = (await client.get("/api/workflow/status")).json()
+            queued = {row["title_id"]: row for row in status["subscriptions"]}
+            assert queued["9904"]["queue_position"] == 1 and queued["9905"]["queue_position"] == 2
+            assert queued["9904"]["status"] == "queued" and queued["9903"]["status"] != "queued"
+
+            await dj.stop_queued_downloads()
+            first = repository.list_download_queue()[0]
+            repository.update_download_queue(first["id"], state="running")
+            dj.start_queued_downloads(recover=True)
+            assert [row["state"] for row in repository.list_download_queue()] == ["queued", "queued"]
+            release.set()
+            await asyncio.wait_for(current, 3)
+            await asyncio.wait_for(dj._queue_worker_task, 3)
+            assert [entry[:2] for entry in runs] == [("naver", "9901"), ("kakao", "9902"),
+                                                     ("naver", "9904"), ("kakao", "9905")], runs
+            assert runs[2][2] == {3} and runs[3][2] == {2}, runs
+            assert repository.list_download_queue() == [] and not dj.download_busy()
+            assert subscription_scope.get("naver", "9903")["episode_nos"] == [2, 4]
+            assert job_status.snapshot()["download"]["status"] == "success"
+
+            repository.enqueue_download("kakao", "9905", "검증 9905")
+            waitfree_calls = []
+            async def waitfree_download(settings, failures, *, only, now):
+                assert dj.title_running("kakao", "9902")
+                response = await client.post("/api/workflow/queue", json={"platform": "kakao", "title_id": "9902"})
+                assert response.status_code == 409 and "현재 다운로드" in response.text
+                waitfree_calls.extend(str(row["title_id"]) for row in only)
+                return [(row, NS(error=None)) for row in only]
+            with patch.object(waitfree_job.waitfree_sync, "is_enabled", lambda: True), \
+                 patch.object(waitfree_job.waitfree_sync, "due_webtoons", lambda _: [repository.get_kakao_webtoon(i) for i in (9902, 9905)]), \
+                 patch.object(waitfree_job, "_download_kakao_subscriptions", waitfree_download):
+                await waitfree_job.run_waitfree_due_job()
+            assert waitfree_calls == ["9902"] and not dj.title_running("kakao", "9902")
+            repository.update_download_queue(repository.list_download_queue()[0]["id"])
+
+            job_status.start("manual")
+            try:
+                response = await client.post("/api/workflow/queue", json={"platform": "naver", "title_id": "9903"})
+                assert response.status_code == 200
+                assert repository.list_download_queue()[0]["title_id"] == "9903"
+                naver, kakao_rows = repository.download_subscription_snapshot({"naver", "kakao"})
+                assert "9903" not in [row.title_id for row in naver]
+                response = await client.post("/api/webtoons/9903/unsubscribe")
+                assert response.status_code == 200 and repository.list_download_queue() == []
+                assert repository.get("9903").status == repository.STATUS_UNSUBSCRIBED
+                assert subscription_scope.get("naver", "9903")["episode_nos"] == [2, 4]
+                repository.enqueue_download("kakao", "9905", "검증 9905")
+                entry = repository.list_download_queue()[0]
+                repository.update_download_queue(entry["id"], state="running")
+                response = await client.post("/api/kakao-webtoons/9905/unsubscribe")
+                assert response.status_code == 409 and repository.get_kakao_webtoon(9905)["status"] == "active"
+                repository.update_download_queue(entry["id"], state="queued")
+                response = await client.post("/api/kakao-webtoons/9905/unsubscribe")
+                assert response.status_code == 200 and repository.list_download_queue() == []
+            finally:
+                await dj.stop_queued_downloads()
+                job_status.finish("manual", success=True)
+
+
+atomic_registration()
+asyncio.run(concurrent_registration())
+print("atomic subscription, save-only while busy, stable two-platform snapshot, durable FIFO recovery, deduplication, scope protection and failure continuation passed")

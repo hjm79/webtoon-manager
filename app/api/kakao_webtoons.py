@@ -241,6 +241,10 @@ async def subscribe_kakao_webtoon(title_id: int, payload: KakaoWebtoonEntryIn):
         )
     await asyncio.to_thread(repository.set_kakao_webtoon_status, title_id, repository.STATUS_ACTIVE)
     await asyncio.to_thread(repository.refresh_kakao_webtoon_author_summary, title_id, payload.author_summary)
+    return await enrich_kakao_subscription(title_id, payload.title)
+
+
+async def enrich_kakao_subscription(title_id: int, title: str):
     about = await _kakao_about(title_id)
     # 글 작가(아카이빙 파일명 템플릿의 {author}가 네이버처럼 "글" 작가가 되게)와 원작 작가(관심 작가 화면의 "(원작)" 표시)를 저장해
     # 둔다 — 작품 정보를 못 받으면 받을 때/메타 동기화 때 채워진다
@@ -250,7 +254,7 @@ async def subscribe_kakao_webtoon(title_id: int, payload: KakaoWebtoonEntryIn):
     # 구분으로 원작자가 있으면 원작자를, 없으면 글 작가를 등록한다. 정보 탭을 못 받으면 등록하지 않는다(그림 작가 등을
     # 잘못 등록하지 않도록 이름 전부를 등록하는 대신 건너뛴다). 결과는 실행 이력에 남는다.
     await asyncio.to_thread(
-        subscription_history.record_kakao_subscription, payload.title, about, await asyncio.to_thread(_is_author_auto_register_enabled)
+        subscription_history.record_kakao_subscription, title, about, await asyncio.to_thread(_is_author_auto_register_enabled)
     )
     return KakaoWebtoonOut(**await asyncio.to_thread(repository.get_kakao_webtoon, title_id))
 
@@ -258,7 +262,10 @@ async def subscribe_kakao_webtoon(title_id: int, payload: KakaoWebtoonEntryIn):
 @router.post("/kakao-webtoons/{title_id}/unsubscribe", response_model=KakaoWebtoonOut)
 async def unsubscribe_kakao_webtoon(title_id: int):
     webtoon = await _get_or_404_kakao(title_id)
-    await asyncio.to_thread(repository.set_kakao_webtoon_status, title_id, repository.STATUS_UNSUBSCRIBED)
+    try:
+        await asyncio.to_thread(repository.set_scoped_subscription_status, "kakao", str(title_id), repository.STATUS_UNSUBSCRIBED)
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
     # 완결이고 받을 회차를 다 받은 작품을 구독해제하면 네이버와 같이 이동 대기열에 넣는다(설정이 켜져 있을 때)
     await asyncio.to_thread(archiver.queue_finish_archive_if_applicable, f"{archiver.KAKAO_TARGET_PREFIX}{title_id}", webtoon["is_finished"])
     return KakaoWebtoonOut(**await asyncio.to_thread(repository.get_kakao_webtoon, title_id))

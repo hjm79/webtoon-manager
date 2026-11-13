@@ -225,46 +225,43 @@ async def _require_kakao_login() -> None:
 @router.post("/subscribe")
 async def subscribe(payload: SubscribeIn, request: Request):
     async with _subscription_lock:
-        if download_job.download_busy() or kakao_page_download.download_lock.locked():
-            raise HTTPException(409, "다른 다운로드가 실행 중입니다. 완료 후 다시 시도해주세요.")
+        if download_job.title_running(payload.platform, payload.title_id):
+            raise HTTPException(409, "이미 현재 다운로드 작업에 포함된 작품입니다. 실행 완료 후 구독 범위를 변경해주세요.")
         old = repository.get(payload.title_id) if payload.platform == "naver" else repository.get_kakao_webtoon(int(payload.title_id))
         if old is not None and (old.status if payload.platform == "naver" else old["status"]) == repository.STATUS_ACTIVE:
             raise HTTPException(409, "이미 구독 중인 작품입니다. 기존 다운로드 범위는 유지합니다.")
         listing = await preview(TitleIn(platform=payload.platform, title_id=payload.title_id))
         if payload.start_now and payload.platform == "kakao":
             await _require_kakao_login()
-        reserved = False
         try:
-            if payload.start_now:
-                download_job.reserve_title_download(payload.platform)
-                reserved = True
-            elif download_job.download_busy():
-                raise HTTPException(409, "다른 다운로드가 시작되었습니다. 완료 후 다시 시도해주세요.")
-            scope = await asyncio.to_thread(subscription_scope.set_choice, payload.platform, payload.title_id,
+            scope = subscription_scope.make_choice(payload.platform, payload.title_id,
                 payload.scope.mode, listing["episodes"], latest_count=payload.scope.latest_count,
                 episode_nos=payload.scope.episode_nos)
-            if payload.platform == "naver":
-                entry = webtoons.NaverListEntryIn(title=listing["title"], thumbnail_url=payload.thumbnail_url)
-                subscribed = await webtoons.naver_list_subscribe(payload.title_id, entry)
-            else:
-                entry = kakao_webtoons.KakaoWebtoonEntryIn(title=listing["title"], thumbnail_url=payload.thumbnail_url,
-                                                          author_summary=payload.author_summary)
-                subscribed = await kakao_webtoons.subscribe_kakao_webtoon(int(payload.title_id), entry)
+            if download_job.title_running(payload.platform, payload.title_id):
+                raise HTTPException(409, "이미 현재 다운로드 작업에 포함된 작품입니다. 실행 완료 후 구독 범위를 변경해주세요.")
+            await asyncio.to_thread(repository.activate_scoped_subscription, payload.platform, payload.title_id,
+                listing["title"], payload.thumbnail_url, payload.author_summary, scope, enqueue=payload.start_now)
             if payload.start_now:
-                download_job.enqueue_reserved_title(payload.platform, payload.title_id, listing["title"])
-                reserved = False
+                download_job.start_queued_downloads()
+            if payload.platform == "naver":
+                webtoons._trigger_enrich(payload.title_id,
+                    register_authors_enabled=await asyncio.to_thread(webtoons._is_author_auto_register_enabled), record_history=True)
+                subscribed = webtoons._to_out(await asyncio.to_thread(repository.get, payload.title_id))
+            else:
+                subscribed = await kakao_webtoons.enrich_kakao_subscription(int(payload.title_id), listing["title"])
             return {"subscription": subscribed, "scope": scope,
                     "execution": "queued" if payload.start_now else "scheduled", "next_run_at": next_run_at(request, payload.platform)}
+        except repository.AlreadySubscribedError as exc:
+            raise HTTPException(409, str(exc)) from exc
         except ValueError as exc:
             raise HTTPException(400, str(exc)) from exc
-        finally:
-            if reserved:
-                download_job.release_title_download(payload.platform)
 
 
 @router.post("/scope")
 async def update_scope(payload: ScopeUpdateIn, request: Request):
     async with _subscription_lock:
+        if download_job.title_queued(payload.platform, payload.title_id):
+            raise HTTPException(409, "다운로드 대기열에 있는 작품입니다. 실행 완료 후 범위를 변경해주세요.")
         if download_job.download_busy() or kakao_page_download.download_lock.locked():
             raise HTTPException(409, "다른 다운로드가 실행 중입니다. 완료 후 다시 시도해주세요.")
         tracked = _subscription(payload.platform, payload.title_id)
@@ -296,9 +293,9 @@ async def update_scope(payload: ScopeUpdateIn, request: Request):
                 response = {"subscription": subscribed, "scope": scope,
                             "execution": "queued" if payload.start_now else "scheduled", "next_run_at": next_run_at(request, payload.platform)}
                 if payload.start_now:
-                    download_job.enqueue_reserved_title(payload.platform, payload.title_id,
+                    repository.enqueue_download(payload.platform, payload.title_id,
                         tracked.title if payload.platform == "naver" else tracked["title"])
-                    reserved = False
+                    download_job.start_queued_downloads()
                 else:
                     workflow_progress.clear_title(payload.platform, payload.title_id)
                 return response
@@ -311,6 +308,27 @@ async def update_scope(payload: ScopeUpdateIn, request: Request):
         finally:
             if reserved:
                 download_job.release_title_download(payload.platform)
+
+
+@router.post("/queue")
+async def queue_download(payload: TitleIn):
+    async with _subscription_lock:
+        tracked = await asyncio.to_thread(_subscription, payload.platform, payload.title_id)
+        if tracked is None or _subscription_status(payload.platform, tracked) != repository.STATUS_ACTIVE:
+            raise HTTPException(404, "구독 중인 작품을 찾지 못했습니다.")
+        if download_job.title_running(payload.platform, payload.title_id):
+            raise HTTPException(409, "이미 현재 다운로드 작업에 포함된 작품입니다.")
+        if payload.platform == "kakao":
+            await _require_kakao_login()
+        if download_job.title_running(payload.platform, payload.title_id):
+            raise HTTPException(409, "이미 현재 다운로드 작업에 포함된 작품입니다.")
+        try:
+            title = tracked.title if payload.platform == "naver" else tracked["title"]
+            queue = repository.enqueue_download(payload.platform, payload.title_id, title)
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from exc
+        download_job.start_queued_downloads()
+        return {"execution": "queued", "queue": queue}
 
 
 def _file_count(root: str, title: str, platform: str) -> int:
@@ -346,6 +364,8 @@ def _subscriptions() -> list[dict]:
 @router.get("/status")
 async def status(request: Request):
     subscriptions = await asyncio.to_thread(_subscriptions)
+    queue = await asyncio.to_thread(repository.list_download_queue)
+    queued = {(row["platform"], row["title_id"]): (index, row) for index, row in enumerate(queue, 1)}
     for row in subscriptions:
         row["next_run_at"] = next_run_at(request, row["platform"])
         if row["progress"] is None:
@@ -353,5 +373,8 @@ async def status(request: Request):
                 row["status"] = "available"
             else:
                 row["status"] = "scheduled" if row["next_run_at"] else "idle"
+        if (row["platform"], row["title_id"]) in queued:
+            row["queue_position"], entry = queued[(row["platform"], row["title_id"])]
+            row["status"] = entry["state"]
     return {"next_run_at": next_run_at(request), "jobs": job_status.snapshot(), "progress": workflow_progress.snapshot(),
-            "subscriptions": subscriptions, "checked_at": datetime.now(timezone.utc).isoformat()}
+            "subscriptions": subscriptions, "queue": queue, "checked_at": datetime.now(timezone.utc).isoformat()}

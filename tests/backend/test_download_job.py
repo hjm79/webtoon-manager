@@ -15,7 +15,7 @@ calls = {"naver": [], "kakao": [], "finalize": 0}; boom = set(); state = {"kakao
 async def fake_naver(session, settings, title_id, adult_tracker, failures):
     calls["naver"].append(title_id)
     if title_id in boom: raise RuntimeError(f"{title_id} 다운로드 오류")
-async def fake_kakao(settings, failures, *, skip_waiting):
+async def fake_kakao(settings, failures, *, skip_waiting, only=None):
     calls["kakao"].append(skip_waiting)
     if state["kakao_fail"]: raise RuntimeError("카카오 장애")
 async def fake_finalize(session, tracker):

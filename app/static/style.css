@@ -1198,6 +1198,13 @@ select {
 .workflow-subscription-actions { display: flex; gap: 6px; flex-wrap: wrap; flex: 0 0 auto; max-width: 100%; }
 .workflow-subscriptions button { flex: 0 0 auto; }
 .workflow-result-card { justify-content: space-between; }
+.workflow-preview-cover { padding: 0; border: 0; border-radius: 0; background: transparent; display: block; width: 100%; }
+.workflow-preview-cover img { display: block; }
+.workflow-preview-cover .thumb-placeholder { display: grid; place-items: center; color: var(--muted); }
+.workflow-result-card .webtoon-card-body { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+.workflow-result-title { display: block; padding: 0; border: 0; background: transparent; text-align: left; font-size: 14px; line-height: 1.4; font-weight: 600; overflow-wrap: anywhere; }
+.workflow-result-card .webtoon-card-meta { margin: 0; line-height: 1.4; }
+.workflow-preview-episodes { display: grid; gap: 10px; padding-left: 0; list-style: none; max-height: 50vh; overflow: auto; overflow-wrap: anywhere; }
 .workflow-search .toolbar { flex-wrap: wrap; }
 .workflow-search .toolbar select { max-width: 100%; }
 .workflow-search-status, .workflow-error { overflow-wrap: anywhere; }

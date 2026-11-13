@@ -862,11 +862,17 @@
         <p id="workflow-selection-error" class="workflow-error" role="alert"></p>
       </div>
       <div id="workflow-episode-picker" class="workflow-episode-picker hidden"></div>
-      <label class="checkbox-label"><input id="workflow-start-now" type="checkbox" /> 이 작품을 지금 다운로드 시작</label>
-      <p id="workflow-start-hint" class="hint">체크하지 않으면 다음 다운로드 예약에 등록합니다.</p>
+      <p id="workflow-start-hint" class="hint">구독만 저장하면 다음 예약에 확인합니다. 다운로드 대기열에 추가하면 현재 작업이 끝난 뒤 선택한 범위로 받습니다.</p>
       <p id="workflow-subscribe-error" class="workflow-error" role="alert"></p>
-      <div class="workflow-dialog-actions"><button id="workflow-subscribe-submit" type="submit" disabled>선택한 범위로 구독</button><button id="workflow-subscribe-cancel" type="button">취소</button></div>
+      <div class="workflow-dialog-actions"><button id="workflow-subscribe-submit" type="submit" disabled>구독만 저장</button><button id="workflow-subscribe-download" type="submit" disabled>구독하고 다운로드 대기열 추가</button><button id="workflow-subscribe-cancel" type="button">취소</button></div>
     </form>
+  </dialog>
+
+  <dialog id="workflow-preview-dialog" class="workflow-dialog" aria-labelledby="workflow-preview-title">
+    <div class="workflow-dialog-head"><h2 id="workflow-preview-title">회차 미리보기</h2><button id="workflow-preview-close" type="button">닫기</button></div>
+    <p id="workflow-preview-status" role="status"></p>
+    <ol id="workflow-preview-episodes" class="workflow-preview-episodes"></ol>
+    <div class="workflow-dialog-actions"><button id="workflow-preview-subscribe" type="button" disabled>다운로드 범위 선택</button></div>
   </dialog>
 
   <dialog id="workflow-reader-dialog" class="workflow-reader-dialog" aria-labelledby="workflow-reader-title">

@@ -27,6 +27,69 @@ _DOWNLOAD_TARGET_PLATFORMS = {"naver": {"naver"}, "kakao": {"kakao"}, "both": {"
 
 _download_claimed_platforms: set[str] = set()  # 지금 실행 중이거나 순서를 기다리는 실행이 맡은 플랫폼
 _single_title_tasks: set[asyncio.Task] = set()
+_queue_worker_task: asyncio.Task | None = None
+_active_batch_titles: set[tuple[str, str]] = set()
+
+
+def title_running(platform: str, title_id: str) -> bool:
+    if (platform, str(title_id)) in _active_batch_titles:
+        return True
+    progress = workflow_progress.snapshot()
+    return progress.get("platform") == platform and str(progress.get("title_id")) == str(title_id) \
+        and progress.get("state") in ("running", "resting")
+
+
+def title_queued(platform: str, title_id: str) -> bool:
+    return any(row["platform"] == platform and row["title_id"] == str(title_id)
+               for row in repository.list_download_queue())
+
+
+def start_queued_downloads(*, recover: bool = False) -> None:
+    global _queue_worker_task
+    if recover:
+        repository.update_download_queue(recover=True)
+    if _queue_worker_task is not None and not _queue_worker_task.done():
+        return
+    if not repository.list_download_queue():
+        return
+    _queue_worker_task = asyncio.create_task(_run_queued_downloads())
+
+
+async def stop_queued_downloads() -> None:
+    if _queue_worker_task is not None and not _queue_worker_task.done():
+        _queue_worker_task.cancel()
+        try:
+            await _queue_worker_task
+        except asyncio.CancelledError:
+            pass
+
+
+async def _run_queued_downloads() -> None:
+    from app import kakao_page_download
+
+    while items := repository.list_download_queue():
+        if download_busy() or kakao_page_download.download_lock.locked():
+            await asyncio.sleep(1)
+            continue
+        item = items[0]
+        platform, title_id = item["platform"], item["title_id"]
+        reserve_title_download(platform)
+        try:
+            repository.update_download_queue(item["id"], state="running")
+            async with _download_job_lock:
+                await _run_download_job_impl({platform}, only_title=title_id)
+        except asyncio.CancelledError:
+            workflow_progress.fail("다운로드가 중단되었습니다. 다음 실행에서 이어받습니다.")
+            job_status.finish("download", success=False)
+            raise
+        except Exception:
+            log.exception("대기열 작품 다운로드 처리 중 오류")
+            workflow_progress.fail("다운로드 처리 중 오류가 발생했습니다. 다음 대기 작품으로 진행합니다.")
+            job_status.finish("download", success=False)
+        finally:
+            _active_batch_titles.clear()
+            release_title_download(platform)
+        repository.update_download_queue(item["id"])
 
 
 def download_busy() -> bool:
@@ -64,6 +127,7 @@ def enqueue_reserved_title(platform: str, title_id: str, title: str) -> None:
             workflow_progress.fail("다운로드 처리 중 오류가 발생했습니다. 실행 이력을 확인해주세요.")
             job_status.finish("download", success=False)
         finally:
+            _active_batch_titles.clear()
             release_title_download(platform)
 
     task = asyncio.create_task(run_one())
@@ -89,6 +153,7 @@ async def run_download_job(target: str = "naver", scheduled: bool = False) -> No
         async with _download_job_lock:
             await _run_download_job_impl(platforms, scheduled, partial=platforms != wanted)
     finally:
+        _active_batch_titles.clear()
         _download_claimed_platforms.difference_update(platforms)
 
 
@@ -98,9 +163,12 @@ async def _run_download_job_impl(platforms: set[str], scheduled: bool = False, p
     settings = get_settings()
     # 신작 스캔이 자동으로 구독 추가해 둔 매일+ 작품은 받지 않는다 — 저장해 둔 매일+ 목록으로(네트워크 없이) 먼저 제외됨으로 정리한다
     auto_excluded = repository.exclude_auto_added_titles(daily_plus.cached_ids()) if "naver" in platforms else []
-    active_webtoons = repository.list_by_status(repository.STATUS_ACTIVE) if "naver" in platforms else []
+    active_webtoons, active_kakao_webtoons = repository.download_subscription_snapshot(platforms, include_queued=only_title is not None)
     if only_title is not None:
         active_webtoons = [w for w in active_webtoons if w.title_id == only_title]
+        active_kakao_webtoons = [w for w in active_kakao_webtoons if str(w["title_id"]) == only_title]
+    _active_batch_titles.update(("naver", w.title_id) for w in active_webtoons)
+    _active_batch_titles.update(("kakao", str(w["title_id"])) for w in active_kakao_webtoons)
 
     job_status.start("download")
     if partial:
@@ -138,12 +206,8 @@ async def _run_download_job_impl(platforms: set[str], scheduled: bool = False, p
 
         try:
             if "kakao" in platforms:
-                if only_title is None:
-                    await _download_kakao_subscriptions(settings, failures, skip_waiting=scheduled and waitfree_sync.is_enabled())
-                else:
-                    selected = [w for w in repository.list_kakao_webtoons_by_status(repository.STATUS_ACTIVE)
-                                if str(w["title_id"]) == only_title]
-                    await _download_kakao_subscriptions(settings, failures, only=selected)
+                await _download_kakao_subscriptions(settings, failures, only=active_kakao_webtoons,
+                    skip_waiting=scheduled and waitfree_sync.is_enabled())
         except Exception as e:
             had_error = True
             log.error("카카오페이지 자동 다운로드 중 예외: %s", e)

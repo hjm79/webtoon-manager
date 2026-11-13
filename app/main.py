@@ -23,6 +23,7 @@ from app.log_redaction import RedactingFilter
 from app import kakao_catalog, kakao_records, report_dispatch, repository
 from app.config import get_settings, warn_removed_env_variables
 from app.scheduler import create_scheduler
+from app.scheduler import download_job
 from app.tracker import ensure_default_tags_seeded
 
 
@@ -54,12 +55,14 @@ async def lifespan(app: FastAPI):
     scheduler = create_scheduler()
     scheduler.start()
     app.state.scheduler = scheduler
+    download_job.start_queued_downloads(recover=True)
     # 프로그램이 (업데이트 등으로) 시작될 때마다 카카오 목록을 항상 새로 채운다 — 저장돼 있던 캐시는 새로 채워질 때까지
     # 화면에 바로 보여주는 용도일 뿐이라, 캐시가 예전 것으로 굳어버리는 일이 없다. 화면은 기다리지 않는다.
     if repository.get_setting("kakao_webtoons_enabled") == "1":
         kakao_catalog.start_refresh()
     yield
     scheduler.shutdown(wait=False)
+    await download_job.stop_queued_downloads()
     await stop_bot()
 
 

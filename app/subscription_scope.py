@@ -27,6 +27,15 @@ def get(platform: str, title_id: str | int) -> dict:
 
 def set_choice(platform: str, title_id: str | int, mode: str, episodes: list[dict], *, latest_count: int | None = None,
                episode_nos: list[int] | None = None, preserve_existing: bool = False) -> dict:
+    with _lock:
+        value = make_choice(platform, title_id, mode, episodes, latest_count=latest_count,
+                            episode_nos=episode_nos, preserve_existing=preserve_existing)
+        repository.set_setting(_key(platform, title_id), json.dumps(value))
+    return value
+
+
+def make_choice(platform: str, title_id: str | int, mode: str, episodes: list[dict], *, latest_count: int | None = None,
+                episode_nos: list[int] | None = None, preserve_existing: bool = False) -> dict:
     available = sorted({row["episode_no"] for row in episodes if row["available"]})
     cutoff = max((row["episode_no"] for row in episodes), default=0)
     selected = available
@@ -56,8 +65,6 @@ def set_choice(platform: str, title_id: str | int, mode: str, episodes: list[dic
     value = {"mode": mode, "latest_count": latest_count if mode == "latest" else None,
              "episode_nos": selected if mode == "selected" else [], "initial_cutoff": cutoff,
              "pending_initial": [n for n in selected if n not in owned], "completed_numbers": sorted(owned), "explicit": True}
-    with _lock:
-        repository.set_setting(_key(platform, title_id), json.dumps(value))
     return value
 
 
