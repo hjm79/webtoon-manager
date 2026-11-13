@@ -7,7 +7,7 @@ from pathlib import Path
 
 import aiohttp
 
-from app import comicinfo, cookie_health, download_pacing, download_roots, job_status, naver_api, repository
+from app import comicinfo, cookie_health, download_pacing, download_roots, job_status, naver_api, repository, subscription_scope, workflow_progress
 from app.config import Settings
 from app.cookie_loader import get_adult_cookies
 from app.downloader import download_single_episode
@@ -77,7 +77,12 @@ async def _plan_naver_download(
         await comicinfo.download_cover_image(session, webtoon_dir, info, settings.request_timeout_seconds)
     job_status.log_line("download", f"[{info.title_name}] ComicInfo.xml 갱신 / 커버 이미지 확인")
 
-    return _NaverDownloadPlan(info, cookies, webtoon_dir, [ep for ep in free_episodes if ep.episode_no > last_no])
+    choice = subscription_scope.get("naver", title_id)
+    allowed = subscription_scope.allowed_numbers("naver", title_id, [ep.episode_no for ep in free_episodes])
+    initial = set(choice["pending_initial"]) if allowed is not None else set()
+    pending = [ep for ep in free_episodes if (ep.episode_no > last_no or ep.episode_no in initial or (choice["mode"] == "all" and choice["explicit"]))
+               and (allowed is None or ep.episode_no in allowed)]
+    return _NaverDownloadPlan(info, cookies, webtoon_dir, pending)
 
 
 async def _download_pending_batches(
@@ -88,6 +93,7 @@ async def _download_pending_batches(
     너무 오래 걸리기 때문. 하나라도 실패하면 그 즉시 이 작품은 전부 멈추고(실패 이력/알림 목록에 기록) 다음 실행에서 재시도한다."""
     info, pending = plan.info, list(plan.pending)
     total_pending = len(pending)
+    workflow_progress.begin("naver", title_id, info.title_name, total_pending)
     job_status.log_line("download", f"[{info.title_name}] 새 회차 {total_pending}개 다운로드 시작")
 
     while pending:
@@ -96,6 +102,7 @@ async def _download_pending_batches(
         pending = pending[len(batch):]
 
         for episode in batch:
+            workflow_progress.episode(episode.episode_no)
             success, _episode_dir = await download_single_episode(
                 session=session,
                 title_id=title_id,
@@ -115,17 +122,34 @@ async def _download_pending_batches(
                     title_id, info.title_name, episode.episode_no, episode.subtitle, "failed", "이미지 URL 수집 또는 다운로드 오류"
                 )
                 failures.append({"title_name": info.title_name, "episode_no": episode.episode_no, "subtitle": episode.subtitle})
+                workflow_progress.fail(f"{episode.episode_no}화 다운로드 실패")
                 return  # 이 작품은 여기서 완전히 중단 — 배치 남았어도 더 안 받음
 
-            zip_episode_folders(plan.webtoon_dir)
-            repository.update_last_downloaded_no(title_id, episode.episode_no)
+            options = {}
+            if subscription_scope.get("naver", title_id)["explicit"]:
+                options["preserve_numbers"] = True
+            if _episode_dir is not None:
+                options["only_episode_dir"] = Path(_episode_dir)
+            created = zip_episode_folders(plan.webtoon_dir, **options)
+            if created is not None and not created:
+                repository.add_episode_history(title_id, info.title_name, episode.episode_no, episode.subtitle,
+                                               "failed", "회차 ZIP 저장 실패")
+                failures.append({"title_name": info.title_name, "episode_no": episode.episode_no, "subtitle": "회차 ZIP 저장 실패"})
+                workflow_progress.fail(f"{episode.episode_no}화 ZIP 저장 실패")
+                return
+            current = repository.get(title_id)
+            repository.update_last_downloaded_no(title_id, max(current.last_downloaded_no, episode.episode_no))
+            subscription_scope.completed("naver", title_id, episode.episode_no)
+            workflow_progress.downloaded()
             repository.add_episode_history(title_id, info.title_name, episode.episode_no, episode.subtitle, "success")
             job_status.log_line("download", f"[{info.title_name}] {episode.episode_no}화 완료 (압축 후 폴더 삭제)")
             await asyncio.sleep(settings.delay_seconds)
 
         if pending:
             job_status.log_line("download", f"[{info.title_name}] {cap}화 받음, 남은 {len(pending)}화는 {rest_minutes:g}분 쉬었다가 이어받기")
+            workflow_progress.resting(rest_minutes * 60)
             await asyncio.sleep(rest_minutes * 60)
+    workflow_progress.finish()
 
 
 async def _download_new_episodes_for_one(
@@ -138,7 +162,13 @@ async def _download_new_episodes_for_one(
     webtoon = repository.get(title_id)
     if webtoon is None or webtoon.status != repository.STATUS_ACTIVE:
         return
+    workflow_progress.begin("naver", title_id, webtoon.title, 0)
     plan = await _plan_naver_download(session, settings, webtoon, adult_tracker)
-    if plan is None or not plan.pending:
+    if plan is None:
+        workflow_progress.fail("작품 정보·회차 목록·인증을 확인해주세요.")
+        failures.append({"title_name": webtoon.title, "episode_no": None, "subtitle": "작품 정보·회차 목록·인증 확인 필요"})
+        return
+    if not plan.pending:
+        workflow_progress.finish()
         return
     await _download_pending_batches(session, settings, title_id, plan, failures)

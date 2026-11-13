@@ -6,7 +6,7 @@ import logging
 
 import aiohttp
 
-from app import cookie_health, daily_plus, job_status, repository, retention, waitfree_sync
+from app import cookie_health, daily_plus, job_status, repository, retention, waitfree_sync, workflow_progress
 from app.config import get_settings
 
 from app.scheduler.kakao_download import (
@@ -26,6 +26,49 @@ _DOWNLOAD_TARGET_PLATFORMS = {"naver": {"naver"}, "kakao": {"kakao"}, "both": {"
 
 
 _download_claimed_platforms: set[str] = set()  # 지금 실행 중이거나 순서를 기다리는 실행이 맡은 플랫폼
+_single_title_tasks: set[asyncio.Task] = set()
+
+
+def download_busy() -> bool:
+    return bool(_download_claimed_platforms) or _download_job_lock.locked() or any(
+        job_status.snapshot()[name]["status"] == "running" for name in ("manual",)
+    )
+
+
+def reserve_title_download(platform: str) -> None:
+    from app import kakao_page_download
+
+    if download_busy() or kakao_page_download.download_lock.locked():
+        raise ValueError("다른 다운로드가 실행 중입니다. 완료 후 다시 시도해주세요.")
+    _download_claimed_platforms.add(platform)
+
+
+def release_title_download(platform: str) -> None:
+    _download_claimed_platforms.discard(platform)
+
+
+def enqueue_reserved_title(platform: str, title_id: str, title: str) -> None:
+    workflow_progress.begin(platform, title_id, title, 0)
+    workflow_progress.update(state="queued")
+
+    async def run_one():
+        try:
+            async with _download_job_lock:
+                await _run_download_job_impl({platform}, only_title=title_id)
+        except asyncio.CancelledError:
+            workflow_progress.fail("다운로드가 중단되었습니다. 다음 실행에서 이어받습니다.")
+            job_status.finish("download", success=False)
+            raise
+        except Exception:
+            log.exception("한 작품 다운로드 처리 중 오류")
+            workflow_progress.fail("다운로드 처리 중 오류가 발생했습니다. 실행 이력을 확인해주세요.")
+            job_status.finish("download", success=False)
+        finally:
+            release_title_download(platform)
+
+    task = asyncio.create_task(run_one())
+    _single_title_tasks.add(task)
+    task.add_done_callback(_single_title_tasks.discard)
 
 
 async def run_download_job(target: str = "naver", scheduled: bool = False) -> None:
@@ -36,6 +79,8 @@ async def run_download_job(target: str = "naver", scheduled: bool = False) -> No
     scheduled: 정기 스케줄이 부른 것(True)이면 "기다무 충전 시각에 맞춰 받기"가 켜져 있을 때 충전 시각 전인 카카오 기다무 작품을 건너뛴다. 수동 실행은 항상 전부 확인한다."""
     wanted = set(_DOWNLOAD_TARGET_PLATFORMS.get(target, {"naver"}))
     platforms = wanted - _download_claimed_platforms
+    if job_status.snapshot()["manual"]["status"] == "running":
+        platforms.discard("naver")
     if not platforms:
         job_status.log_line("download", "이미 실행 중이거나 대기 중이라 건너뜁니다 (중복 실행 방지)")
         return
@@ -47,12 +92,15 @@ async def run_download_job(target: str = "naver", scheduled: bool = False) -> No
         _download_claimed_platforms.difference_update(platforms)
 
 
-async def _run_download_job_impl(platforms: set[str], scheduled: bool = False, partial: bool = False) -> None:
+async def _run_download_job_impl(platforms: set[str], scheduled: bool = False, partial: bool = False,
+                                 only_title: str | None = None) -> None:
     """partial: 일부 플랫폼은 이미 다른 실행이 맡고 있어서 나머지만 실행하는 경우 — 안내 줄은 job_status.start가 로그를 비운 뒤에 남겨야 사라지지 않는다."""
     settings = get_settings()
     # 신작 스캔이 자동으로 구독 추가해 둔 매일+ 작품은 받지 않는다 — 저장해 둔 매일+ 목록으로(네트워크 없이) 먼저 제외됨으로 정리한다
     auto_excluded = repository.exclude_auto_added_titles(daily_plus.cached_ids()) if "naver" in platforms else []
     active_webtoons = repository.list_by_status(repository.STATUS_ACTIVE) if "naver" in platforms else []
+    if only_title is not None:
+        active_webtoons = [w for w in active_webtoons if w.title_id == only_title]
 
     job_status.start("download")
     if partial:
@@ -77,6 +125,7 @@ async def _run_download_job_impl(platforms: set[str], scheduled: bool = False, p
                 log.error("웹툰(titleId=%s) 다운로드 처리 중 예외 — 다음 웹툰으로 진행: %s", webtoon.title_id, e)
                 job_status.log_line("download", f"[{webtoon.title}] 처리 중 오류: {e}")
                 failures.append({"title_name": webtoon.title, "episode_no": None, "subtitle": str(e)})
+                workflow_progress.fail("작품 다운로드 처리 중 오류가 발생했습니다.")
             # 새 회차가 없어서 그냥 넘어가는 웹툰들 사이에도 딜레이를 둔다 — 예전엔 이
             # 경우에만 딜레이가 전혀 없어서, 구독 웹툰이 많으면 순식간에 연속 요청이
             # 나가는 문제가 있었다(실제로 코드 확인 후 발견됨).
@@ -89,7 +138,12 @@ async def _run_download_job_impl(platforms: set[str], scheduled: bool = False, p
 
         try:
             if "kakao" in platforms:
-                await _download_kakao_subscriptions(settings, failures, skip_waiting=scheduled and waitfree_sync.is_enabled())
+                if only_title is None:
+                    await _download_kakao_subscriptions(settings, failures, skip_waiting=scheduled and waitfree_sync.is_enabled())
+                else:
+                    selected = [w for w in repository.list_kakao_webtoons_by_status(repository.STATUS_ACTIVE)
+                                if str(w["title_id"]) == only_title]
+                    await _download_kakao_subscriptions(settings, failures, only=selected)
         except Exception as e:
             had_error = True
             log.error("카카오페이지 자동 다운로드 중 예외: %s", e)
@@ -110,7 +164,7 @@ async def _run_download_job_impl(platforms: set[str], scheduled: bool = False, p
         log.error("실행 이력 보관기간 정리 중 예외: %s", e)
 
     job_status.log_line("download", "다운로드 스캔 종료")
-    job_status.finish("download", success=not had_error)
+    job_status.finish("download", success=not had_error and not failures)
 
 
 def _cleanup_old_job_history() -> None:

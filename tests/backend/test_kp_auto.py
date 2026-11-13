@@ -18,6 +18,7 @@ class FakeResp:
         self.status, self._d, self._b = status, data, body; self.headers = {"Content-Type": ctype}; self.cookies = SimpleCookie()
     async def json(self, content_type=None): return self._d
     async def read(self): return self._b
+    async def text(self): return ""
     async def __aenter__(self): return self
     async def __aexit__(self, *a): return False
 def eps_for(spec, series_title):  # [(order, 부제목, free)] — 실제처럼 회차 제목 앞에 작품 제목이 붙는다
@@ -90,7 +91,7 @@ async def main():
     assert len(names("작품C")) == 25 and names("작품C")[0] == "0001_1화.zip" and names("작품C")[-1] == "0025_25화.zip"
     assert names("작품D") == [] and not list((KROOT / "작품D").glob("*.part")) if (KROOT / "작품D").exists() else True
     assert not (KROOT / "제외작").exists() and not (KROOT / "작품E").exists()                                   # 구독 중이 아닌 것/목록 실패는 폴더도 안 만듦
-    assert [f["title_name"] for f in failures] == ["작품D"] and failures[0]["episode_no"] == 1                   # 실패는 격리되고 목록에 담김
+    assert [f["title_name"] for f in failures] == ["작품D", "작품E"] and failures[0]["episode_no"] == 1  # 회차 목록 실패도 실패로 분류
     rows, total = repository.list_episode_history(status="success"); done = {(r["title_name"], r["episode_no"]) for r in rows}
     assert ("작품A", 3) in done and ("작품B", 3) in done and ("작품B", 5) in done and ("작품C", 25) in done and ("작품B", 2) not in done and ("작품B", 4) not in done and total == 3 + 2 + 25
     rows, total = repository.list_episode_history(status="failed"); assert total == 1 and rows[0]["title_name"] == "작품D"
@@ -100,7 +101,7 @@ async def main():
     # 5. 다시 실행 — 남은 것만
     S["fail_images_for"] = set(); failures = []
     await scheduler._download_kakao_subscriptions(settings, failures)
-    assert len(names("작품C")) == 25 and names("작품D") == ["0001_1화.zip", "0002_2화.zip"] and names("작품A")[-1] == "0003_3화.zip" and failures == []
+    assert len(names("작품C")) == 25 and names("작품D") == ["0001_1화.zip", "0002_2화.zip"] and names("작품A")[-1] == "0003_3화.zip" and [f["title_name"] for f in failures] == ["작품E"]
     await scheduler._download_kakao_subscriptions(settings, failures)
     assert len(list(KROOT.rglob("*.zip"))) == 3 + 3 + 25 + 2                                                    # 더 받을 게 없으면 그대로(작품B는 표식 + 3 + 5)
     print("3) 재실행 OK (남은 회차만 이어받고, 다 받았으면 새로 안 받음)")

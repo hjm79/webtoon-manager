@@ -73,36 +73,21 @@ function reconcileGrid(grid, rows, context, allRows) {
   return built;
 }
 
-// 전체목록의 마지막 줄 — 모든 카드에 "분석" 버튼이 있다. 뷰어 버튼이 **보이는** 카드는 뷰어 아이콘 바로 옆(같은 줄)에 작게, 뷰어 버튼이 없거나 숨겨진(뷰어에 없는 작품) 카드는
-// 마지막 텍스트 버튼(목록제외/제외됨으로) 아래에 같은 크기의 버튼으로 붙인다. 그래서 모든 카드가 항상 3줄(구독/구독해제, 목록제외/제외됨으로, 뷰어+분석 또는 분석)이라 카드 아래쪽 정렬에서
-// 버튼이 어긋나지 않고, 줄을 맞추려고 보이지 않는 자리를 끼워 넣을 필요도 없다. 카드를 그리거나 뷰어 확인이 끝날 때마다(아이콘이 숨겨질 수 있다) 다시 맞춘다.
+// 모든 카드의 마지막 줄에 읽기와 회차 분석을 함께 둔다.
 function syncCardActionRows(grid) {
-  const isShown = (button) => button.style.visibility !== "hidden";
   for (const card of grid.querySelectorAll(":scope > .webtoon-card")) {
     const actions = card.querySelector(".webtoon-card-actions");
     const analyze = actions.querySelector("[data-analyze]");
-    if (!analyze) continue;
-    const icon = actions.querySelector("[data-viewer-check-title]");
+    const reader = actions.querySelector("[data-viewer-check-title]");
+    if (!reader || !analyze) continue;
     let row = actions.querySelector(".card-viewer-row");
-    if (icon && isShown(icon)) {
-      if (!row) {
-        row = document.createElement("div");
-        row.className = "card-viewer-row";
-        actions.insertBefore(row, icon);
-      }
-      icon.style.display = "";
-      row.appendChild(icon);
-      row.appendChild(analyze);
-      analyze.classList.add("analyze-inline");
-    } else {
-      analyze.classList.remove("analyze-inline");
-      if (icon) {
-        icon.style.display = "none"; // 뷰어에 없는 작품의 아이콘은 줄을 차지하지 않는다
-        actions.appendChild(icon);
-      }
-      actions.appendChild(analyze);
-      if (row) row.remove();
+    if (!row) {
+      row = document.createElement("div");
+      row.className = "card-viewer-row";
+      actions.appendChild(row);
     }
+    row.append(reader, analyze);
+    analyze.classList.add("analyze-inline");
   }
 }
 
@@ -162,12 +147,6 @@ function buildWebtoonCard(w, context) {
       if (w.status === "active") {
         actions.appendChild(makeButton("구독해제", () => webtoonListAction(w, "unsubscribe", "kakao", context)));
         actions.appendChild(makeButton("제외됨으로", () => excludeSubscribedWebtoon(w, "kakao", context)));
-        if (webtoonServerConfigured) {
-          const viewerBtn = makeIconButton(READER_ICON_SVG, "뷰어에서 보기", () => openInWebtoonServer(w.title, "kakao"));
-          viewerBtn.dataset.viewerCheckTitle = w.title; // 렌더링 뒤에 실제로 뷰어에 있는지 확인해서 없으면 지운다
-          viewerBtn.dataset.viewerCheckPlatform = "kakao";
-          actions.appendChild(viewerBtn);
-        }
       } else {
         actions.appendChild(makeButton("구독", () => webtoonListAction(w, "subscribe", "kakao", context)));
         actions.appendChild(makeButton("목록제외", () => webtoonListAction(w, "exclude", "kakao", context)));
@@ -175,12 +154,6 @@ function buildWebtoonCard(w, context) {
     } else if (w.status === "active") {
       actions.appendChild(makeButton("구독해제", () => webtoonListAction(w, "unsubscribe", "naver", context)));
       actions.appendChild(makeButton("제외됨으로", () => excludeSubscribedWebtoon(w, "naver", context)));
-      if (webtoonServerConfigured) {
-        const viewerBtn = makeIconButton(READER_ICON_SVG, "뷰어에서 보기", () => openInWebtoonServer(w.title, "naver"));
-        viewerBtn.dataset.viewerCheckTitle = w.title;
-        viewerBtn.dataset.viewerCheckPlatform = "naver";
-        actions.appendChild(viewerBtn);
-      }
     } else {
       actions.appendChild(makeButton("구독", () => webtoonListAction(w, "subscribe", "naver", context)));
       actions.appendChild(makeButton("목록제외", () => webtoonListAction(w, "exclude", "naver", context)));
@@ -202,6 +175,7 @@ function buildWebtoonCard(w, context) {
     }
   }
 
+  actions.appendChild(makeWorkflowReadButton(w.title, platform));
   if (context === "naver-list") {
     const analyzeBtn = makeButton("분석", () => openManualAnalysis(platform, w.title_id)); // 수동 다운로드의 분석 화면으로(자리는 syncCardActionRows가 맞춘다)
     analyzeBtn.dataset.analyze = "1";

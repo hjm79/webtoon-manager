@@ -1,0 +1,4 @@
+ARG BASE_IMAGE=ghcr.io/murianwind/webtoon-manager@sha256:4b05ff57dd020f0e38ecf74c2154af1e27d29dd3537b49ce6cfeb2eb82467a7c
+FROM ${BASE_IMAGE}
+COPY app /app/app
+COPY README.md /app/README.md

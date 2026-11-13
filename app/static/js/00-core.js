@@ -11,7 +11,7 @@ const SCHEDULE_JOB_IDS = ["discovery_job", "download_job", "archive_job"];
 
 // 구독/구독해제/제외/목록으로/삭제처럼 웹툰의 상태를 바꾸는 요청 — 성공하면 전체목록/구독해제/제외됨 목록 캐시를 모두 무효화한다
 // (각 탭이 60초 동안 다시 받지 않도록 캐시하므로, 다른 탭에서 바꾼 결과가 안 보이는 일이 없게 여기서 한 번에 처리한다).
-const LIST_STATE_PATHS = ["/api/webtoons", "/api/kakao-webtoons", "/api/naver-list"];
+const LIST_STATE_PATHS = ["/api/webtoons", "/api/kakao-webtoons", "/api/naver-list", "/api/workflow/subscribe"];
 
 function changesWebtoonState(path, method) {
   if (method === "GET") return false;
@@ -101,18 +101,6 @@ function makeButton(label, onClick) {
   return btn;
 }
 
-function makeIconButton(svgMarkup, title, onClick) {
-  const btn = document.createElement("button");
-  btn.className = "icon-btn";
-  btn.title = title;
-  btn.setAttribute("aria-label", title);
-  btn.innerHTML = svgMarkup;
-  btn.addEventListener("click", onClick);
-  return btn;
-}
-
-const READER_ICON_SVG = `<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z"/><path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z"/></svg>`;
-
 function naverUrl(titleId) {
   return `https://comic.naver.com/webtoon/list?titleId=${titleId}`;
 }
@@ -121,9 +109,7 @@ function kakaoContentUrl(titleId) {
   return `https://page.kakao.com/content/${titleId}`;
 }
 
-// 웹툰 뷰어 서버 주소가 설정되어 있는지 — 있으면 구독중 카드에 "뷰어에서 보기" 아이콘을 띄운다.
-// 페이지 열릴 때 한 번만 확인하고(설정 탭에서 바꾸면 새로고침해야 반영됨), 카드마다
-// 매번 물어보진 않는다.
+// 뷰어 연결 설정이 바뀌면 카드 재사용 키도 갱신한다. 실제 읽기 준비 상태는 별도로 조회한다.
 let webtoonServerConfigured = false;
 apiCall("/api/settings/webtoon-server")
   .then((data) => { webtoonServerConfigured = Boolean(data.webtoon_server_url); })
@@ -139,21 +125,6 @@ function setKakaoWebtoonsEnabled(enabled) {
 apiCall("/api/settings/kakao-webtoons-enabled")
   .then((data) => setKakaoWebtoonsEnabled(data.enabled))
   .catch(() => {});
-
-async function openInWebtoonServer(title, platform) {
-  try {
-    const data = await apiCall(
-      `/api/webtoon-server/lookup?title=${encodeURIComponent(title)}&platform=${encodeURIComponent(platform || "naver")}`
-    );
-    if (data.url) {
-      window.open(data.url, "_blank", "noopener");
-    } else {
-      alert("뷰어 서버에서 이 작품을 찾지 못했습니다.");
-    }
-  } catch (e) {
-    alert(`뷰어 서버 조회 실패: ${e.message}`);
-  }
-}
 
 function badgesHtml(w) {
   const parts = [];

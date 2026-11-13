@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 
 import aiohttp
 
-from app import discord_bot, discord_notify, download_pacing, download_roots, job_status, kakao_page_auth, kakao_page_download, repository, waitfree_sync
+from app import discord_bot, discord_notify, download_pacing, download_roots, job_status, kakao_page_auth, kakao_page_download, repository, waitfree_sync, workflow_progress
 
 log = logging.getLogger(__name__)
 
@@ -18,6 +18,13 @@ _KAKAO_UNLIMITED_EPISODES = 100_000
 
 # 비정상 응답(계속 "받을 게 남았다"고만 하는 경우)으로 한 작품에서 무한히 도는 걸 막는 안전장치 — 상한 10이면 2000회차까지.
 _KAKAO_MAX_BATCHES_PER_TITLE = 200
+
+
+def _authentication_failure(subscribed: list[dict], failures: list[dict], message: str) -> None:
+    for webtoon in subscribed:
+        failures.append({"title_name": webtoon["title"], "episode_no": None, "subtitle": message})
+        workflow_progress.begin("kakao", webtoon["title_id"], webtoon["title"], 0)
+        workflow_progress.fail(message)
 
 
 def _kakao_remaining_free(result) -> int:
@@ -36,9 +43,12 @@ def _record_kakao_batch(webtoon: dict, result, failures: list[dict]) -> None:
         repository.add_episode_history(series_id, result.title, number, subtitle, "success", platform="kakao")
     if result.error:
         job_status.log_line("download", f"[{title}] {result.error}")
+        failures.append({"title_name": title, "episode_no": None, "subtitle": result.error})
+        workflow_progress.fail("카카오페이지 회차를 불러오지 못했습니다.")
     elif result.failed is not None:
         repository.add_episode_history(series_id, result.title, result.failed, "", "failed", "이미지 받기 실패", platform="kakao")
         failures.append({"title_name": result.title, "episode_no": result.failed, "subtitle": "이미지 받기 실패"})
+        workflow_progress.fail(f"{result.failed}화 이미지 받기 실패")
     elif not result.downloaded and result.plan.marker is not None and result.plan.marker.warning:
         job_status.log_line("download", f"[{title}] ⚠ 폴더의 파일(표식)이 사이트 회차와 맞지 않아 번호대로 이어받았습니다")
 
@@ -49,6 +59,7 @@ async def _download_kakao_title(client, settings, webtoon: dict, root: str, fail
     중단되면 None) — 완결 판정은 이 결과로 한다. use_rental_tickets면 기다무로 못 여는 회차를 이 작품의 보유 대여권으로 열고, 배치마다
     쓴 내용을 session의 웹훅으로 알린다(여러 배치에 걸쳐 쓰면 배치마다 한 번씩)."""
     title, series_id = webtoon["title"], webtoon["title_id"]
+    workflow_progress.begin("kakao", series_id, title, 0)
     result = None
     for batch in range(1, _KAKAO_MAX_BATCHES_PER_TITLE + 1):
         cap, rest_minutes = download_pacing.limits(settings)  # 설정 화면에서 바꾼 값이 있으면 그 값(배치마다 다시 읽어서 재시작 없이 적용)
@@ -63,6 +74,7 @@ async def _download_kakao_title(client, settings, webtoon: dict, root: str, fail
             log.error("카카오페이지 웹툰(series_id=%s) 다운로드 중 예외 — 다음으로 진행: %s", series_id, e)
             job_status.log_line("download", f"[{title}] 처리 중 오류: {e}")
             failures.append({"title_name": title, "episode_no": None, "subtitle": str(e)})
+            workflow_progress.fail("카카오페이지 다운로드 처리 중 오류가 발생했습니다.")
             return None
         _record_kakao_batch(webtoon, result, failures)
         if session is not None:
@@ -74,7 +86,9 @@ async def _download_kakao_title(client, settings, webtoon: dict, root: str, fail
             job_status.log_line("download", f"[{title}] 한 번에 받을 배치가 너무 많아 여기서 멈춥니다(남은 {remaining}화는 다음 실행에서)")
             break
         job_status.log_line("download", f"[{title}] {len(result.downloaded)}화 받음, 남은 {remaining}화는 {rest_minutes:g}분 쉬었다가 이어받기")
+        workflow_progress.resting(rest_minutes * 60)
         await asyncio.sleep(rest_minutes * 60)
+    workflow_progress.finish()
     return result
 
 
@@ -157,12 +171,14 @@ async def _download_kakao_subscriptions(
             client = kakao_page_download.client_from_saved_cookies(session, settings.request_timeout_seconds)
             if client is None:
                 job_status.log_line("download", "카카오페이지 로그인 쿠키가 없어서 건너뜁니다(설정에서 쿠키를 저장해주세요)")
+                _authentication_failure(subscribed, failures, "카카오페이지 로그인 쿠키가 필요합니다.")
                 return []
             logged_in = await client.check_login()
             status = kakao_page_auth.cookie_status(kakao_page_auth.load_cookies())
             await kakao_page_auth.notify_if_needed(session, logged_in, status["days_left"])
-            if logged_in is False:
+            if logged_in is not True:
                 job_status.log_line("download", "카카오페이지 로그인이 풀려 있어서 건너뜁니다(쿠키를 다시 붙여넣어 주세요)")
+                _authentication_failure(subscribed, failures, "카카오페이지 로그인 확인이 필요합니다.")
                 return []
 
             use_rental_tickets = repository.is_kakao_rental_ticket_auto_use_enabled()

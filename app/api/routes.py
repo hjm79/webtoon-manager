@@ -15,6 +15,8 @@ from app.api import (
     schedule,
     system,
     webtoons,
+    workflow,
+    reader,
 )
 
 router = APIRouter(prefix="/api")
@@ -32,5 +34,7 @@ for _module in (
     system,
     history,
     archive,
+    workflow,
+    reader,
 ):
     router.include_router(_module.router)

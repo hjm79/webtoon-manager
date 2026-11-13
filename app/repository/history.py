@@ -76,6 +76,12 @@ def delete_job_history_older_than(days: int) -> int:
 
 # ── episode_history (회차 단위 다운로드 이력) ──────────────────────
 
+def downloaded_episode_numbers(title_id: str, platform: str = "naver") -> set[int]:
+    with read_lock() as conn:
+        rows = conn.execute("SELECT DISTINCT episode_no FROM episode_history WHERE title_id=? AND platform=? AND status='success'",
+                            (title_id, platform)).fetchall()
+    return {row["episode_no"] for row in rows if row["episode_no"] is not None}
+
 def add_episode_history(
     title_id: str, title_name: str, episode_no: int, subtitle: str, status: str, error_msg: str = "",
     platform: str = "naver",

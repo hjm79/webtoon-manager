@@ -191,49 +191,35 @@ function renderNaverList() {
 
 let naverListBulkSelectStartScrollY = null;
 
-// 뷰어에 없는 작품의 아이콘 — 지우면 카드마다 버튼 줄 수가 달라져서 "구독해제"가 위아래로 어긋난다. 자리는 그대로 두고 눈에 안 보이게만 한다.
-function hideViewerIcon(button) {
-  button.style.visibility = "hidden";
-  button.disabled = true;
-  button.tabIndex = -1;
-  button.setAttribute("aria-hidden", "true");
-}
-
+// 읽기 버튼을 숨기지 않고 현재 준비 상태를 설명한다.
 async function pruneMissingViewerIcons() {
-  // "뷰어에서 보기" 아이콘은 구독 중이면 무조건 붙는데, 실제로 뷰어 라이브러리에
-  // 없는 작품도 있다(특히 카카오는 구독=다운로드가 아니라서 더 흔함) — 렌더링
-  // 자체를 그 확인 때문에 늦추지 않고, 그려진 뒤 백그라운드로 하나씩 확인해서
-  // 없는 것은 자리만 남기고 숨긴다. 뷰어가 로컬망에 있다는 전제라 확인 자체는 빠르다.
-  // 네이버/카카오는 폴더명 만드는 도구가 서로 달라서 특수문자 치환 규칙도 다르므로
-  // (예: 콜론 -> 네이버는 전각 콜론, 카카오는 밑줄), 같은 제목이라도 플랫폼별로
-  // 따로 조회해야 한다 — (제목, 플랫폼) 조합 단위로 묶는다.
   const buttons = [...document.querySelectorAll("[data-viewer-check-title]")];
-  const seen = new Map(); // "title\u0000platform" -> {title, platform}
-  for (const b of buttons) {
-    const platform = b.dataset.viewerCheckPlatform || "naver";
-    const key = `${b.dataset.viewerCheckTitle}\u0000${platform}`;
-    if (!seen.has(key)) seen.set(key, { title: b.dataset.viewerCheckTitle, platform });
+  const seen = new Map();
+  for (const button of buttons) {
+    const title = button.dataset.viewerCheckTitle;
+    const platform = button.dataset.viewerCheckPlatform || "naver";
+    const key = `${title}\u0000${platform}`;
+    if (!seen.has(key)) seen.set(key, { title, platform, buttons: [] });
+    seen.get(key).buttons.push(button);
   }
-  await Promise.all(
-    [...seen.values()].map(async ({ title, platform }) => {
+  const tasks = [...seen.values()];
+  async function worker() {
+    while (tasks.length) {
+      const { title, platform, buttons: matching } = tasks.shift();
+      let data;
       try {
-        const data = await apiCall(
-          `/api/webtoon-server/lookup?title=${encodeURIComponent(title)}&platform=${encodeURIComponent(platform)}`
-        );
-        if (!data.url) {
-          document
-            .querySelectorAll(
-              `[data-viewer-check-title="${CSS.escape(title)}"][data-viewer-check-platform="${CSS.escape(platform)}"]`
-            )
-            .forEach(hideViewerIcon);
-        }
-      } catch (e) {
-        // 조회 자체가 실패하면(네트워크 문제 등) 아이콘은 그냥 둔다 — 눌렀을 때
-        // 다시 시도되고, 여기서 실패했다고 성급하게 지우면 안 된다.
+        data = await apiCall(`/api/reader/status?title=${encodeURIComponent(title)}&platform=${encodeURIComponent(platform)}`);
+      } catch (e) { data = { status: "error", message: e.message }; }
+      for (const button of matching) {
+        const labels = { not_downloaded: "읽기 · 아직 받은 회차 없음", not_configured: "읽기 · 뷰어 미설정", error: "읽기 · 연결 확인 필요" };
+        button.textContent = labels[data.status] || "읽기";
+        button.dataset.readerStatus = data.status || "error";
+        button.title = data.status === "ready" ? "다운로드한 회차를 관리기 안에서 읽기" : workflowReaderMessage(data.status, data.message);
       }
-    })
-  );
-  syncCardActionRows(document.getElementById("naver-list-grid")); // 뷰어에 있는 작품이 하나도 없으면 줄이 접힌다
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(4, tasks.length) }, worker));
+  syncCardActionRows(document.getElementById("naver-list-grid"));
 }
 
 function updateNaverListBulkBar() {
@@ -299,7 +285,9 @@ async function webtoonListAction(webtoon, action, platform, context, skipRender)
     ? { title, thumbnail_url: thumbnailUrl || "", author_summary: authorSummary || "" }
     : { title, thumbnail_url: thumbnailUrl || "" };
   try {
-    const updated = await apiCall(_webtoonListActionUrl(platform, titleId, action), {
+    const chosen = action === "subscribe" ? await chooseSubscriptionScope({ ...webtoon, platform }) : null;
+    if (action === "subscribe" && !chosen) return;
+    const updated = chosen ? chosen.subscription : await apiCall(_webtoonListActionUrl(platform, titleId, action), {
       method: "POST",
       ...(needsBody ? { body: JSON.stringify(body) } : {}),
     });

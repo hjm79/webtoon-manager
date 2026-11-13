@@ -41,7 +41,8 @@ def _next_zip_number(parent_dir: Path, folder_num: int) -> int:
     return folder_num
 
 
-def zip_episode_folders(webtoon_dir: Path) -> list[str]:
+def zip_episode_folders(webtoon_dir: Path, *, preserve_numbers: bool = False,
+                        only_episode_dir: Path | None = None) -> list[str]:
     """
     webtoon_dir 아래의 '[번호] 부제목' 형식 회차 폴더들을 각각 zip으로 압축하고
     원본 폴더는 삭제한다. 생성된 zip 파일명 목록을 반환한다.
@@ -55,9 +56,14 @@ def zip_episode_folders(webtoon_dir: Path) -> list[str]:
     # 어긋나는 경우가 있어서, 폴더 생성(=다운로드) 순서를 실제 순서로 신뢰하고
     # os.walk가 나열하는 순서 그대로 처리한다 (change.py 원본 동작과 동일).
     episode_dirs: list[Path] = []
-    for dirpath, dirnames, _files in os.walk(webtoon_dir):
-        for dirname in dirnames:
-            episode_dirs.append(Path(dirpath) / dirname)
+    if only_episode_dir is not None:
+        if only_episode_dir.parent.resolve() != webtoon_dir.resolve() or not only_episode_dir.is_dir():
+            return []
+        episode_dirs.append(only_episode_dir)
+    else:
+        for dirpath, dirnames, _files in os.walk(webtoon_dir):
+            for dirname in dirnames:
+                episode_dirs.append(Path(dirpath) / dirname)
 
     for episode_dir in episode_dirs:
         match = _BRACKET_NUMBER_RE.search(episode_dir.name)
@@ -66,7 +72,7 @@ def zip_episode_folders(webtoon_dir: Path) -> list[str]:
 
         parent_dir = episode_dir.parent
         folder_num = int(match.group(1))
-        assigned_num = _next_zip_number(parent_dir, folder_num)
+        assigned_num = folder_num if preserve_numbers else _next_zip_number(parent_dir, folder_num)
         number_prefix = str(assigned_num).zfill(3)
 
         parent_dir_label = _clean_name(parent_dir.name)
@@ -78,18 +84,23 @@ def zip_episode_folders(webtoon_dir: Path) -> list[str]:
 
         zip_filename = f"{number_prefix} {parent_dir_label} {subtitle_part}.zip"
         zip_path = parent_dir / zip_filename
+        part_path = parent_dir / (zip_filename + ".part")
 
         try:
-            with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
+            with zipfile.ZipFile(part_path, "w", zipfile.ZIP_DEFLATED) as zf:
                 for root, _dirs, files in os.walk(episode_dir):
                     for file_name in files:
                         file_path = Path(root) / file_name
                         zf.write(file_path, file_path.relative_to(episode_dir))
-
+            with zipfile.ZipFile(part_path) as zf:
+                if not zf.namelist():
+                    raise ValueError("압축할 회차 이미지가 없습니다.")
+            os.replace(part_path, zip_path)
             shutil.rmtree(episode_dir)
             created_zip_names.append(zip_filename)
             log.info("압축 완료: %s", zip_filename)
         except Exception as e:
+            part_path.unlink(missing_ok=True)
             log.error("압축 중 오류 발생 (%s): %s", episode_dir, e)
 
     return created_zip_names

@@ -103,7 +103,13 @@ async def manual_download_analyze(title_id: str):
 
 @router.post("/manual-download/run")
 async def manual_download_run(payload: ManualDownloadIn):
+    from app.scheduler.download_job import download_busy
+
+    if download_busy():
+        raise HTTPException(status_code=409, detail="다른 다운로드가 실행 중입니다. 완료 후 다시 시도해주세요.")
     settings = get_settings()
+    from app import job_status
+    job_status.start("manual")
     asyncio.create_task(manual_download.download_selected(payload.title_id, payload.episode_nos, settings))
     return {"status": "started"}
 

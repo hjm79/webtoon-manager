@@ -122,7 +122,11 @@ for (const status of ["unsubscribed", "excluded"]) {
 
 async function subscriptionAction(titleId, action, currentTab) {
   try {
-    await apiCall(`/api/webtoons/${titleId}/${action}`, { method: "POST" });
+    if (action === "subscribe") {
+      const item = (subscriptionCache[currentTab] || []).find((entry) => String(entry.title_id) === String(titleId));
+      if (!item) throw new Error("작품 정보를 다시 불러온 뒤 구독해주세요.");
+      if (!await chooseSubscriptionScope({ ...item, platform: "naver" })) return;
+    } else await apiCall(`/api/webtoons/${titleId}/${action}`, { method: "POST" });
     const listEl = document.getElementById(`${currentTab}-list`);
     const card = listEl.querySelector(`.webtoon-card[data-title-id="${titleId}"]`);
     card?.remove();

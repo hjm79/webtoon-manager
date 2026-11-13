@@ -26,10 +26,30 @@
     <button class="main-tab" data-page="help">도움말</button>
   </nav>
 
+  <aside id="workflow-overview" class="workflow-overview" aria-label="다운로드 현황" aria-live="polite">
+    <div><strong>다운로드 현황</strong> <span id="workflow-state">확인 중…</span></div>
+    <div id="workflow-next-run" class="hint">다음 예약을 확인하고 있습니다.</div>
+    <div id="workflow-progress-detail"></div>
+    <progress id="workflow-progress" class="hidden" value="0" max="1" aria-label="회차 다운로드 진행률"></progress>
+    <div id="workflow-subscriptions" class="workflow-subscriptions"></div>
+    <button id="workflow-refresh" type="button">현황 새로고침</button>
+  </aside>
+
   <!-- 웹툰 전체목록 (네이버+카카오) -->
   <section id="page-naver-list" class="page">
+    <section class="workflow-search" aria-labelledby="workflow-search-heading">
+      <h2 id="workflow-search-heading">작품 통합 검색</h2>
+      <p class="hint">요일별 목록에 없는 휴재·완결 작품도 제목으로 찾아 구독할 수 있습니다.</p>
+      <form id="workflow-search-form" class="toolbar">
+        <input id="workflow-search-query" class="clearable" type="search" placeholder="작품 제목 또는 작가" aria-label="작품 통합 검색어" required />
+        <select id="workflow-search-platform" aria-label="통합 검색 플랫폼"><option value="all">플랫폼 전체</option><option value="naver">네이버</option><option value="kakao">카카오페이지</option></select>
+        <button id="workflow-search-submit" type="submit">통합 검색</button>
+      </form>
+      <p id="workflow-search-status" role="status"></p>
+      <div id="workflow-search-results" class="webtoon-grid small"></div>
+    </section>
     <div class="toolbar toolbar-sticky list-toolbar">
-      <input id="naver-list-search" type="text" class="clearable" placeholder="제목/저자로 검색" />
+      <input id="naver-list-search" type="text" class="clearable" placeholder="불러온 요일별 목록 안에서 찾기" aria-label="요일별 목록 필터" />
       <button type="button" class="filter-toggle" aria-expanded="false" aria-controls="naver-list-filters"><span class="filter-toggle-label">필터</span><span class="filter-toggle-arrow">▾</span></button>
       <div class="list-filters" id="naver-list-filters">
       <select id="naver-list-platform-filter" class="hidden">
@@ -800,6 +820,32 @@
     </div>
   </section>
 
+  <dialog id="workflow-subscribe-dialog" class="workflow-dialog" aria-labelledby="workflow-subscribe-title">
+    <form id="workflow-subscribe-form">
+      <div class="workflow-dialog-head"><h2 id="workflow-subscribe-title">구독과 다운로드 범위</h2><button id="workflow-subscribe-close" type="button" aria-label="구독 설정 닫기">닫기</button></div>
+      <p id="workflow-subscribe-status" role="status"></p>
+      <fieldset id="workflow-scope-fields">
+        <legend>처음 받을 회차</legend>
+        <label><input type="radio" name="workflow-scope" value="latest" checked /> 최근 <input id="workflow-latest-count" type="number" min="1" max="1000" value="10" aria-label="최근 회차 수" />회차</label>
+        <label><input type="radio" name="workflow-scope" value="all" /> 전체 회차(현재·추후 받을 수 있는 회차)</label>
+        <label><input type="radio" name="workflow-scope" value="selected" /> 아래에서 회차 선택</label>
+        <label><input type="radio" name="workflow-scope" value="future" /> 현재 회차는 제외, 이후 새로 추가되는 회차만</label>
+      </fieldset>
+      <p id="workflow-scope-hint" class="hint">최근 회차·선택 회차·새 회차만 범위에서는 선택하지 않은 기존 회차를 잠금이 풀려도 자동으로 추가하지 않습니다. 이후 새로 추가되는 회차는 구독 예약에 따라 확인합니다.</p>
+      <div id="workflow-episode-picker" class="workflow-episode-picker hidden"></div>
+      <label class="checkbox-label"><input id="workflow-start-now" type="checkbox" /> 이 작품을 지금 다운로드 시작</label>
+      <p id="workflow-start-hint" class="hint">체크하지 않으면 다음 다운로드 예약에 등록합니다.</p>
+      <p id="workflow-subscribe-error" class="workflow-error" role="alert"></p>
+      <div class="workflow-dialog-actions"><button id="workflow-subscribe-submit" type="submit" disabled>선택한 범위로 구독</button><button id="workflow-subscribe-cancel" type="button">취소</button></div>
+    </form>
+  </dialog>
+
+  <dialog id="workflow-reader-dialog" class="workflow-reader-dialog" aria-labelledby="workflow-reader-title">
+    <div class="workflow-reader-head"><strong id="workflow-reader-title">웹툰 읽기</strong><a id="workflow-reader-external" target="_blank" rel="noopener" class="link-button hidden">별도 뷰어에서 열기</a><button id="workflow-reader-force-close" type="button" class="hidden">저장하지 않고 닫기</button><button id="workflow-reader-close" type="button">읽기 닫기</button></div>
+    <p id="workflow-reader-status" role="status"></p>
+    <iframe id="workflow-reader-frame" title="웹툰 리더" class="hidden" allow="fullscreen" referrerpolicy="strict-origin-when-cross-origin"></iframe>
+  </dialog>
+
   <!-- 클래식 스크립트를 이름 순서대로 로드한다(최상위 선언을 전역으로 공유). 99-main.js는 다른 파일의 함수를 즉시 참조하므로 반드시 마지막. -->
 <script src="/js/00-core.js"></script>
   <script src="/js/10-tabs.js"></script>
@@ -811,6 +857,7 @@
   <script src="/js/30-naver-list.js"></script>
   <script src="/js/40-subscriptions.js"></script>
   <script src="/js/50-manual-download.js"></script>
+  <script src="/js/55-workflow.js"></script>
   <script src="/js/60-registry.js"></script>
   <script src="/js/70-settings-schedule.js"></script>
   <script src="/js/71-settings-discord-backup.js"></script>

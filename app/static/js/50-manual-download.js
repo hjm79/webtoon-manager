@@ -36,7 +36,9 @@ function applySubscribeButton(btn, subscribed) {
 function makeManualCardSubscribeButton(subscribed, url, payload) {
   const btn = makeButton("", async () => {
     try {
-      await apiCall(url, { method: "POST", body: JSON.stringify(payload) });
+      const titleId = /\/(\d+)\/subscribe$/.exec(url)?.[1];
+      const saved = await chooseSubscriptionScope({ ...payload, title_id: titleId, platform: url.includes("kakao-webtoons") ? "kakao" : "naver" });
+      if (!saved) return;
       applySubscribeButton(btn, true);
     } catch (e) {
       alert(e.message);
@@ -250,10 +252,7 @@ document.getElementById("btn-kakao-manual-subscribe").addEventListener("click", 
   if (!a || a.subscription === "active") return;
   try {
     // 완결작이라 목록에 없는 작품도 여기서 구독할 수 있고, 구독하면 전체목록에 나타나 자동 다운로드 대상이 된다
-    await apiCall(`/api/kakao-webtoons/${a.series_id}/subscribe`, {
-      method: "POST",
-      body: JSON.stringify({ title: a.title, thumbnail_url: a.thumbnail_url || "", author_summary: a.authors || "" }),
-    });
+    if (!await chooseSubscriptionScope({ platform: "kakao", title_id: String(a.series_id), title: a.title, thumbnail_url: a.thumbnail_url || "", author_summary: a.authors || "" })) return;
     a.subscription = "active";
     refreshKakaoManualSubscribeButton();
   } catch (e) {
@@ -539,10 +538,7 @@ document.getElementById("btn-manual-subscribe").addEventListener("click", async 
   const a = manualAnalyzeResult;
   if (!a || a.subscription === "active") return;
   try {
-    await apiCall(`/api/naver-list/${a.title_id}/subscribe`, {
-      method: "POST",
-      body: JSON.stringify({ title: a.title, thumbnail_url: a.thumbnail_url || "" }),
-    });
+    if (!await chooseSubscriptionScope({ platform: "naver", title_id: String(a.title_id), title: a.title, thumbnail_url: a.thumbnail_url || "" })) return;
     a.subscription = "active";
     refreshManualSubscribeButton();
   } catch (e) {

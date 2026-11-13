@@ -65,3 +65,15 @@ def find_last_downloaded_episode_no(webtoon_dir: Path, episodes: list[EpisodeInf
             return episode.episode_no
 
     return 0
+
+
+def find_downloaded_episode_numbers(webtoon_dir: Path, title: str, episodes: list) -> set[int]:
+    """Match each real file independently; a high watermark does not prove missing holes."""
+    if not webtoon_dir.is_dir():
+        return set()
+    names = {_normalize_for_match(_LEADING_SEQ_NUMBER_RE.sub("", p.stem)) for p in webtoon_dir.iterdir()
+             if p.is_file() and p.suffix.lower() in (".zip", ".cbz")}
+    prefix = _normalize_for_match(title)
+    return {episode.episode_no for episode in episodes
+            if (subtitle := _normalize_for_match(episode.subtitle))
+            and (subtitle in names or prefix + subtitle in names)}

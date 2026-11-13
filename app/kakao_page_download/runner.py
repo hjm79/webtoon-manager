@@ -9,7 +9,7 @@ import os
 import zipfile
 from pathlib import Path
 
-from app import comicinfo, kakao_cover, kakao_records, repository, waitfree_sync
+from app import comicinfo, kakao_cover, kakao_records, repository, waitfree_sync, subscription_scope, workflow_progress
 from app.kakao_authors import split_authors
 from app.kakao_filters import EXCLUDED_MESSAGE, is_excluded_title
 from app.metadata_zip import COVER_MISSING, MetadataBundle
@@ -90,6 +90,7 @@ async def download_episode(client: KakaoPageClient, series_id: int, episode: Epi
     _remove_superseded(folder, episode.number, keep=final_path)
     repository.add_kakao_downloaded_numbers(series_id, [episode.number])  # 자동/수동/기다무가 모두 거치는 저장 지점 — 받은 회차 기록에 더한다
     repository.remove_kakao_pending_numbers(series_id, [episode.number])  # "받지 않은 것으로" 기록해 둔 회차를 받았으면 그 지정은 푼다
+    subscription_scope.completed("kakao", series_id, episode.number)
     return final_path
 
 
@@ -112,6 +113,21 @@ def _plan_for_run(series_id: int, series_item: dict, episodes: list[Episode], ex
     pending = repository.get_kakao_pending_numbers(series_id)
     if recorded or pending:
         plan = plan_by_folder_rules(episodes, existing, series_title, recorded, pending)
+    allowed = subscription_scope.allowed_numbers("kakao", series_id, [ep.number for ep in episodes])
+    if allowed is not None:
+        # Scope admission is independent of the folder marker: an earlier failed selected
+        # episode must remain eligible even when a later file already exists.
+        choice = subscription_scope.get("kakao", series_id)
+        initial = set(choice["pending_initial"])
+        if choice["mode"] == "all":
+            initial |= allowed
+        fresh = plan_by_folder_rules(episodes, existing, series_title, recorded, pending | initial)
+        plan = fresh
+        plan.to_download = [ep for ep in plan.to_download if ep.number in allowed]
+        plan.locked = [ep for ep in plan.locked if ep.number in allowed]
+    progress = workflow_progress.snapshot()
+    if progress["platform"] == "kakao" and progress["title_id"] == str(series_id):
+        workflow_progress.update(total=max(progress["total"], progress["completed"] + len(plan.to_download)))
     return plan
 
 
@@ -132,10 +148,13 @@ async def _download_in_number_order(
     for episode in sorted([*plan.to_download, *([waitfree_target] if waitfree_target else [])], key=lambda e: e.number):
         if len(downloaded) >= max_episodes:
             break
+        workflow_progress.episode(episode.number)
         if episode is waitfree_target:
             ticket_used, failed = await _download_first_locked_with_waitfree(client, series_id, episode, folder, downloaded, items, on_progress)
             if failed is not None:
                 break
+            if ticket_used is not None:
+                workflow_progress.downloaded()
             continue
         path = await download_episode(client, series_id, episode, folder)
         if path is None:
@@ -144,6 +163,7 @@ async def _download_in_number_order(
                 on_progress(f"{episode.number}번 회차 받기 실패 — 여기서 멈춥니다(다음에 이 회차부터 다시 시도)" + _failure_note(client))
             break
         downloaded.append(episode.number)
+        workflow_progress.downloaded()
         items.append((episode.number, episode.subtitle))
         if on_progress:
             on_progress(f"{episode.number}번 회차 받음 ({path.name})")

@@ -11,7 +11,8 @@ const { makeApp, sleep, idle, ok, done } = require("./harness");
   const routes = {
     "/api/settings/kakao-webtoons-enabled": { enabled: true }, "/api/settings/webtoon-server": { webtoon_server_url: "" },
     "/api/manual-download/search": search, "/api/manual-download/analyze": () => analysis,
-    "/api/naver-list/333/subscribe": (opts) => { posts.push(JSON.parse(opts.body)); return { status: "active" }; },
+    "/api/workflow/preview": { available_count: 1, episodes: [{ episode_no: 1, subtitle: "1화", available: true }] },
+    "/api/workflow/subscribe": (opts) => { posts.push(JSON.parse(opts.body)); return { subscription: { status: "active", ever_subscribed: true }, execution: "scheduled" }; },
   };
   const { w, run } = makeApp(routes); await idle(); run("kakaoWebtoonsEnabled = true;");
   const $ = (id) => w.document.getElementById(id);
@@ -31,6 +32,8 @@ const { makeApp, sleep, idle, ok, done } = require("./harness");
 
   // Scenario 2: 카드의 "구독"을 누르면 구독 API가 호출되고 "구독 중"으로 바뀐다
   subBtn(cards[2]).click(); await idle();
+  ok(posts.length === 0 && $("workflow-subscribe-dialog").open, "검색 카드 구독은 범위 선택을 먼저 연다");
+  $("workflow-subscribe-form").dispatchEvent(new w.Event("submit", { bubbles: true, cancelable: true })); await idle();
   ok(posts.length === 1 && posts[0].title === "새 작품" && posts[0].thumbnail_url === "t3", "구독 요청 본문(제목/썸네일): " + JSON.stringify(posts));
   ok(subBtn(cards[2]).textContent === "구독 중" && subBtn(cards[2]).disabled, "누른 뒤 '구독 중'(비활성)");
 
@@ -46,6 +49,7 @@ const { makeApp, sleep, idle, ok, done } = require("./harness");
   // Scenario 4: 분석 화면에서 "구독"을 누르면 구독되고 "구독 중"이 된다
   analysis = { ...analysis, title_id: "333", title: "새 작품", subscription: null }; await go("333");
   posts.length = 0; sub.click(); await idle();
+  $("workflow-subscribe-form").dispatchEvent(new w.Event("submit", { bubbles: true, cancelable: true })); await idle();
   ok(posts.length === 1 && sub.textContent === "구독 중" && sub.disabled, "분석 화면 구독 후 '구독 중': " + JSON.stringify(posts));
   done();
 })();

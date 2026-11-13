@@ -69,6 +69,7 @@ async def _report_step(now: datetime, scan: _TickScan) -> None:
     state = report_dispatch.load_state()
     if state["last_download_at"] is None:
         return  # 보낼 것이 대기 중이 아니다
+    _request_scan_for_batch(state["last_download_at"])
     if state["cutoff"] is None:
         if now - datetime.fromisoformat(state["last_download_at"]) < timedelta(minutes=report_dispatch.get_batch_minutes()):
             return  # 아직 묶음이 열려 있다(마지막 다운로드 뒤 N분이 안 지남)
@@ -104,6 +105,8 @@ def _request_scan_for_batch(cutoff: str) -> None:
     """확정된 묶음(이전 확인 시점 ~ cutoff)에 새로 받은 회차(성공)가 있으면 뷰어 스캔을 요청한다. 같은 이력을 다시 따지지 않게 워터마크를 옮긴다."""
     since = viewer_scan.load_state()["watermark"] or repository.get_setting(_SETTING_KEY_REPORT_LAST_SENT_AT)
     cutoff_at = datetime.fromisoformat(cutoff)
+    if since and cutoff_at <= datetime.fromisoformat(since):
+        return
     if since and any(row["status"] == "success" for row in repository.list_episode_history_window(since, cutoff)):
         viewer_scan.request(cutoff_at)
     viewer_scan.set_watermark(cutoff_at)

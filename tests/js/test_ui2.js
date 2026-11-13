@@ -31,9 +31,12 @@ const { kakao } = require("./factories");
     "/api/naver-list": () => [], "/api/kakao-list": { items: [kakao(71000001, "달마부장"), kakao(71000002, "궁", { status: "active", ever_subscribed: true })], version: "v1", refreshing: false, refreshed_at: "2026-09-30T01:00:00+00:00" },
     "/api/webtoons": () => [], "/api/kakao-webtoons": () => [], "/api/webtoon-server/lookup": { url: "http://viewer/x" },
   };
+  routes["/api/workflow/preview"] = { available_count: 1, episodes: [{ episode_no: 1, subtitle: "1화", available: true }] };
+  routes["/api/workflow/subscribe"] = (opts) => { const data = JSON.parse(opts.body); return { subscription: { status: "active", ever_subscribed: true }, execution: "scheduled" }; };
   const { w, run, calls } = makeApp(routes);
   await idle(); run("kakaoWebtoonsEnabled = true;");
   const $ = (id) => w.document.getElementById(id);
+  const confirmScope = async () => { $("workflow-subscribe-form").dispatchEvent(new w.Event("submit", { bubbles: true, cancelable: true })); await idle(); };
 
   console.log("1) 다운로드 폴더 선택기(네이버/카카오 따로, 마운트된 폴더 안에서 고르거나 새로 만들기)");
   run("window.__p = loadSettingsPage();"); await w.__p; await idle();
@@ -67,12 +70,13 @@ const { kakao } = require("./factories");
   run("webtoonServerConfigured = false;"); run("window.__p = loadNaverList(true);"); await w.__p; await idle();
   const cards = Array.from(w.document.querySelectorAll("#naver-list-grid .webtoon-card"));
   const btnTexts = (c) => Array.from(c.querySelectorAll(".webtoon-card-actions button")).map((b) => b.textContent.trim());
-  ok(JSON.stringify(btnTexts(cards.find((c) => c.textContent.includes("달마부장")))) === '["구독","목록제외","분석"]', "뷰어 서버가 없어도 미구독 카카오 카드에 '구독/목록제외'(와 분석)가 보임");
-  ok(JSON.stringify(btnTexts(cards.find((c) => c.textContent.includes("궁")))) === '["구독해제","제외됨으로","분석"]', "구독 중 카드는 '구독해제'/'제외됨으로'/'분석'(뷰어 아이콘은 뷰어를 설정했을 때만)");
+  ok(JSON.stringify(btnTexts(cards.find((c) => c.textContent.includes("달마부장")))) === '["구독","목록제외","읽기","분석"]', "뷰어 서버가 없어도 미구독 카카오 카드에 '구독/목록제외'(와 분석)가 보임");
+  ok(JSON.stringify(btnTexts(cards.find((c) => c.textContent.includes("궁")))) === '["구독해제","제외됨으로","읽기","분석"]', "구독 중 카드는 '구독해제'/'제외됨으로'/'분석'(뷰어 아이콘은 뷰어를 설정했을 때만)");
   let confirmed = 0; w.confirm = () => { confirmed++; return true; };
   routes["/api/kakao-webtoons/71000001/subscribe"] = () => kakao(71000001, "달마부장", { status: "active", ever_subscribed: true });
   cards.find((c) => c.textContent.includes("달마부장")).querySelector(".webtoon-card-actions button").click(); await idle();
-  ok(confirmed === 0 && calls.some((c) => c.url === "/api/kakao-webtoons/71000001/subscribe" && c.method === "POST"), "구독을 누르면 확인 창 없이 바로 구독 요청");
+  ok($("workflow-subscribe-dialog").open, "카카오 목록 카드에서도 다운로드 범위 선택"); await confirmScope();
+  ok(confirmed === 0 && calls.some((c) => c.url === "/api/workflow/subscribe" && JSON.parse(c.body).title_id === "71000001" && c.method === "POST"), "구독을 누르면 확인 창 없이 바로 구독 요청");
   run("webtoonServerConfigured = true;"); run("window.__p = loadNaverList(true);"); await w.__p; await idle();
   ok(w.document.querySelector('#naver-list-grid [data-viewer-check-platform="kakao"]') !== null, "뷰어 서버를 설정하면 구독 중 카카오 카드에 뷰어 아이콘이 붙음");
 
@@ -84,8 +88,8 @@ const { kakao } = require("./factories");
   ok(subs[1].textContent === "구독 중" && subs[1].disabled && subs[0].textContent === "구독" && !subs[0].disabled, "이미 구독한 작품(쌍갑포차)의 검색 결과 카드는 처음부터 '구독 중'(누를 수 없음), 아닌 작품은 '구독'");
   ok(sub && sub.textContent === "구독", "검색 결과 카드에 구독 버튼이 있음(완결작도 검색되므로 강제 구독 가능)");
   routes["/api/kakao-webtoons/68239972/subscribe"] = () => kakao(68239972, "개미", { status: "active" });
-  sub.click(); await idle();
-  const subCall = calls.find((c) => c.url === "/api/kakao-webtoons/68239972/subscribe");
+  sub.click(); await idle(); await confirmScope();
+  const subCall = calls.find((c) => c.url === "/api/workflow/subscribe" && JSON.parse(c.body).title_id === "68239972");
   ok(subCall && JSON.parse(subCall.body).title === "개미" && JSON.parse(subCall.body).author_summary.includes("김용회") && sub.disabled && sub.textContent === "구독 중", "검색 결과에서 바로 구독(제목/표지/작가가 함께 전달됨) — 누르면 '구독 중'으로 바뀜");
   $("manual-query").value = "67774694"; $("btn-manual-analyze").click(); await idle();
   const summary = $("kakao-manual-summary").textContent;
@@ -94,9 +98,9 @@ const { kakao } = require("./factories");
   ok(cell(1, 3) === "기다무" && !rows[1].querySelector("input").disabled && cell(3, 3) === "잠금" && rows[3].querySelector("input").disabled, "기다무 상태 회차는 선택 가능, 그 밖의 잠금은 선택 불가");
   ok(!$("btn-kakao-manual-subscribe").classList.contains("hidden") && $("btn-kakao-manual-subscribe").textContent === "구독", "분석 화면에 구독 버튼(미구독 상태)");
   routes["/api/kakao-webtoons/67774694/subscribe"] = () => kakao(67774694, "모범택시", { status: "active" });
-  $("btn-kakao-manual-subscribe").click(); await idle();
+  $("btn-kakao-manual-subscribe").click(); await idle(); await confirmScope();
   ok($("btn-kakao-manual-subscribe").textContent === "구독 중" && $("btn-kakao-manual-subscribe").disabled, "구독하면 버튼이 '구독 중'(누를 수 없음)으로 바뀌고, 구독해제 버튼은 없음");
-  const sc = calls.find((c) => c.url === "/api/kakao-webtoons/67774694/subscribe");
+  const sc = calls.find((c) => c.url === "/api/workflow/subscribe" && JSON.parse(c.body).title_id === "67774694");
   ok(sc && JSON.parse(sc.body).thumbnail_url === "https://k/thumb" && JSON.parse(sc.body).author_summary === "까를로스,최승진", "분석에서 받은 표지/작가로 구독");
   ok(!calls.some((c) => c.url.endsWith("/unsubscribe")), "수동 다운로드 화면에서는 구독해제를 부르지 않음");
   // 기다무 회차를 골라 받기: 사용 확인 창

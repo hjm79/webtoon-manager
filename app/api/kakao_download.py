@@ -294,6 +294,9 @@ async def kakao_manual_run(payload: KakaoManualRunIn):
     global _kakao_manual_task
     if await asyncio.to_thread(kakao_page_auth.load_cookies) is None:
         raise HTTPException(status_code=400, detail="카카오페이지 로그인 쿠키가 없습니다. 설정에서 쿠키를 먼저 저장해주세요.")
+    from app.scheduler.download_job import download_busy
+    if download_busy():
+        raise HTTPException(status_code=409, detail="다른 다운로드가 실행 중입니다. 완료 후 다시 시도해주세요.")
     if job_status.snapshot().get(manual_download.JOB_NAME, {}).get("status") == "running":
         raise HTTPException(status_code=409, detail="이미 수동 다운로드가 진행 중입니다.")
     if kakao_page_download.download_lock.locked():
