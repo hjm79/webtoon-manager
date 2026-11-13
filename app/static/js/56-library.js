@@ -22,6 +22,31 @@ function libraryUpdateTime(value) {
   return Number.isFinite(numeric) ? numeric : Date.parse(value) || 0;
 }
 
+function libraryText(value) {
+  return typeof value === "string" ? value.trim() : "";
+}
+
+function libraryChapterDate(chapter) {
+  if (chapter?.date_source !== "file_modified" || !libraryText(chapter.date)) return null;
+  const date = new Date(chapter.date);
+  if (!Number.isFinite(date.getTime())) return null;
+  const label = new Intl.DateTimeFormat("ko-KR", {
+    timeZone: "Asia/Seoul", year: "numeric", month: "2-digit", day: "2-digit",
+  }).format(date).replace(/\s/g, "").replace(/\.$/, "");
+  return { label: `파일 갱신 ${label}`, datetime: date.toISOString() };
+}
+
+function libraryDetail(label, text, className) {
+  const row = document.createElement("div");
+  row.className = className;
+  const name = document.createElement("dt");
+  name.textContent = label;
+  const value = document.createElement("dd");
+  value.textContent = text;
+  row.append(name, value);
+  return row;
+}
+
 function renderLibrary() {
   if (!libraryReady) return;
   const query = document.getElementById("library-search").value.trim().toLocaleLowerCase();
@@ -62,7 +87,22 @@ function renderLibrary() {
     title.textContent = item.title;
     const counts = document.createElement("p");
     counts.textContent = `총 ${libraryCount(item.chapter_count)}회차 · 안 읽은 회차 ${libraryCount(item.unread_count)}개`;
-    body.append(badge, title, counts);
+    const summary = document.createElement("p");
+    summary.className = "library-summary";
+    summary.textContent = libraryText(item.summary) || "소개글이 없습니다.";
+    const details = document.createElement("dl");
+    details.className = "library-card-details";
+    const latest = libraryDetail("최근 업데이트", libraryText(item.latest_chapter?.label) || "회차 정보 없음", "library-latest-chapter");
+    const date = libraryChapterDate(item.latest_chapter);
+    const updated = document.createElement(date ? "time" : "span");
+    updated.className = "library-chapter-date";
+    updated.textContent = date ? date.label : "날짜 정보 없음";
+    if (date) updated.dateTime = date.datetime;
+    latest.querySelector("dd").appendChild(updated);
+    const recentlyRead = libraryText(item.recently_read_chapter?.label)
+      || (item.recently_read_chapter === undefined ? libraryText(item.progress_display) : "");
+    details.append(latest, libraryDetail("최근 읽은 회차", recentlyRead || "아직 읽지 않음", "library-recently-read"));
+    body.append(badge, title, summary, counts, details);
     if (item.progress_display) {
       const progress = document.createElement("p");
       progress.textContent = `${item.reading_now ? "읽는 중 · " : ""}${item.progress_display}`;
