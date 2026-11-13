@@ -26,12 +26,16 @@ def get(platform: str, title_id: str | int) -> dict:
 
 
 def set_choice(platform: str, title_id: str | int, mode: str, episodes: list[dict], *, latest_count: int | None = None,
-               episode_nos: list[int] | None = None) -> dict:
+               episode_nos: list[int] | None = None, preserve_existing: bool = False) -> dict:
     available = sorted({row["episode_no"] for row in episodes if row["available"]})
     cutoff = max((row["episode_no"] for row in episodes), default=0)
     selected = available
     if mode != "all" and not episodes:
         raise ValueError("회차 목록이 비어 있어 안전한 시작 범위를 정할 수 없습니다. 인증·작품 정보를 먼저 확인해주세요.")
+    previous = get(platform, title_id) if preserve_existing else None
+    owned = {row["episode_no"] for row in episodes if row["owned"]}
+    if previous is not None:
+        owned |= set(previous["completed_numbers"])
     if mode == "latest":
         if latest_count is None or not 1 <= latest_count <= 1000:
             raise ValueError("최근 회차 수는 1~1000 사이여야 합니다.")
@@ -40,13 +44,15 @@ def set_choice(platform: str, title_id: str | int, mode: str, episodes: list[dic
         selected = available[-latest_count:]
     elif mode == "selected":
         selected = sorted(set(episode_nos or []))
-        if not selected or not set(selected) <= set(available):
+        selectable = set(available)
+        if previous is not None:
+            selectable |= owned | set(previous["episode_nos"])
+        if not selected or not set(selected) <= selectable:
             raise ValueError("지금 무료로 읽을 수 있는 회차를 하나 이상 선택해주세요.")
     elif mode == "future":
         selected = []
     elif mode != "all":
         raise ValueError("지원하지 않는 다운로드 범위입니다.")
-    owned = {row["episode_no"] for row in episodes if row["owned"]}
     value = {"mode": mode, "latest_count": latest_count if mode == "latest" else None,
              "episode_nos": selected if mode == "selected" else [], "initial_cutoff": cutoff,
              "pending_initial": [n for n in selected if n not in owned], "completed_numbers": sorted(owned), "explicit": True}
@@ -61,6 +67,8 @@ def allowed_numbers(platform: str, title_id: str | int, numbers: list[int]) -> s
     if value["mode"] == "all":
         return set(numbers) - set(value["completed_numbers"]) if value["explicit"] else None
     pending = set(value["pending_initial"])
+    if value["mode"] == "selected":
+        return set(numbers) & pending & set(value["episode_nos"])
     return {n for n in numbers if n in pending or n > value["initial_cutoff"]}
 
 

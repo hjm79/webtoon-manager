@@ -3,9 +3,10 @@ import threading
 from datetime import datetime, timedelta, timezone
 
 _lock = threading.Lock()
-_progress = {"state": "idle", "platform": None, "title_id": None, "title": None,
-             "total": 0, "completed": 0, "failed": 0, "current_episode_no": None,
-             "rest_until": None, "error": None}
+_IDLE = {"state": "idle", "platform": None, "title_id": None, "title": None,
+         "total": 0, "completed": 0, "failed": 0, "current_episode_no": None,
+         "rest_until": None, "error": None}
+_progress = dict(_IDLE)
 _titles: dict[tuple[str, str], dict] = {}
 
 
@@ -59,3 +60,12 @@ def title_snapshot(platform: str, title_id: str | int) -> dict | None:
     with _lock:
         value = _titles.get((platform, str(title_id)))
         return dict(value) if value else None
+
+
+def clear_title(platform: str, title_id: str | int) -> None:
+    key = (platform, str(title_id))
+    with _lock:
+        _titles.pop(key, None)
+        if (_progress["platform"], _progress["title_id"]) == key:
+            _progress.clear()
+            _progress.update(_IDLE)

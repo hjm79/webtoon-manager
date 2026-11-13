@@ -59,6 +59,19 @@ class SubscribeIn(TitleIn):
     start_now: bool = False
 
 
+class ScopeUpdateIn(TitleIn):
+    scope: ScopeIn
+    start_now: bool = False
+
+
+def _subscription(platform: str, title_id: str):
+    return repository.get(title_id) if platform == "naver" else repository.get_kakao_webtoon(int(title_id))
+
+
+def _subscription_status(platform: str, row) -> str | None:
+    return (row.status if platform == "naver" else row["status"]) if row is not None else None
+
+
 def _matches(query: str, *values) -> bool:
     needle = "".join(query.casefold().split())
     return any(needle in "".join(str(v).casefold().split()) for v in values if v)
@@ -168,7 +181,10 @@ async def _preview(platform: str, title_id: str) -> dict:
 @router.post("/preview")
 async def preview(payload: TitleIn):
     try:
-        return await _preview(payload.platform, payload.title_id)
+        listing = await _preview(payload.platform, payload.title_id)
+        tracked = await asyncio.to_thread(_subscription, payload.platform, payload.title_id)
+        return {**listing, "current_scope": subscription_scope.get(payload.platform, payload.title_id),
+                "subscription": _subscription_status(payload.platform, tracked)}
     except HTTPException:
         raise
     except Exception as exc:
@@ -241,6 +257,57 @@ async def subscribe(payload: SubscribeIn, request: Request):
                     "execution": "queued" if payload.start_now else "scheduled", "next_run_at": next_run_at(request, payload.platform)}
         except ValueError as exc:
             raise HTTPException(400, str(exc)) from exc
+        finally:
+            if reserved:
+                download_job.release_title_download(payload.platform)
+
+
+@router.post("/scope")
+async def update_scope(payload: ScopeUpdateIn, request: Request):
+    async with _subscription_lock:
+        if download_job.download_busy() or kakao_page_download.download_lock.locked():
+            raise HTTPException(409, "다른 다운로드가 실행 중입니다. 완료 후 다시 시도해주세요.")
+        tracked = _subscription(payload.platform, payload.title_id)
+        if tracked is None:
+            raise HTTPException(404, "구독한 작품을 찾지 못했습니다.")
+        if _subscription_status(payload.platform, tracked) != repository.STATUS_ACTIVE:
+            raise HTTPException(409, "구독 중인 작품의 다운로드 범위만 변경할 수 있습니다.")
+        listing = await preview(TitleIn(platform=payload.platform, title_id=payload.title_id))
+        if payload.start_now and payload.platform == "kakao":
+            await _require_kakao_login()
+        try:
+            download_job.reserve_title_download(payload.platform)
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from exc
+        reserved = True
+        changed = False
+        try:
+            key = subscription_scope._key(payload.platform, payload.title_id)
+            previous = repository.get_setting(key)
+            async with download_job._download_job_lock:
+                tracked = _subscription(payload.platform, payload.title_id)
+                if _subscription_status(payload.platform, tracked) != repository.STATUS_ACTIVE:
+                    raise HTTPException(409, "구독 상태가 변경되었습니다. 목록을 새로고침해주세요.")
+                scope = subscription_scope.set_choice(payload.platform, payload.title_id,
+                    payload.scope.mode, listing["episodes"], latest_count=payload.scope.latest_count,
+                    episode_nos=payload.scope.episode_nos, preserve_existing=True)
+                changed = True
+                subscribed = webtoons._to_out(tracked) if payload.platform == "naver" else kakao_webtoons.KakaoWebtoonOut(**tracked)
+                response = {"subscription": subscribed, "scope": scope,
+                            "execution": "queued" if payload.start_now else "scheduled", "next_run_at": next_run_at(request, payload.platform)}
+                if payload.start_now:
+                    download_job.enqueue_reserved_title(payload.platform, payload.title_id,
+                        tracked.title if payload.platform == "naver" else tracked["title"])
+                    reserved = False
+                else:
+                    workflow_progress.clear_title(payload.platform, payload.title_id)
+                return response
+        except Exception as exc:
+            if changed:
+                repository.set_setting(key, previous)
+            if isinstance(exc, ValueError):
+                raise HTTPException(400, str(exc)) from exc
+            raise
         finally:
             if reserved:
                 download_job.release_title_download(payload.platform)

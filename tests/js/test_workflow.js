@@ -3,6 +3,8 @@ const { makeApp, idle, waitFor, ok, done } = require("./harness");
 (async () => {
   let reader = { status: "not_downloaded", url: null };
   const saved = [];
+  const scopeSaved = [];
+  let scopeFailure = false;
   const routes = {
     "/api/naver-list": [], "/api/settings/kakao-webtoons-enabled": { enabled: true },
     "/api/settings/webtoon-server": { webtoon_server_url: "http://viewer" },
@@ -10,6 +12,12 @@ const { makeApp, idle, waitFor, ok, done } = require("./harness");
     "/api/workflow/search": { results: [{ platform: "naver", title_id: "824543", title: "오늘만 사는 기사", is_paused: true, subscription: null }], errors: [{ platform: "kakao", message: "로그인을 확인해주세요." }] },
     "/api/workflow/preview": { available_count: 2, episodes: [{ episode_no: 1, subtitle: "처음", available: true, owned: false }, { episode_no: 2, subtitle: "다음", available: true, owned: false }, { episode_no: 3, subtitle: "잠김", available: false, owned: false }] },
     "/api/workflow/subscribe": (opts) => { saved.push(JSON.parse(opts.body)); return { subscription: { status: "active", ever_subscribed: true }, execution: "scheduled", next_run_at: "2026-11-14T03:00:00+09:00" }; },
+    "/api/workflow/scope": (opts) => {
+      if (scopeFailure) throw new Error("다른 다운로드가 실행 중입니다. 완료 후 다시 시도해주세요.");
+      const value = JSON.parse(opts.body); scopeSaved.push(value);
+      routes["/api/workflow/status"] = { next_run_at: "2026-11-14T03:00:00+09:00", subscriptions: [{ title_id: value.title_id, title: "기존 작품", platform: value.platform, downloaded_count: 1, scope: value.scope }] };
+      return { subscription: { status: "active" }, scope: value.scope, execution: "saved" };
+    },
     "/api/reader/status": () => reader,
   };
   const { w, run, calls } = makeApp(routes); await idle();
@@ -28,7 +36,7 @@ const { makeApp, idle, waitFor, ok, done } = require("./harness");
   mode("all");
   ok($("workflow-scope-hint").textContent.includes("무료로 열리는 기존 회차도 다시 확인") && !$("workflow-scope-hint").textContent.includes("자동으로 추가하지 않습니다"), "전체 범위는 추후 무료로 열리는 기존 회차도 확인한다고 안내");
   mode("selected"); submit(); await idle();
-  ok($("workflow-scope-hint").textContent.includes("선택하지 않은 기존 회차") && $("workflow-scope-hint").textContent.includes("자동으로 추가하지 않습니다"), "선택 범위에서만 기존 회차 제외 정책을 안내");
+  ok($("workflow-scope-hint").textContent.includes("선택하지 않은 기존 회차와 이후 새로 추가되는 회차") && $("workflow-scope-hint").textContent.includes("자동으로 포함하지 않습니다"), "선택 범위는 기존·새 회차 모두 자동 추가하지 않는 고정 목록이라고 안내");
   ok(saved.length === 0 && $("workflow-subscribe-error").textContent.includes("하나 이상"), "빈 선택은 구독 요청 전 거절");
   const picks = $("workflow-episode-picker").querySelectorAll("input");
   picks[1].checked = true;
@@ -36,6 +44,51 @@ const { makeApp, idle, waitFor, ok, done } = require("./harness");
   $("workflow-start-now").checked = true; submit(); await idle();
   ok(saved.length === 1 && JSON.stringify(saved[0].scope) === '{"mode":"selected","episode_nos":[2]}' && saved[0].start_now === true, "고른 회차만 명시적으로 즉시 실행 요청");
   ok(!$("workflow-subscribe-dialog").open && subscribe.disabled, "등록 성공 시 모달을 닫고 구독 중 상태 표시");
+  ok(!$("workflow-search-results").querySelector("[data-scope-title-id]").classList.contains("hidden"), "신규 구독 성공 후 검색 카드에 범위 변경 버튼 표시");
+
+  const editingPreview = {
+    subscription: "active", current_scope: { mode: "selected", episode_nos: [1, 3] }, available_count: 1,
+    episodes: [
+      { episode_no: 1, subtitle: "이미 받은 회차", available: false, owned: true },
+      { episode_no: 2, subtitle: "선택할 무료 회차", available: true, owned: false },
+      { episode_no: 3, subtitle: "기존 선택 잠김", available: false, owned: false },
+      { episode_no: 4, subtitle: "새 잠김", available: false, owned: false },
+    ],
+  };
+  routes["/api/workflow/preview"] = editingPreview;
+  run('renderWorkflowStatus({subscriptions:[{title_id:"777",title:"기존 작품",platform:"kakao",downloaded_count:1,scope:{mode:"selected",episode_nos:[1,3]}}]});');
+  const overviewEdit = $("workflow-subscriptions").querySelector("[data-scope-title-id]");
+  ok(overviewEdit && overviewEdit.textContent === "범위 변경", "기존 구독 현황마다 범위 변경 버튼 표시");
+  overviewEdit.click(); await idle();
+  let editPicks = $("workflow-episode-picker").querySelectorAll("input");
+  ok($("workflow-subscribe-title").textContent.includes("다운로드 범위 변경") && $("workflow-subscribe-submit").textContent === "범위 저장" && $("workflow-scope-legend").textContent === "앞으로 받을 회차", "편집은 구독과 구분한 제목·설명·저장 버튼 사용");
+  ok(!$("workflow-preserve-hint").classList.contains("hidden") && $("workflow-preserve-hint").textContent.includes("읽음 기록"), "기존 파일·읽음 기록 유지 안내 표시");
+  ok(w.document.querySelector('input[name="workflow-scope"]:checked').value === "selected" && editPicks[0].checked && editPicks[2].checked && !editPicks[1].checked, "기존 선택 범위를 정확히 복원");
+  ok(!editPicks[0].disabled && !editPicks[2].disabled && editPicks[3].disabled, "이미 받은 회차와 기존 선택은 잠겨도 유지·해제 가능하고 새 잠긴 회차는 선택 불가");
+  ok(!$("workflow-start-now").checked && $("workflow-start-hint").textContent.includes("기존 다운로드 예약을 유지"), "편집도 즉시 실행은 꺼진 상태로 시작하고 예약 보존 안내");
+  $("workflow-subscribe-cancel").click();
+  ok(scopeSaved.length === 0 && saved.length === 1, "범위 편집 취소 시 범위나 구독 변경 요청 없음");
+
+  overviewEdit.click(); await idle();
+  editPicks = $("workflow-episode-picker").querySelectorAll("input");
+  editPicks[1].checked = true; editPicks[2].checked = false;
+  submit(); await idle();
+  ok(scopeSaved.length === 1 && JSON.stringify(scopeSaved[0]) === '{"platform":"kakao","title_id":"777","scope":{"mode":"selected","episode_nos":[1,2]},"start_now":false}', "기존 구독은 고른 범위만 scope API에 저장하고 즉시 다운로드하지 않음");
+  ok(!$("workflow-subscribe-dialog").open && $("workflow-subscriptions").textContent.includes("선택한 회차만"), "저장 성공 후 모달을 닫고 현황의 범위 갱신");
+
+  scopeFailure = true;
+  $("workflow-subscriptions").querySelector("[data-scope-title-id]").click(); await idle();
+  submit(); await idle();
+  ok($("workflow-subscribe-dialog").open && $("workflow-subscribe-error").textContent.includes("다른 다운로드가 실행 중") && !$("workflow-subscribe-submit").disabled && scopeSaved.length === 1, "실행 중 범위 저장 거절 시 이유를 표시하고 편집 내용을 유지");
+  $("workflow-subscribe-cancel").click(); scopeFailure = false;
+  for (const currentMode of ["all", "latest", "future"]) {
+    editingPreview.current_scope = { mode: currentMode, latest_count: currentMode === "latest" ? 7 : null, episode_nos: [] };
+    run('window.__edit = chooseSubscriptionScope({platform:"kakao",title_id:"777",title:"기존 작품"},{edit:true});'); await idle();
+    ok(w.document.querySelector('input[name="workflow-scope"]:checked').value === currentMode && (currentMode !== "latest" || $("workflow-latest-count").value === "7"), `기존 ${currentMode} 범위와 최근 회차 수 복원`);
+    $("workflow-subscribe-cancel").click();
+  }
+  run('window.__activeCard = buildWebtoonCard({platform:"kakao",title_id:"777",title:"기존 작품",status:"active"},"naver-list");');
+  ok(w.__activeCard.querySelector("[data-scope-title-id]")?.textContent === "범위 변경", "요일 목록의 기존 구독 카드에서도 범위 변경 가능");
 
   run('window.__scope = chooseSubscriptionScope({platform:"naver",title_id:"777",title:"다음 작품"});'); await idle();
   mode("future");

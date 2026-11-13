@@ -55,6 +55,10 @@ def scope_rules():
     subscription_scope.completed("naver", "free-hole", 1)
     subscription_scope.completed("naver", "free-hole", 3)
     assert subscription_scope.allowed_numbers("naver", "free-hole", [1, 2, 3]) == {2}
+    subscription_scope.set_choice("naver", "fixed-selection", "selected", rows, episode_nos=[2, 4])
+    assert subscription_scope.allowed_numbers("naver", "fixed-selection", [1, 2, 3, 4, 5, 6]) == {2, 4}
+    subscription_scope.completed("naver", "fixed-selection", 2)
+    assert subscription_scope.allowed_numbers("naver", "fixed-selection", [1, 2, 3, 4, 5, 6]) == {4}
     folder = Path(get_settings().download_root) / "숫자 검증"
     folder.mkdir()
     (folder / "011 숫자 검증 11화.zip").write_bytes(b"test")
@@ -378,6 +382,173 @@ async def restart_status():
                 del main.app.state.scheduler
 
 
+async def edit_scope_contract():
+    title_id, title = "950001", "기존 범위 변경 검증"
+    repository.upsert_new(title_id, title)
+    repository.update_last_downloaded_no(title_id, 3)
+    for number in (1, 3):
+        repository.add_episode_history(title_id, title, number, f"{number}화", "success")
+    subscription_scope.set_choice("naver", title_id, "all", rows)
+    for number in (1, 3, 99):
+        subscription_scope.completed("naver", title_id, number)
+    folder = Path(get_settings().download_root) / title
+    folder.mkdir()
+    for number in (1, 3):
+        with zipfile.ZipFile(folder / f"{number:03d} {title} {number}화.zip", "w") as archive:
+            archive.writestr("001.jpg", b"existing-image")
+    files_before = {p.name: p.read_bytes() for p in folder.iterdir()}
+    record_before = repository.get(title_id)
+    history_before = repository.list_episode_history(search=title)
+    edited_rows = [{**row, "owned": row["episode_no"] in (1, 3)} for row in rows]
+
+    async def listing(platform, requested_id):
+        return {"platform": platform, "title_id": requested_id, "title": title,
+                "episodes": edited_rows, "available_count": len(edited_rows)}
+
+    payload = {"platform": "naver", "title_id": title_id, "scope": {"mode": "selected", "episode_nos": [2]}}
+    with patch.object(workflow, "_preview", listing):
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=main.app, raise_app_exceptions=False), base_url="http://test") as client:
+            response = await client.post("/api/workflow/preview", json={"platform": "naver", "title_id": title_id})
+            assert response.status_code == 200
+            assert response.json()["subscription"] == "active"
+            assert response.json()["current_scope"]["completed_numbers"] == [1, 3, 99]
+            tasks_before = len(dj._single_title_tasks)
+            save = subscription_scope.set_choice
+            workflow_progress.begin("naver", "unrelated-progress", "다른 작품", 1)
+            workflow_progress.downloaded()
+            workflow_progress.finish()
+            unrelated_progress = workflow_progress.title_snapshot("naver", "unrelated-progress")
+            workflow_progress.begin("naver", title_id, title, 2)
+            workflow_progress.finish()
+
+            def guarded_save(*args, **kwargs):
+                assert dj._download_job_lock.locked() and dj.download_busy()
+                return save(*args, **kwargs)
+
+            with patch.object(subscription_scope, "set_choice", guarded_save):
+                response = await client.post("/api/workflow/scope", json=payload)
+            assert response.status_code == 200, response.text
+            scope = response.json()["scope"]
+            assert scope["episode_nos"] == [2] and scope["pending_initial"] == [2]
+            assert scope["completed_numbers"] == [1, 3, 99]
+            assert len(dj._single_title_tasks) == tasks_before
+            assert not dj.download_busy()
+            assert workflow_progress.title_snapshot("naver", title_id) is None
+            assert workflow_progress.snapshot()["state"] == "idle"
+            assert workflow_progress.title_snapshot("naver", "unrelated-progress") == unrelated_progress
+            status = (await client.get("/api/workflow/status")).json()
+            target = next(row for row in status["subscriptions"] if row["title_id"] == title_id and row["platform"] == "naver")
+            assert target["status"] == "idle" and target["progress"] is None
+            workflow_progress.begin("naver", "unrelated-progress", "다른 작품", 1)
+            global_before = workflow_progress.snapshot()
+            response = await client.post("/api/workflow/scope", json=payload)
+            assert response.status_code == 200 and workflow_progress.snapshot() == global_before
+            assert repository.get(title_id) == record_before
+            assert repository.list_episode_history(search=title) == history_before
+            assert {p.name: p.read_bytes() for p in folder.iterdir()} == files_before
+            assert subscription_scope.allowed_numbers("naver", title_id, [1, 2, 3, 4, 5, 6]) == {2}
+
+            before = repository.get_setting(f"subscription_scope:naver:{title_id}")
+            read_setting = repository.get_setting
+            def failed_reserved_read(key):
+                if key == f"subscription_scope:naver:{title_id}" and dj._download_claimed_platforms:
+                    raise RuntimeError("database read unavailable")
+                return read_setting(key)
+            with patch.object(repository, "get_setting", failed_reserved_read):
+                response = await client.post("/api/workflow/scope", json=payload)
+                assert response.status_code == 500 and not dj.download_busy()
+            assert repository.get_setting(f"subscription_scope:naver:{title_id}") == before
+            for body, expected in (({**payload, "title_id": "950002"}, 404),
+                                   ({**payload, "scope": {"mode": "selected", "episode_nos": [1000]}}, 400)):
+                response = await client.post("/api/workflow/scope", json=body)
+                assert response.status_code == expected, response.text
+                assert repository.get_setting(f"subscription_scope:naver:{title_id}") == before
+                assert not dj.download_busy()
+            repository.set_status(title_id, repository.STATUS_UNSUBSCRIBED)
+            response = await client.post("/api/workflow/scope", json=payload)
+            assert response.status_code == 409
+            repository.set_status(title_id, repository.STATUS_ACTIVE)
+
+            for busy in ("claimed", "job", "manual", "kakao"):
+                if busy == "claimed":
+                    dj.reserve_title_download("kakao")
+                elif busy == "job":
+                    await dj._download_job_lock.acquire()
+                elif busy == "manual":
+                    job_status.start("manual")
+                else:
+                    await workflow.kakao_page_download.download_lock.acquire()
+                try:
+                    response = await client.post("/api/workflow/scope", json=payload)
+                    assert response.status_code == 409 and repository.get_setting(f"subscription_scope:naver:{title_id}") == before
+                finally:
+                    if busy == "claimed":
+                        dj.release_title_download("kakao")
+                    elif busy == "job":
+                        dj._download_job_lock.release()
+                    elif busy == "manual":
+                        job_status.finish("manual", success=True)
+                    else:
+                        workflow.kakao_page_download.download_lock.release()
+
+            async def race_listing(*args):
+                dj.reserve_title_download("kakao")
+                return await listing(*args)
+            with patch.object(workflow, "_preview", race_listing):
+                try:
+                    response = await client.post("/api/workflow/scope", json=payload)
+                    assert response.status_code == 409 and repository.get_setting(f"subscription_scope:naver:{title_id}") == before
+                finally:
+                    dj.release_title_download("kakao")
+
+            def broken_queue(*_):
+                raise RuntimeError("queue unavailable")
+            for owner, name in ((webtoons, "_to_out"), (workflow, "next_run_at")):
+                with patch.object(owner, name, broken_queue), patch.object(dj, "enqueue_reserved_title") as enqueue:
+                    response = await client.post("/api/workflow/scope", json={**payload, "start_now": True})
+                    assert response.status_code == 500 and not enqueue.called
+                    assert repository.get_setting(f"subscription_scope:naver:{title_id}") == before
+                    assert not dj.download_busy()
+            with patch.object(dj, "enqueue_reserved_title", broken_queue):
+                response = await client.post("/api/workflow/scope", json={**payload, "start_now": True})
+                assert response.status_code == 500
+                assert repository.get_setting(f"subscription_scope:naver:{title_id}") == before
+                assert not dj.download_busy()
+
+            calls = []
+            async def one(platforms, scheduled=False, partial=False, only_title=None):
+                calls.append((platforms, only_title))
+            with patch.object(dj, "_run_download_job_impl", one):
+                response = await client.post("/api/workflow/scope", json={**payload, "start_now": True})
+                assert response.status_code == 200 and response.json()["execution"] == "queued"
+                await asyncio.gather(*dj._single_title_tasks)
+            assert calls == [({"naver"}, title_id)] and not dj.download_busy()
+
+    kakao_id = 950003
+    repository.upsert_new_kakao_webtoon(kakao_id, "카카오 기존 범위")
+    subscription_scope.set_choice("kakao", kakao_id, "selected", rows, episode_nos=[2, 3])
+    subscription_scope.completed("kakao", kakao_id, 3)
+    repository.set_kakao_downloaded_numbers(kakao_id, {3})
+    kakao_before = repository.get_kakao_webtoon(kakao_id)
+    kakao_numbers_before = repository.get_kakao_downloaded_numbers(kakao_id)
+    locked_rows = [{**row, "available": row["episode_no"] not in (2, 3, 5), "owned": row["episode_no"] == 3} for row in rows]
+    async def kakao_listing(platform, requested_id):
+        return {"platform": platform, "title_id": requested_id, "title": "카카오 기존 범위",
+                "episodes": locked_rows, "available_count": 2}
+    with patch.object(workflow, "_preview", kakao_listing):
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=main.app), base_url="http://test") as client:
+            body = {"platform": "kakao", "title_id": str(kakao_id), "scope": {"mode": "selected", "episode_nos": [2, 3, 4]}}
+            response = await client.post("/api/workflow/scope", json=body)
+            assert response.status_code == 200, response.text
+            assert response.json()["scope"]["pending_initial"] == [2, 4]
+            assert response.json()["scope"]["completed_numbers"] == [3]
+            assert repository.get_kakao_webtoon(kakao_id) == kakao_before
+            assert repository.get_kakao_downloaded_numbers(kakao_id) == kakao_numbers_before
+            response = await client.post("/api/workflow/scope", json={**body, "scope": {"mode": "selected", "episode_nos": [5]}})
+            assert response.status_code == 400
+            assert subscription_scope.allowed_numbers("kakao", kakao_id, [1, 2, 3, 4, 5, 6]) == {2, 4}
+
+
 scope_rules()
 asyncio.run(automatic_retry())
 kakao_scope()
@@ -387,6 +558,7 @@ asyncio.run(one_title_admission())
 asyncio.run(archive_failure())
 asyncio.run(authentication_and_shared_admission())
 asyncio.run(restart_status())
+asyncio.run(edit_scope_contract())
 workflow_progress.begin("naver", "333", "새 구독", 2)
 workflow_progress.resting(60)
 assert workflow_progress.snapshot()["state"] == "resting" and workflow_progress.snapshot()["rest_until"]

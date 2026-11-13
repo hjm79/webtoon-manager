@@ -1170,8 +1170,9 @@ select {
 .workflow-overview > div, .workflow-overview > progress { margin-bottom: 8px; }
 .workflow-overview progress { width: 100%; }
 .workflow-subscriptions { display: grid; gap: 6px; max-height: 140px; overflow: auto; }
-.workflow-subscriptions > div { display: flex; align-items: center; gap: 10px; justify-content: space-between; }
-.workflow-subscriptions > div > span { min-width: 0; overflow-wrap: anywhere; }
+.workflow-subscriptions > div { display: flex; align-items: center; gap: 10px; justify-content: space-between; flex-wrap: wrap; }
+.workflow-subscriptions > div > span { min-width: 0; overflow-wrap: anywhere; flex: 1 1 220px; }
+.workflow-subscription-actions { display: flex; gap: 6px; flex-wrap: wrap; flex: 0 0 auto; max-width: 100%; }
 .workflow-subscriptions button { flex: 0 0 auto; }
 .workflow-result-card { justify-content: space-between; }
 .workflow-search .toolbar { flex-wrap: wrap; }
@@ -1179,6 +1180,8 @@ select {
 .workflow-search-status, .workflow-error { overflow-wrap: anywhere; }
 .workflow-error { color: #b42318; }
 .workflow-read-button { font-weight: 600; white-space: normal; }
+.card-subscription-row { display: flex; gap: 4px; }
+.card-subscription-row button { flex: 1 1 0; min-width: 0; }
 .card-viewer-row { display: flex; gap: 4px; align-items: stretch; flex-wrap: wrap; }
 .card-viewer-row .workflow-read-button { flex: 1 1 90px; min-width: 0; }
 .workflow-dialog { width: min(620px, calc(100vw - 24px)); max-height: calc(100dvh - 24px); padding: 20px; box-sizing: border-box; border: 1px solid var(--border); border-radius: 12px; background: var(--card); color: var(--text); overflow: auto; }
