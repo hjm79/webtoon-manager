@@ -21,11 +21,15 @@ These paths are suitable for a later My Supporter connection:
 | --- | --- |
 | `GET /api/viewer/config` | Discover whether the integrated viewer is enabled and its public paths. Internal service addresses and tokens are not returned. |
 | `GET /viewer/api/series` | List accessible series, covers, chapter counts, unread counts, and current reading summaries. |
-| `GET /viewer/api/series/{id}/continue` | Resolve the saved `chapter_id` and zero-based `page_index`. |
+| `GET /viewer/api/series/{id}/continue` | Resolve the saved `chapter_id`, zero-based `page_index`, and optional normalized `page_offset`. |
 | `/viewer/reader.html?series={id}` | Open a series at the saved position. Omit `chapter` and `page` to follow the saved position. |
 | `GET /api/workflow/status` | Read collection progress, subscriptions, scopes, and the next scheduled download. |
 
 Series list fields include `id`, `title`, `platform`, `chapter_count`, `unread_count`, `progress_display`, `reading_now`, `latest_update`, `cover_url`, and `list`. Treat IDs as opaque strings. Resolve relative viewer and cover paths against the webtoon application's public origin, rather than the dashboard's origin or an internal Docker hostname.
+
+For server-side My Supporter data fetches, the viewer also exposes `GET /viewer/api/supporter/shelf?limit=12` and `GET /viewer/api/supporter/health`. These require the dedicated `SUPPORTER_API_TOKEN` as a Bearer header. An unset token returns 503; a wrong token returns 401. Shared-profile paths cannot call these endpoints. Keep this token on the dashboard server; do not put it in browser URLs or use the scan integration token.
+
+The shelf returns `items` with `id`, `title`, `platform`, `coverUrl`, `href`, `lastReadAt`, `pageIndex`, `pageOffset`, `chapterCount`, `unreadCount`, `lastChapter`, `latestChapter`, `isNew`, `readingNow`, and `latestUpdatedAt`. Results sort by last-read time, then local file update time; `limit` accepts 1 through 50. `isNew` describes unread local files, not a remote provider's release schedule. The endpoint does not scan archives or change reading state. Public links use the configured viewer `PUBLIC_BASE_URL`; the reader link contains only the series ID so opening it resolves the latest saved position.
 
 ## Authentication boundary
 
