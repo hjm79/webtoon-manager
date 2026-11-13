@@ -276,6 +276,7 @@ async function chooseSubscriptionScope(item, { edit = false } = {}) {
       if (current.latest_count != null) document.getElementById("workflow-latest-count").value = current.latest_count;
       setWorkflowScopeMode(current.mode);
     }
+    updateWorkflowEpisodeSelection();
     submit.disabled = false;
   } catch (e) {
     if (generation === workflowSubscribeGeneration) { status.textContent = "회차를 확인하지 못했습니다."; error.textContent = e.message; }
@@ -297,12 +298,49 @@ function setWorkflowScopeMode(mode) {
   if (!input) return;
   input.checked = true;
   updateWorkflowScopeHint(mode);
+  document.getElementById("workflow-episode-tools").classList.toggle("hidden", mode !== "selected");
   document.getElementById("workflow-episode-picker").classList.toggle("hidden", mode !== "selected");
+  updateWorkflowEpisodeSelection();
   document.getElementById("workflow-latest-count").disabled = mode !== "latest";
   const start = document.getElementById("workflow-start-now");
   start.disabled = mode === "future";
   if (start.disabled) start.checked = false;
 }
+
+function updateWorkflowEpisodeSelection() {
+  const count = document.querySelectorAll('#workflow-episode-picker input:checked').length;
+  document.getElementById("workflow-selected-count").textContent = `선택한 회차 ${count}개`;
+  document.getElementById("workflow-selection-error").textContent = "";
+}
+
+function selectWorkflowEpisodes(action) {
+  if (workflowSubscribeSaving) return;
+  const inputs = [...document.querySelectorAll('#workflow-episode-picker input')];
+  let selected;
+  if (action === "range") {
+    const startText = document.getElementById("workflow-range-start").value.trim();
+    const endText = document.getElementById("workflow-range-end").value.trim();
+    const start = Number(startText), end = Number(endText);
+    const error = document.getElementById("workflow-selection-error");
+    if (!/^[0-9]+$/.test(startText) || !/^[0-9]+$/.test(endText) || !Number.isSafeInteger(start) || !Number.isSafeInteger(end) || start < 1 || end < 1) {
+      error.textContent = "시작·끝 번호는 1 이상의 정수로 입력해주세요."; return;
+    }
+    if (start > end) { error.textContent = "끝 번호는 시작 번호 이상이어야 합니다."; return; }
+    selected = inputs.filter((input) => !input.disabled && Number(input.value) >= start && Number(input.value) <= end);
+    if (!selected.length) { error.textContent = "입력한 범위에 선택 가능한 회차가 없습니다. 기존 선택을 유지합니다."; return; }
+  } else selected = action === "all" ? inputs.filter((input) => !input.disabled) : [];
+  const selectedInputs = new Set(selected);
+  for (const input of inputs) input.checked = selectedInputs.has(input);
+  updateWorkflowEpisodeSelection();
+}
+
+document.getElementById("workflow-select-range").addEventListener("click", () => selectWorkflowEpisodes("range"));
+document.getElementById("workflow-select-all").addEventListener("click", () => selectWorkflowEpisodes("all"));
+document.getElementById("workflow-clear-selection").addEventListener("click", () => selectWorkflowEpisodes("clear"));
+document.getElementById("workflow-episode-picker").addEventListener("change", updateWorkflowEpisodeSelection);
+for (const id of ["workflow-range-start", "workflow-range-end"]) document.getElementById(id).addEventListener("keydown", (event) => {
+  if (event.key === "Enter") { event.preventDefault(); selectWorkflowEpisodes("range"); }
+});
 
 document.querySelectorAll('input[name="workflow-scope"]').forEach((input) => input.addEventListener("change", () => {
   setWorkflowScopeMode(input.value);

@@ -833,6 +833,16 @@
         <label><input type="radio" name="workflow-scope" value="future" /> 현재 회차는 제외, 이후 새로 추가되는 회차만</label>
       </fieldset>
       <p id="workflow-scope-hint" class="hint">현재 선택하지 않은 기존 회차는 잠금이 풀려도 자동으로 추가하지 않습니다. 이후 새로 추가되는 회차는 구독 예약에 따라 확인합니다.</p>
+      <div id="workflow-episode-tools" class="workflow-episode-tools hidden">
+        <div class="workflow-range-fields">
+          <label for="workflow-range-start">시작 번호<input id="workflow-range-start" type="text" inputmode="numeric" autocomplete="off" aria-label="시작 회차 번호" /></label>
+          <label for="workflow-range-end">끝 번호<input id="workflow-range-end" type="text" inputmode="numeric" autocomplete="off" aria-label="끝 회차 번호" /></label>
+          <button id="workflow-select-range" type="button">범위 선택</button>
+        </div>
+        <p class="hint">시작·끝 번호를 모두 포함한 범위로 선택을 바꿉니다. 목록에서 선택 가능한 회차에만 적용됩니다.</p>
+        <div class="workflow-selection-actions"><button id="workflow-select-all" type="button">전체 선택</button><button id="workflow-clear-selection" type="button">선택 해제</button><span id="workflow-selected-count" role="status">선택한 회차 0개</span></div>
+        <p id="workflow-selection-error" class="workflow-error" role="alert"></p>
+      </div>
       <div id="workflow-episode-picker" class="workflow-episode-picker hidden"></div>
       <label class="checkbox-label"><input id="workflow-start-now" type="checkbox" /> 이 작품을 지금 다운로드 시작</label>
       <p id="workflow-start-hint" class="hint">체크하지 않으면 다음 다운로드 예약에 등록합니다.</p>

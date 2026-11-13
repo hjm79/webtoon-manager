@@ -1192,6 +1192,13 @@ select {
 .workflow-dialog fieldset { display: grid; gap: 12px; margin: 16px 0; padding: 16px; border: 1px solid var(--border); border-radius: 8px; }
 .workflow-dialog fieldset label { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
 #workflow-latest-count { width: 70px; }
+.workflow-range-fields { display: flex; gap: 8px; align-items: flex-end; flex-wrap: wrap; }
+.workflow-range-fields label { display: grid; gap: 4px; flex: 1 1 100px; min-width: 0; }
+.workflow-range-fields input { width: 100%; min-width: 0; box-sizing: border-box; }
+.workflow-episode-tools > .hint { margin-top: 8px; }
+.workflow-selection-actions { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+#workflow-selected-count { font-size: 13px; }
+#workflow-selection-error:empty { display: none; }
 .workflow-episode-picker { display: grid; gap: 8px; max-height: 240px; overflow: auto; border: 1px solid var(--border); padding: 10px; margin: 10px 0; }
 .workflow-episode-picker label { display: flex; gap: 8px; align-items: baseline; overflow-wrap: anywhere; }
 .workflow-dialog-actions { margin-top: 20px; flex-wrap: wrap; }
