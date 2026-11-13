@@ -325,6 +325,11 @@ async function loadWebtoonServerUrl() {
   try {
     const data = await apiCall("/api/settings/webtoon-server");
     document.getElementById("webtoon-server-url").value = data.webtoon_server_url;
+    document.getElementById("webtoon-server-url").disabled = Boolean(data.read_only);
+    document.getElementById("btn-save-webtoon-server-url").disabled = Boolean(data.read_only);
+    document.getElementById("viewer-connection-hint").textContent = data.integrated
+      ? "수집·내 서재·읽기가 같은 주소로 연결되어 있습니다. 별도 뷰어 주소를 입력할 필요가 없습니다."
+      : "입력해두면 리포트에 각 작품의 바로가기 링크가 붙고, 구독 카드에서 뷰어로 이동할 수 있습니다.";
     showViewerScanBox(data.webtoon_server_url);
   } catch (e) {
     // 조용히 무시 — 이 필드 하나 때문에 설정 탭 전체 로드가 막히면 안 됨

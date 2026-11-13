@@ -58,12 +58,11 @@ function makeWorkflowScopeButton(item) {
   return button;
 }
 
-async function openEmbeddedReader(title, platform) {
+function beginEmbeddedReader(title) {
   const generation = ++workflowReaderGeneration;
   const dialog = document.getElementById("workflow-reader-dialog");
   const frame = document.getElementById("workflow-reader-frame");
   const external = document.getElementById("workflow-reader-external");
-  const status = document.getElementById("workflow-reader-status");
   clearTimeout(workflowReaderTimer);
   clearTimeout(workflowReaderCloseTimer);
   workflowReaderClosing = false;
@@ -76,32 +75,55 @@ async function openEmbeddedReader(title, platform) {
   external.classList.add("hidden");
   external.removeAttribute("href");
   document.getElementById("workflow-reader-title").textContent = title;
-  status.textContent = "읽을 수 있는 회차를 확인하고 있습니다…";
+  document.getElementById("workflow-reader-status").textContent = "읽을 수 있는 회차를 확인하고 있습니다…";
   showWorkflowDialog(dialog);
+  return generation;
+}
+
+function showEmbeddedReaderUrl(raw, generation) {
+  const dialog = document.getElementById("workflow-reader-dialog");
+  if (generation !== workflowReaderGeneration || !dialog.open) return;
+  const url = workflowReaderUrl(raw);
+  const status = document.getElementById("workflow-reader-status");
+  if (!url) { status.textContent = "뷰어 연결 주소를 확인해주세요."; return; }
+  const frame = document.getElementById("workflow-reader-frame");
+  const external = document.getElementById("workflow-reader-external");
+  external.href = url.href;
+  external.target = url.origin === window.location.origin ? "_self" : "_blank";
+  external.textContent = url.origin === window.location.origin ? "리더 화면 열기" : "별도 뷰어에서 열기";
+  external.classList.remove("hidden");
+  workflowReaderOrigin = url.origin;
+  url.searchParams.set("embed", "1");
+  url.searchParams.set("parent_origin", window.location.origin);
+  frame.src = url.href;
+  frame.classList.remove("hidden");
+  status.textContent = "리더를 여는 중…";
+  workflowReaderTimer = setTimeout(() => {
+    if (generation === workflowReaderGeneration && dialog.open) {
+      status.textContent = `리더가 열리지 않으면 ‘${external.textContent}’를 눌러주세요. 로그인이나 뷰어 연결 설정을 확인할 수 있습니다.`;
+    }
+  }, 12000);
+}
+
+async function openEmbeddedReader(title, platform) {
+  const generation = beginEmbeddedReader(title);
+  const dialog = document.getElementById("workflow-reader-dialog");
+  const status = document.getElementById("workflow-reader-status");
   try {
     const data = await apiCall(`/api/reader/status?title=${encodeURIComponent(title)}&platform=${encodeURIComponent(platform || "naver")}`);
     if (generation !== workflowReaderGeneration || !dialog.open) return;
-    const url = workflowReaderUrl(data.url);
-    if (data.status !== "ready" || !url) {
+    if (data.status !== "ready" || !workflowReaderUrl(data.url)) {
       status.textContent = workflowReaderMessage(data.status, data.message);
       return;
     }
-    external.href = url.href;
-    external.classList.remove("hidden");
-    workflowReaderOrigin = url.origin;
-    url.searchParams.set("embed", "1");
-    url.searchParams.set("parent_origin", window.location.origin);
-    frame.src = url.href;
-    frame.classList.remove("hidden");
-    status.textContent = "리더를 여는 중…";
-    workflowReaderTimer = setTimeout(() => {
-      if (generation === workflowReaderGeneration && dialog.open) {
-        status.textContent = "리더가 열리지 않으면 ‘별도 뷰어에서 열기’를 눌러주세요. 로그인이나 뷰어 연결 설정을 확인할 수 있습니다.";
-      }
-    }, 12000);
+    showEmbeddedReaderUrl(data.url, generation);
   } catch (e) {
     if (generation === workflowReaderGeneration) status.textContent = `뷰어 연결 실패: ${e.message}`;
   }
+}
+
+function openEmbeddedReaderByUrl(title, url) {
+  showEmbeddedReaderUrl(url, beginEmbeddedReader(title));
 }
 
 function closeEmbeddedReader(force = false) {
@@ -124,7 +146,10 @@ function closeEmbeddedReader(force = false) {
   workflowReaderOrigin = null;
   frame.removeAttribute("src");
   frame.classList.add("hidden");
-  closeWorkflowDialog(document.getElementById("workflow-reader-dialog"));
+  const dialog = document.getElementById("workflow-reader-dialog");
+  const wasOpen = dialog.open;
+  closeWorkflowDialog(dialog);
+  if (wasOpen) document.dispatchEvent(new Event("webtoon-reader-closed"));
 }
 
 function showReaderCloseFailure(message) {

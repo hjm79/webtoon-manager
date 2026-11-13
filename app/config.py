@@ -1,8 +1,8 @@
 """
 앱 설정.
 
-**환경변수(또는 작업 폴더의 .env)로 바꿀 수 있는 것은 경로 6개뿐이다**(DOWNLOAD_ROOT, WEBTOON_DOWNLOAD_HOST_PATH, ARCHIVE_ROOT, RCLONE_CONFIG_PATH,
-DATABASE_PATH, COOKIE_FILE_PATH) — README와 docker-compose.yml에 전부 적혀 있고, tests/backend/test_config_options.py가 이 목록과 문서가 어긋나지 않게 검사한다.
+**환경변수(또는 작업 폴더의 .env)로 바꿀 수 있는 것은 경로 6개와 통합 뷰어 연결 2개다**(DOWNLOAD_ROOT, WEBTOON_DOWNLOAD_HOST_PATH, ARCHIVE_ROOT, RCLONE_CONFIG_PATH,
+DATABASE_PATH, COOKIE_FILE_PATH, VIEWER_INTERNAL_URL, VIEWER_PUBLIC_PATH) — README와 docker-compose.yml에 전부 적혀 있고, tests/backend/test_config_options.py가 이 목록과 문서가 어긋나지 않게 검사한다.
 숨겨진 옵션을 두지 않으려고, 나머지 값(요청 간격, 타임아웃, 동시 요청 수, 번호 자릿수, 속도 조절의 기본값)은 환경변수로 읽지 않는 **고정값**이다.
 다운로드 속도(작품당 한 번에 받을 회차, 쉬는 시간)는 설정 화면에서 바꾸고(app/download_pacing.py) 여기 값은 그 기본값이다.
 
@@ -31,6 +31,8 @@ class Settings(BaseSettings):
     rclone_config_path: str = ""
     database_path: str = "/data/webtoons.db"
     cookie_file_path: str = "/cookies/chokobo_murian.json"
+    viewer_internal_url: str = ""
+    viewer_public_path: str = "/viewer"
 
     # ── 고정값(환경변수로 바꿀 수 없다 — ClassVar라서 pydantic 필드가 아니고 환경변수를 읽지 않는다) ──
     folder_zero_fill: ClassVar[int] = 4  # 회차 폴더/파일 번호 자릿수(0012_…). 바꾸면 이미 받은 파일과 이름 규칙이 어긋난다

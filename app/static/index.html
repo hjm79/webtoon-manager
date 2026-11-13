@@ -3,15 +3,20 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>웹툰 구독 관리</title>
+  <title>웹툰</title>
   <link rel="stylesheet" href="/style.css" />
 </head>
 <body>
   <header>
-    <h1>웹툰 구독 관리</h1>
+    <h1>웹툰</h1>
     <!-- PC: 전체목록 화면의 "마지막 확인" 문구(모바일에서는 CSS가 숨기고 필터 안의 같은 문구를 보여 준다) -->
     <span id="header-list-status" class="header-status"></span>
   </header>
+
+  <nav class="workspace-tabs" aria-label="웹툰 메뉴">
+    <button id="workspace-collection" type="button" class="workspace-tab active" data-workspace="collection" aria-pressed="true">수집</button>
+    <button id="workspace-library" type="button" class="workspace-tab" data-workspace="library" aria-pressed="false">내 서재</button>
+  </nav>
 
   <nav class="main-tabs">
     <button class="main-tab active" data-page="naver-list">웹툰 전체목록</button>
@@ -34,6 +39,19 @@
     <div id="workflow-subscriptions" class="workflow-subscriptions"></div>
     <button id="workflow-refresh" type="button">현황 새로고침</button>
   </aside>
+
+  <section id="page-library" class="page hidden" aria-labelledby="library-heading">
+    <div class="library-heading"><h2 id="library-heading">내 서재</h2><p>받은 웹툰을 읽고, 읽던 회차부터 이어 보세요.</p></div>
+    <div class="toolbar library-toolbar">
+      <input id="library-search" type="search" class="clearable" placeholder="서재에서 제목 검색" aria-label="서재 검색" />
+      <select id="library-platform" aria-label="서재 플랫폼"><option value="">플랫폼 전체</option><option value="naver">네이버</option><option value="kakao">카카오페이지</option><option value="archive">보관함</option></select>
+      <select id="library-sort" aria-label="서재 정렬"><option value="latest">최근 업데이트순</option><option value="title">제목순</option><option value="unread">안 읽은 회차순</option></select>
+      <button id="library-refresh" type="button">서재 새로고침</button>
+    </div>
+    <p id="library-status" role="status" aria-live="polite"></p>
+    <a id="library-login" class="link-button hidden">서재 로그인</a>
+    <div id="library-grid" class="library-grid"></div>
+  </section>
 
   <!-- 웹툰 전체목록 (네이버+카카오) -->
   <section id="page-naver-list" class="page">
@@ -481,7 +499,7 @@
           <input id="webtoon-server-url" type="text" placeholder="http://192.168.0.49:25600" />
           <button id="btn-save-webtoon-server-url">저장</button>
         </div>
-        <p class="field-hint">입력해두면 리포트에 각 작품의 "바로가기" 링크가 붙고, 구독중인 웹툰 카드에서 바로 뷰어로 이동하는 아이콘이 생깁니다(카카오 포함).</p>
+        <p id="viewer-connection-hint" class="field-hint">입력해두면 리포트에 각 작품의 "바로가기" 링크가 붙고, 구독중인 웹툰 카드에서 바로 뷰어로 이동하는 아이콘이 생깁니다(카카오 포함).</p>
         <span id="webtoon-server-save-result" class="hint-inline"></span>
         <div class="viewer-scan-box hidden">
           <label class="checkbox-label"><input type="checkbox" id="viewer-scan-toggle" /> 새 파일이 생기면 뷰어 서버에 스캔 시키기</label>
@@ -869,6 +887,7 @@
   <script src="/js/40-subscriptions.js"></script>
   <script src="/js/50-manual-download.js"></script>
   <script src="/js/55-workflow.js"></script>
+  <script src="/js/56-library.js"></script>
   <script src="/js/60-registry.js"></script>
   <script src="/js/70-settings-schedule.js"></script>
   <script src="/js/71-settings-discord-backup.js"></script>

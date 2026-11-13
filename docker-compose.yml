@@ -14,9 +14,12 @@
 #   COOKIE_FILE_NAME            선택          쿠키 파일 이름 (기본 cookies.json)
 #   RCLONE_CONFIG_HOST_PATH     rclone 사용 시 rclone.conf가 있는 호스트 폴더
 #   WEB_PORT                    선택          접속 포트 (기본 8000)
+#   VIEWER_INTERNAL_URL         통합 뷰어 사용 시 Docker 내부 뷰어 주소
+#   VIEWER_PUBLIC_PATH          선택          통합 뷰어 공개 경로 (기본 /viewer)
 #
-# ── 앱이 읽는 환경변수는 아래 environment의 6개가 전부입니다 ──
+# ── 앱이 읽는 환경변수는 아래 environment의 경로 6개와 통합 연결 2개입니다 ──
 #   DOWNLOAD_ROOT, WEBTOON_DOWNLOAD_HOST_PATH, ARCHIVE_ROOT, RCLONE_CONFIG_PATH, DATABASE_PATH, COOKIE_FILE_PATH
+#   VIEWER_INTERNAL_URL, VIEWER_PUBLIC_PATH
 #   그 밖의 값(다운로드 속도, 요청 간격, 타임아웃 등)은 환경변수로 바꿀 수 없습니다 — 다운로드 속도는 설정 화면의 "다운로드 속도 조절"에서,
 #   나머지는 고정값입니다. 예전 환경변수(MAX_NEW_EPISODES_PER_TITLE, BATCH_REST_MINUTES, DELAY_SECONDS, REQUEST_TIMEOUT_SECONDS,
 #   MAX_CONCURRENT_DOWNLOADS, ARTIST_SCAN_CONCURRENCY, FOLDER_ZERO_FILL, IMAGE_ZERO_FILL)를 지정해 두면 무시되고 시작할 때 경고가 남습니다.
@@ -46,6 +49,9 @@ services:
       # ARCHIVE_ROOT/rclone 둘 다 없으면 "아카이빙" 탭에 설정 안내 화면만 뜨고
       # 나머지 기능엔 영향 없다.
       RCLONE_CONFIG_PATH: /rclone-config/rclone.conf
+      # 통합 배포에서만 사용. 뷰어는 같은 Docker 네트워크에 있고 호스트 포트를 공개하지 않는다.
+      VIEWER_INTERNAL_URL: ${VIEWER_INTERNAL_URL:-}
+      VIEWER_PUBLIC_PATH: ${VIEWER_PUBLIC_PATH:-/viewer}
     volumes:
       # 실제 다운로드 폴더. /data 밑이 아니라 완전히 별도 경로(/webtoon_download)에
       # 마운트한다 — /data와 겹친 채로 두면(예전엔 /data/Webtoon_Download였음) 도커가

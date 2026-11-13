@@ -3,6 +3,7 @@
 // ── 탭 전환 ─────────────────────────────────────────────
 
 const ACTIVE_TAB_KEY = "activeMainTab";
+let lastCollectionTab = "naver-list";
 
 // 상단 메뉴(.main-tabs)의 실제 높이를 --nav-h에 넣어 둔다 — 고정 툴바(검색/필터/요일 탭)를 그 바로 아래에 붙이는 데 쓴다.
 // 창이 좁으면 메뉴가 두 줄로 접혀 높이가 달라지는데, 높이를 41px로 가정해 두면 툴바가 메뉴 뒤에 가려진다. 모바일은 메뉴가 한 줄 고정 높이(--m-nav-h)라 CSS가 따로 계산한다.
@@ -12,6 +13,15 @@ function syncStickyOffsets() {
 window.addEventListener("resize", syncStickyOffsets);
 
 function switchToTab(page) {
+  const library = page === "library";
+  if (!library) lastCollectionTab = page;
+  document.querySelector(".main-tabs").classList.toggle("hidden", library);
+  document.getElementById("workflow-overview").classList.toggle("hidden", library);
+  document.querySelectorAll(".workspace-tab").forEach((tab) => {
+    const active = tab.dataset.workspace === (library ? "library" : "collection");
+    tab.classList.toggle("active", active);
+    tab.setAttribute("aria-pressed", String(active));
+  });
   document.querySelectorAll(".main-tab").forEach((t) => t.classList.toggle("active", t.dataset.page === page));
   document.querySelectorAll(".page").forEach((p) => p.classList.add("hidden"));
   document.getElementById(`page-${page}`).classList.remove("hidden");
@@ -23,6 +33,7 @@ function switchToTab(page) {
   if (page === "manual-download") syncManualPlatformSelect();
   document.getElementById("header-list-status").classList.toggle("hidden", page !== "naver-list"); // "마지막 확인" 문구는 전체목록 화면의 것이다
   scrollActiveMainTabIntoView();
+  syncStickyOffsets();
 }
 
 // 모바일에서는 메뉴바가 한 줄이라 가로로 스와이프해야 모두 보인다 — 선택한 탭이 화면 밖에 가려져 있지 않게 가운데 쪽으로 가져온다(넘치지 않는 데스크톱에서는 아무것도 안 한다)
@@ -40,6 +51,14 @@ if (typeof ResizeObserver !== "undefined") new ResizeObserver(syncStickyOffsets)
 document.querySelectorAll(".main-tab").forEach((tab) => {
   tab.addEventListener("click", () => {
     const page = tab.dataset.page;
+    sessionStorage.setItem(ACTIVE_TAB_KEY, page);
+    switchToTab(page);
+  });
+});
+
+document.querySelectorAll(".workspace-tab").forEach((tab) => {
+  tab.addEventListener("click", () => {
+    const page = tab.dataset.workspace === "library" ? "library" : lastCollectionTab;
     sessionStorage.setItem(ACTIVE_TAB_KEY, page);
     switchToTab(page);
   });

@@ -53,7 +53,7 @@ with startup() as client:
     assert calls == {"start_bot": 1, "stop_bot": 0, "backfill": 1, "refresh": 1}, calls                                              # 카카오 관리가 켜져 있으니 목록 갱신을 시작
     tags = repository.list_watched_tags(); assert tags and all(not t.enabled for t in tags), "기본 태그는 꺼진 채로 채워진다"
     # 정적 파일 — 항상 서버에 확인(no-cache), 없는 파일은 404. API도 응답한다
-    index = client.get("/"); assert index.status_code == 200 and index.headers["cache-control"] == "no-cache" and "웹툰 구독 관리" in index.text
+    index = client.get("/"); assert index.status_code == 200 and index.headers["cache-control"] == "no-cache" and "<title>웹툰</title>" in index.text
     js = client.get("/js/00-core.js"); assert js.status_code == 200 and js.headers["cache-control"] == "no-cache"
     assert client.get("/style.css").headers["cache-control"] == "no-cache" and client.get("/js/없는파일.js").status_code == 404
     assert client.get("/api/settings").status_code == 200

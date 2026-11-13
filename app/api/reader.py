@@ -8,7 +8,7 @@ from urllib.parse import urlencode, urlsplit, urlunsplit
 import aiohttp
 from fastapi import APIRouter, HTTPException, Query
 
-from app import repository
+from app import repository, viewer_connection
 from app.config import get_settings
 from app.file_utils import remove_forbidden_str, remove_forbidden_str_kakao
 
@@ -59,9 +59,13 @@ async def reader_status(title: str = Query(min_length=1, max_length=300), platfo
     if not title.strip():
         raise HTTPException(422, "작품 제목을 입력해주세요.")
     configured = await asyncio.to_thread(repository.get_setting, "webtoon_server_url")
-    if not configured:
+    if not configured and not viewer_connection.integrated():
         return _result("not_configured", "설정에서 웹툰 뷰어 주소를 연결해주세요.")
-    base = _viewer_base(configured)
+    try:
+        base = _viewer_base(viewer_connection.internal_base(configured))
+        public = viewer_connection.public_base(configured)
+    except ValueError:
+        base = None
     if base is None:
         return _result("error", "뷰어 주소 형식을 확인해주세요. 로그인 정보가 포함되지 않은 HTTP 주소가 필요합니다.")
     safe_title = (remove_forbidden_str_kakao if platform == "kakao" else remove_forbidden_str)(title.strip())
@@ -82,8 +86,20 @@ async def reader_status(title: str = Query(min_length=1, max_length=300), platfo
             series = data.get("series_id")
             if not isinstance(series, str) or not _ID.fullmatch(series):
                 return _result("error", "뷰어 응답에 올바른 회차 정보가 없습니다.")
-            url = base + "/reader.html?" + urlencode({"series": series})
+            url = public + "/reader.html?" + urlencode({"series": series})
             return _result("ready", "관리기 안에서 바로 읽을 수 있습니다.", url)
     except (aiohttp.ClientError, asyncio.TimeoutError, UnicodeError, ValueError):
         log.warning("Reader availability lookup failed (platform=%s)", platform)
         return _result("error", "뷰어에 연결하지 못했습니다. 잠시 후 다시 시도해주세요.")
+
+
+@router.get("/viewer/config")
+async def viewer_config():
+    if not viewer_connection.integrated():
+        return {"enabled": False, "public_path": None, "library_url": None, "reader_url": None}
+    try:
+        viewer_connection.internal_base()
+        path = viewer_connection.public_path()
+    except ValueError:
+        raise HTTPException(503, "통합 뷰어 설정을 확인해주세요.") from None
+    return {"enabled": True, "public_path": path, "library_url": path + "/", "reader_url": path + "/reader.html"}

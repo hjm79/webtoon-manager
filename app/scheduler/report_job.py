@@ -9,7 +9,7 @@ from zoneinfo import ZoneInfo
 
 import aiohttp
 
-from app import discord_notify, job_status, list_alert, report_dispatch, report_seen, repository, webtoon_server_client
+from app import discord_notify, job_status, list_alert, report_dispatch, report_seen, repository, viewer_connection, webtoon_server_client
 
 
 from app.config import get_settings
@@ -106,7 +106,7 @@ async def _resolve_reader_urls(session: aiohttp.ClientSession, settings, success
     웹툰서버는 실제 디스크 폴더명 기준으로 매칭하는데, 폴더를 만들 때는 ':' 같은 금지문자를 치환해서 저장한다 — 네이버는 전각 문자로
     (예: "제목 : 부제" → "제목 ： 부제"), 카카오는 밑줄 규칙으로. 원본 제목을 그대로 조회하면 문자가 안 맞아 실패한 사례가 있어서
     폴더명 생성과 같은 치환을 거쳐 조회한다."""
-    webtoon_server_url = repository.get_setting(_SETTING_KEY_WEBTOON_SERVER_URL) or ""
+    webtoon_server_url = viewer_connection.internal_base(repository.get_setting(_SETTING_KEY_WEBTOON_SERVER_URL))
     urls: dict[str, str] = {}
     if not webtoon_server_url:
         return urls

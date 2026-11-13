@@ -25,6 +25,25 @@ header { display: flex; align-items: baseline; justify-content: space-between; g
 .header-status { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; color: var(--muted); text-align: right; }
 .list-head-status { display: none; }
 h1 { font-size: 20px; margin: 0; }
+.workspace-tabs { display: flex; gap: 8px; margin: 0 0 14px; }
+.workspace-tab { font-size: 15px; min-width: 100px; }
+.workspace-tab.active { background: var(--text); border-color: var(--text); color: #fff; font-weight: 600; }
+.library-heading { margin: 0 0 18px; }
+.library-heading h2 { margin: 0 0 6px; font-size: 20px; }
+.library-heading p { margin: 0; color: var(--muted); font-size: 14px; }
+.library-toolbar > .clearable-wrap { flex: 1 1 220px; min-width: 0; }
+.library-toolbar input { width: 100%; }
+.library-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 300px), 1fr)); gap: 16px; }
+.library-card { display: grid; grid-template-columns: 88px minmax(0, 1fr); gap: 14px; padding: 14px; border: 1px solid var(--border); border-radius: 10px; background: var(--card); }
+.library-cover { width: 88px; height: 124px; object-fit: cover; border-radius: 6px; background: var(--bg); }
+.library-cover-placeholder { display: flex; align-items: center; justify-content: center; font-size: 12px; color: var(--muted); }
+.library-card-body { min-width: 0; display: flex; flex-direction: column; align-items: flex-start; gap: 6px; }
+.library-card h3 { margin: 0; font-size: 16px; overflow-wrap: anywhere; }
+.library-card p { margin: 0; font-size: 13px; color: var(--muted); overflow-wrap: anywhere; }
+.library-card button { margin-top: auto; font-weight: 600; }
+.library-platform { font-size: 12px; color: var(--muted); }
+#library-status { overflow-wrap: anywhere; }
+#library-login { display: inline-block; margin-bottom: 16px; }
 
 button {
   background: var(--card);

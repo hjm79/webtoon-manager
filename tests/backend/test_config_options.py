@@ -1,4 +1,4 @@
-"""환경변수로 바꿀 수 있는 옵션은 문서에 있는 6개(경로)뿐이다 — 숨겨진 옵션이 없어야 한다.
+"""환경변수 옵션은 문서에 있는 경로 6개와 통합 연결 2개다 — 숨겨진 옵션이 없어야 한다.
 
 - 속도/동시 요청/타임아웃/번호 자릿수 같은 값은 환경변수로 바꿀 수 없는 고정값이다(속도 조절은 설정 화면에서 바꾼다).
 - 예전에 환경변수로 이 값들을 지정해 둔 배포는 값이 조용히 무시되지 않도록 시작할 때 경고를 남긴다.
@@ -18,13 +18,13 @@ from app.config import Settings
 db.get_connection()
 
 ROOT = Path(__file__).resolve().parents[2]
-PATH_OPTIONS = {"download_root", "webtoon_download_host_path", "archive_root", "rclone_config_path", "database_path", "cookie_file_path"}
+PATH_OPTIONS = {"download_root", "webtoon_download_host_path", "archive_root", "rclone_config_path", "database_path", "cookie_file_path", "viewer_internal_url", "viewer_public_path"}
 FIXED = {"folder_zero_fill": 4, "image_zero_fill": 4, "max_concurrent_downloads": 10, "artist_scan_concurrency": 5,
          "max_new_episodes_per_title": 10, "batch_rest_minutes": 5.0, "delay_seconds": 1.0, "request_timeout_seconds": 10}
 README = (ROOT / "README.md").read_text(encoding="utf-8")
 COMPOSE_TEXT = (ROOT / "docker-compose.yml").read_text(encoding="utf-8")
 
-# Scenario 1: 환경변수로 덮어쓸 수 있는 필드는 경로 6개뿐이다
+# Scenario 1: 환경변수 필드는 경로 6개와 통합 연결 2개다
 assert set(Settings.model_fields) == PATH_OPTIONS, set(Settings.model_fields) ^ PATH_OPTIONS
 
 # Scenario 2: 고정값은 환경변수를 줘도 바뀌지 않는다(값이 조용히 적용되는 숨겨진 옵션이 없다)
@@ -37,7 +37,7 @@ finally:
     for key, value in saved.items():
         if value is None: os.environ.pop(key, None)
         else: os.environ[key] = value
-print("1~2) 환경변수 옵션은 경로 6개뿐 OK")
+print("1~2) 경로 6개와 통합 연결 2개 환경변수 옵션 OK")
 
 # Scenario 3: 예전 환경변수가 남아 있는지 찾는다(환경변수와 .env 파일, 대소문자 무관). 현재 옵션은 포함하지 않는다
 assert config.REMOVED_ENV_VARIABLES == tuple(sorted(n.upper() for n in FIXED)) or set(config.REMOVED_ENV_VARIABLES) == {n.upper() for n in FIXED}

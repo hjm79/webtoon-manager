@@ -17,6 +17,7 @@ from starlette.responses import Response
 from starlette.types import Scope
 
 from app.api.routes import router as api_router
+from app.api import viewer_proxy
 from app.discord_bot import start_bot, stop_bot
 from app.log_redaction import RedactingFilter
 from app import kakao_catalog, kakao_records, report_dispatch, repository
@@ -64,6 +65,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="웹툰 구독 관리", lifespan=lifespan)
 app.include_router(api_router)
+viewer_proxy.install(app)
 class NoCacheStaticFiles(StaticFiles):
     """
     js/*.js / style.css / index.html에 파일명 해시가 없어서, 브라우저가 자체 판단으로

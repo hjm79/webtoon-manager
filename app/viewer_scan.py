@@ -13,7 +13,7 @@
 import logging
 from datetime import datetime, timedelta, timezone
 
-from app import job_status, repository, webtoon_server_client
+from app import job_status, repository, viewer_connection, webtoon_server_client
 from app.json_setting import JsonSetting
 from app.crypto import decrypt, encrypt
 
@@ -58,7 +58,10 @@ def set_config(*, enabled: bool, token: str | None = None, max_wait_minutes: int
 
 def is_ready() -> bool:
     """스캔을 시킬 수 있다: 켜져 있고 뷰어 서버 주소와 토큰이 있다."""
-    return is_enabled() and bool(repository.get_setting(_SERVER_URL_KEY)) and bool(get_token())
+    try:
+        return is_enabled() and bool(viewer_connection.internal_base(repository.get_setting(_SERVER_URL_KEY))) and bool(get_token())
+    except ValueError:
+        return False
 
 
 # ── 요청/진행 상태 ───────────────────────────────────────────────────
@@ -135,7 +138,7 @@ async def tick(session, now: datetime, timeout_seconds: int) -> None:
         return
     now = now.astimezone(timezone.utc)
     state = load_state()
-    base_url, token, max_wait = repository.get_setting(_SERVER_URL_KEY) or "", get_token(), timedelta(minutes=get_max_wait_minutes())
+    base_url, token, max_wait = viewer_connection.internal_base(repository.get_setting(_SERVER_URL_KEY)), get_token(), timedelta(minutes=get_max_wait_minutes())
     if state["requested_at"] and state["started_at"] and state["started_at"] >= state["requested_at"]:
         state = update_state(requested_at=None)  # 이미 덮인 요청
 

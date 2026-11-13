@@ -2,6 +2,7 @@
 // (한 파일이던 시절에는 함수 선언이 끌어올려져서(hoisting) 위쪽에 있어도 됐지만, 파일이 나뉘면 뒤 파일 것은 아직 없다)
 
 const pageLoaders = {
+  library: loadLibraryPage,
   "naver-list": loadNaverList,
   unsubscribed: () => loadSubscriptionTab("unsubscribed"),
   excluded: () => loadSubscriptionTab("excluded"),

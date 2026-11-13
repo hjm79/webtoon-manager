@@ -7,7 +7,7 @@ import logging
 
 import aiohttp
 
-from app import archiver, discord_notify, download_roots, job_status, rclone_updater, repository, retention, viewer_scan, webtoon_server_client
+from app import archiver, discord_notify, download_roots, job_status, rclone_updater, repository, retention, viewer_connection, viewer_scan, webtoon_server_client
 from app.archiver import cancel
 from app.archiver.failure_reason import summarize as summarize_failure
 from app.archiver.title_archive import ReadNumbersProvider
@@ -37,7 +37,8 @@ def _build_read_numbers_provider(
 @asynccontextmanager
 async def read_numbers_provider_for(settings):
     """뷰어 서버 주소가 설정돼 있으면 읽은 회차를 묻는 조회 함수(동기)를, 아니면 None을 준다 — 정기 아카이빙과 "지금 이동"(수동)이 같이 쓴다. 뷰어 세션은 이 블록이 끝나면 닫힌다."""
-    server_url = await asyncio.to_thread(repository.get_setting, _SETTING_KEY_WEBTOON_SERVER_URL)
+    configured = await asyncio.to_thread(repository.get_setting, _SETTING_KEY_WEBTOON_SERVER_URL)
+    server_url = viewer_connection.internal_base(configured)
     if not server_url:
         yield None
         return

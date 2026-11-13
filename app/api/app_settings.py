@@ -16,7 +16,7 @@ from app import (
     repository,
 )
 from app import discord_config, download_pacing, kakao_page_download, list_alert, report_dispatch, viewer_scan, waitfree_sync
-from app import webtoon_server_client
+from app import viewer_connection, webtoon_server_client
 from app.file_utils import remove_forbidden_str, remove_forbidden_str_kakao
 from app.config import get_settings
 
@@ -297,22 +297,28 @@ async def get_waitfree_schedule():
 
 class WebtoonServerUrlOut(BaseModel):
     webtoon_server_url: str
+    integrated: bool | None = None
+    read_only: bool | None = None
 
 
 class WebtoonServerUrlIn(BaseModel):
     webtoon_server_url: str
 
 
-@router.get("/settings/webtoon-server", response_model=WebtoonServerUrlOut)
+@router.get("/settings/webtoon-server", response_model=WebtoonServerUrlOut, response_model_exclude_none=True)
 async def get_webtoon_server_url():
     """리포트에 '바로가기' 링크를 붙일 때 조회할 별도 웹툰 뷰어 서버 주소.
     비워두면 링크 없이 제목만 나열한다."""
+    if viewer_connection.integrated():
+        return WebtoonServerUrlOut(webtoon_server_url=viewer_connection.public_path(), integrated=True, read_only=True)
     value = await asyncio.to_thread(repository.get_setting, "webtoon_server_url")
     return WebtoonServerUrlOut(webtoon_server_url=value or "")
 
 
-@router.post("/settings/webtoon-server", response_model=WebtoonServerUrlOut)
+@router.post("/settings/webtoon-server", response_model=WebtoonServerUrlOut, response_model_exclude_none=True)
 async def set_webtoon_server_url(payload: WebtoonServerUrlIn):
+    if viewer_connection.integrated():
+        raise HTTPException(409, "통합 뷰어 주소는 서버에서 관리합니다. 기존 저장 주소는 유지됩니다.")
     await asyncio.to_thread(
         repository.set_setting, "webtoon_server_url", payload.webtoon_server_url.strip() or None
     )
@@ -437,7 +443,8 @@ async def lookup_webtoon_server_reader_url(title: str, platform: str = "naver"):
     카카오는 사용자가 쓰는 별도 도구가 받아서 밑줄(예: "제목 : 부제" → "제목_ 부제")로
     치환한다(둘 다 실제로 확인됨). 원본 제목이 아니라 그 치환을 거친 이름으로
     조회해야 한다 — remove_forbidden_str/remove_forbidden_str_kakao 참고."""
-    server_url = await asyncio.to_thread(repository.get_setting, "webtoon_server_url")
+    configured = await asyncio.to_thread(repository.get_setting, "webtoon_server_url")
+    server_url = viewer_connection.internal_base(configured)
     if not server_url:
         return {"url": None}
     settings = get_settings()

@@ -71,6 +71,8 @@ services:
       DATABASE_PATH: /data/webtoons.db
       COOKIE_FILE_PATH: /cookies/${COOKIE_FILE_NAME:-cookies.json}
       RCLONE_CONFIG_PATH: /rclone-config/rclone.conf
+      VIEWER_INTERNAL_URL: ${VIEWER_INTERNAL_URL:-}
+      VIEWER_PUBLIC_PATH: ${VIEWER_PUBLIC_PATH:-/viewer}
     volumes:
       - ${WEBTOON_DOWNLOAD_HOST_PATH}:/webtoon_download
       - ${WEBTOON_ARCHIVE_HOST_PATH}:/webtoon_archive
@@ -337,7 +339,7 @@ Windows에서 rclone으로 마운트한 드라이브는 Docker Desktop이 인식
 
 ## 모든 설정 옵션
 
-이 프로그램의 옵션은 **세 곳**에만 있습니다. 이 목록에 없는 숨겨진 옵션은 없습니다(환경변수로 읽는 값은 아래 ②의 6개가 전부입니다).
+이 프로그램의 옵션은 **세 곳**에만 있습니다. 이 목록에 없는 숨겨진 옵션은 없습니다(환경변수로 읽는 값은 아래 ②의 경로 6개와 통합 연결 2개입니다).
 
 ### ① docker-compose 변수 (설치할 때 채우는 값)
 
@@ -352,10 +354,12 @@ Windows에서 rclone으로 마운트한 드라이브는 Docker Desktop이 인식
 | `COOKIE_FILE_NAME` | 선택 | `cookies.json` | 위 폴더 안 쿠키 파일 이름 |
 | `RCLONE_CONFIG_HOST_PATH` | rclone을 쓸 때 | 없음 | rclone 설정 파일이 들어 있는 호스트 폴더(`/rclone-config`에 쓰기 가능으로 연결) |
 | `WEB_PORT` | 선택 | `8000` | 브라우저로 접속할 포트 |
+| `VIEWER_INTERNAL_URL` | 통합 뷰어를 쓸 때 | 빈 값 | 같은 Docker 네트워크의 뷰어 주소. 예: `http://webtoon-server:8000`. 브라우저에 노출하지 않으며 기존 연결 설정은 보존합니다 |
+| `VIEWER_PUBLIC_PATH` | 선택 | `/viewer` | 통합 뷰어의 공개 경로. 수집·서재·읽기를 관리기의 한 주소로 사용합니다 |
 
 ### ② 컨테이너 환경변수 (compose의 `environment`) — 앱이 읽는 환경변수의 전부
 
-보통은 `docker-compose.yml`에 적힌 그대로 두면 됩니다. **이 6개 말고는 환경변수로 바꿀 수 있는 옵션이 없습니다.**
+보통은 `docker-compose.yml`에 적힌 그대로 두면 됩니다. 환경변수는 경로 6개와 선택적인 통합 뷰어 연결 2개입니다.
 
 | 환경변수 | compose에서 넣는 값 | 설명 |
 |---|---|---|
@@ -363,6 +367,8 @@ Windows에서 rclone으로 마운트한 드라이브는 Docker Desktop이 인식
 | `WEBTOON_DOWNLOAD_HOST_PATH` | `${WEBTOON_DOWNLOAD_HOST_PATH}` | 설정 화면이 "받는 폴더"를 호스트 경로로도 보여주기 위한 값(안 넘기면 컨테이너 경로만 보임) |
 | `ARCHIVE_ROOT` | `/webtoon_archive` | 컨테이너 안의 보관 폴더. 비우면 "아카이빙" 탭에 안내 화면만 뜹니다 |
 | `RCLONE_CONFIG_PATH` | `/rclone-config/rclone.conf` | rclone 설정 파일 위치. 비우면 rclone 원격은 쓰지 않습니다 |
+| `VIEWER_INTERNAL_URL` | `${VIEWER_INTERNAL_URL:-}` | 고정된 내부 뷰어 HTTP(S) 주소. 비우면 기존 별도 뷰어 설정을 사용합니다 |
+| `VIEWER_PUBLIC_PATH` | `${VIEWER_PUBLIC_PATH:-/viewer}` | 통합 뷰어 공개 경로. 뷰어의 `BASE_PATH`와 같아야 합니다 |
 | `DATABASE_PATH` | `/data/webtoons.db` | 설정과 구독 기록을 저장하는 데이터 파일 |
 | `COOKIE_FILE_PATH` | `/cookies/${COOKIE_FILE_NAME:-cookies.json}` | 네이버 로그인 쿠키 파일 위치 |
 
