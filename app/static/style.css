@@ -31,7 +31,11 @@ h1 { font-size: 20px; margin: 0; }
 .library-heading { margin: 0 0 18px; }
 .library-heading h2 { margin: 0 0 6px; font-size: 20px; }
 .library-heading p { margin: 0; color: var(--muted); font-size: 14px; }
-.library-toolbar > .clearable-wrap { flex: 1 1 220px; min-width: 0; }
+.toolbar.library-toolbar > .clearable-wrap { flex: 1 1 220px; min-width: 0; }
+.library-toolbar > select, .library-toolbar > button { flex-shrink: 0; }
+@media (max-width: 640px) {
+  .toolbar.library-toolbar > .clearable-wrap { flex: 1 0 100%; }
+}
 .library-toolbar input { width: 100%; }
 .library-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 300px), 1fr)); gap: 16px; }
 .library-card { display: grid; grid-template-columns: 88px minmax(0, 1fr); gap: 14px; padding: 14px; border: 1px solid var(--border); border-radius: 10px; background: var(--card); }
