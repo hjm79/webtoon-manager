@@ -117,6 +117,16 @@ def note_library_changed(count: int, when: datetime | None = None) -> None:
         request(when or datetime.now(timezone.utc))
 
 
+def note_completed_batch(when: datetime | None) -> None:
+    """Queue a completed ZIP batch without changing report delivery timing."""
+    if when is None:
+        return
+    try:
+        request(when)
+    except Exception as error:
+        log.warning("완료한 다운로드 배치의 뷰어 스캔 요청을 기록하지 못했습니다: %s", type(error).__name__)
+
+
 def set_watermark(when: datetime) -> None:
     update_state(watermark=_iso(when))
 

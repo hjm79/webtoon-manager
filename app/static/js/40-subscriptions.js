@@ -105,6 +105,7 @@ function renderSubscriptionTab(status) {
   const shown = windowRows(status, listEl, rows, () => renderSubscriptionTab(status)); // 한 번에 다 그리면 브라우저가 멎는다 — 보이는 만큼만 만들고 이어서 그린다
   const built = reconcileGrid(listEl, shown, status, subscriptionCache[status] || []);
   if (built > 0) pruneMissingViewerIcons();
+  else if (listEl.querySelector('[data-reader-status="indexing"]')) pruneMissingViewerIcons({ pendingOnly: true });
   updateFilterToggleLabels(); // 모바일의 접힌 "필터" 버튼에 적용된 필터 수를 맞춘다(플랫폼을 바꾸면 태그가 풀리고 숨겨지는 것도 반영)
 }
 

@@ -166,6 +166,8 @@ class RunResult:
     rental_remaining: int | None = None  # 이 작품에 남은 대여권 수(대여권을 쓰려고 확인한 경우에만 안다)
     rental_skip_mode: bool = False  # 대여권 자동 사용이 켜진 실행(기다무 대기 회차를 건너뛰고 대여권 회차를 본다)
 
+    stopped_reason: str | None = None  # 구독 다운로드에서 다음 회차를 시작하지 않은 이유
+
     @property
     def caught_up_episode(self) -> "Episode | None":
         """연재 중인 작품을 최신 회차까지 다 받아서 더 받을 회차가 없을 때, 그 마지막 회차(아니면 None). 완결작은 해당하지 않는다 —
@@ -187,7 +189,7 @@ class RunResult:
         - 대여권 자동 사용이 꺼진 실행: 잠긴 회차 중 가장 앞의 것이 대여권이 필요한 회차일 때(기다무로 열 수 있는 회차 = 충전 대기나 "N일 후 무료"는 기다리면
           자동으로 이어지므로 해당하지 않는다).
         - 켜진 실행: 기다무 대기 회차는 건너뛰므로, 대여권으로 열려고 했는데 보유 대여권이 0장이어서 못 연 첫 회차(보유 수를 확인한 적이 없거나 아직 남았으면 단정하지 않는다)."""
-        if self.error is not None or self.failed is not None:
+        if self.error is not None or self.failed is not None or self.stopped_reason:
             return None
         opened = self._opened_numbers()
         if len(self.downloaded) - len(opened) < len(self.plan.to_download):
@@ -204,6 +206,8 @@ class RunResult:
     @property
     def waiting_for_waitfree(self) -> int:
         """기다무 충전이나 "N일 후 무료"를 기다리는 잠긴 회차 수(열린 회차와 대여권이 필요한 회차는 뺀다) — 실행 요약에 쓴다."""
+        if self.stopped_reason:
+            return 0
         opened = self._opened_numbers()
         return sum(1 for episode in self.plan.locked if episode.number not in opened and not self._needs_ticket(episode))
 
@@ -211,7 +215,7 @@ class RunResult:
     def nothing_left(self) -> bool:
         """이번 실행 뒤 자동으로 받을 회차가 더 남지 않았다 — 실패/오류가 없고, 받을 수 있던 회차를 다 받았고, 잠긴 회차가 없다
         (기다무/대여권으로 연 회차는 잠긴 회차 중 하나였으므로 뺀다). 완결 확인 알림은 이때만 보낸다."""
-        if self.error is not None or self.failed is not None:
+        if self.error is not None or self.failed is not None or self.stopped_reason:
             return False
         opened = self._opened_numbers()  # 기다무/대여권으로 막 열어 받은 회차는 잠긴 회차 중 하나였으므로 뺀다
         remaining_locked = sum(1 for episode in self.plan.locked if episode.number not in opened)

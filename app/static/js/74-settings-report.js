@@ -1,4 +1,4 @@
-// 설정: 다운로드 리포트 — 발송하지 않는 시간, 모으는 시간(N분), 새 에피소드 발송 시간, 다운로드 뒤 뷰어 서버 스캔
+// 설정: 알림 리포트와 독립적인 다운로드 뒤 뷰어 스캔
 // (index.html에서 파일 이름 순서대로 로드된다 — 클래식 스크립트라 최상위 선언은 전역으로 공유된다)
 
 const QUIET_DEFAULT = { start_hour: 23, start_minute: 0, end_hour: 6, end_minute: 0, days: [] };
@@ -88,20 +88,46 @@ document.getElementById("btn-save-list-alert").addEventListener("click", () => s
 document.getElementById("btn-clear-list-alert").addEventListener("click", () => saveListAlertTime(null, ""));
 
 async function loadReportSettings() {
+  const controls = ["report-batch-minutes", "btn-save-download-batch", "btn-save-report-settings", "btn-add-report-quiet"].map((id) => document.getElementById(id));
+  controls.forEach((control) => control.disabled = true);
   try {
     const data = await apiCall("/api/settings/report");
+    if (!Array.isArray(data.quiet_hours) || !Number.isInteger(data.batch_minutes)) throw new Error("리포트 설정을 확인하지 못했습니다.");
     document.getElementById("report-quiet-list").innerHTML = "";
     data.quiet_hours.forEach(addQuietRow);
     refreshQuietEmptyHint();
     document.getElementById("report-batch-minutes").value = data.batch_minutes;
+    controls.forEach((control) => control.disabled = false);
+    document.getElementById("report-settings-save-result").textContent = "";
+    document.getElementById("download-batch-save-result").textContent = "";
   } catch (e) {
-    document.getElementById("report-settings-save-result").textContent = e.message;
+    document.getElementById("report-settings-save-result").textContent = `${e.message} 저장은 차단했습니다. 설정 화면을 다시 열어주세요.`;
+    document.getElementById("download-batch-save-result").textContent = document.getElementById("report-settings-save-result").textContent;
   }
   loadListAlertSetting();
-  loadViewerScanSettings();
 }
 
 document.getElementById("btn-add-report-quiet").addEventListener("click", () => addQuietRow(QUIET_DEFAULT));
+
+document.getElementById("btn-save-download-batch").addEventListener("click", async () => {
+  const resultEl = document.getElementById("download-batch-save-result");
+  resultEl.classList.remove("error");
+  resultEl.textContent = "";
+  const raw = document.getElementById("report-batch-minutes").value.trim();
+  const minutes = Number(raw);
+  if (!raw || !Number.isInteger(minutes) || minutes < 0 || minutes > 1440) {
+    resultEl.classList.add("error");
+    resultEl.textContent = "대기 시간은 0~1440분 사이의 정수로 입력해주세요.";
+    return;
+  }
+  try {
+    await apiCall("/api/settings/report", { method: "POST", body: JSON.stringify({ batch_minutes: minutes }) });
+    resultEl.textContent = "다운로드 리포트의 묶음 대기 시간을 저장했습니다.";
+  } catch (e) {
+    resultEl.classList.add("error");
+    resultEl.textContent = e.message;
+  }
+});
 
 document.getElementById("btn-save-report-settings").addEventListener("click", async () => {
   const resultEl = document.getElementById("report-settings-save-result");
@@ -117,7 +143,7 @@ document.getElementById("btn-save-report-settings").addEventListener("click", as
       : true;
     await apiCall("/api/settings/report", {
       method: "POST",
-      body: JSON.stringify({ quiet_hours: quietRows, batch_minutes: Number(document.getElementById("report-batch-minutes").value) }),
+      body: JSON.stringify({ quiet_hours: quietRows }),
     });
     if (needsListAlertChoice && !keepListAlertTime) await apiCall("/api/settings/list-alert", { method: "POST", body: JSON.stringify({ time: null }) });
     await loadListAlertSetting(); // 발송하지 않는 시간이 바뀌었으니 시각 입력칸/안내를 다시 정한다
@@ -139,10 +165,16 @@ function showViewerScanSettings(data) {
 }
 
 async function loadViewerScanSettings() {
+  const controls = ["viewer-scan-toggle", "viewer-scan-token", "viewer-scan-max-wait", "btn-save-viewer-scan", "btn-clear-viewer-scan-token"].map((id) => document.getElementById(id));
+  controls.forEach((control) => control.disabled = true);
   try {
-    showViewerScanSettings(await apiCall("/api/settings/viewer-scan"));
+    const data = await apiCall("/api/settings/viewer-scan");
+    if (typeof data.enabled !== "boolean" || typeof data.token_set !== "boolean" || !Number.isInteger(data.max_wait_minutes)) throw new Error("뷰어 스캔 설정을 확인하지 못했습니다.");
+    showViewerScanSettings(data);
+    controls.forEach((control) => control.disabled = false);
+    document.getElementById("viewer-scan-save-result").textContent = "";
   } catch (e) {
-    // 조용히 무시 — 다음에 설정 화면을 열 때 다시 읽는다
+    document.getElementById("viewer-scan-save-result").textContent = `${e.message} 저장은 차단했습니다. 설정 화면을 다시 열어주세요.`;
   }
 }
 

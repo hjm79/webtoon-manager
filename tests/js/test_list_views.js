@@ -116,9 +116,9 @@ const { listItem } = require("./factories");
   ok(titles("unsubscribed-list").length === 48 && /남은 52개/.test($("unsubscribed-list").nextElementSibling.textContent), "구독해제도 48개씩");
 
   // Scenario 8: 검색 입력은 잠깐 기다렸다가(250ms) 한 번만 다시 그린다 — 글자마다 수백 개 카드를 다시 걸러서 그리면 멎는다
-  feed(base); clickTab("전체");
+  feed(base); clickTab("전체"); await idle();
   let renders = 0; run("window.__renderNaverList = renderNaverList; renderNaverList = function (...a) { window.__renders = (window.__renders || 0) + 1; return window.__renderNaverList(...a); };"); w.__renders = 0;
-  for (const text of ["네", "네이", "네이버"]) { $("naver-list-search").value = text; $("naver-list-search").dispatchEvent(new w.Event("input")); await idle(); }
+  for (const text of ["네", "네이", "네이버"]) { $("naver-list-search").value = text; $("naver-list-search").dispatchEvent(new w.Event("input")); }
   ok(w.__renders === 0, "입력하는 동안에는 다시 그리지 않는다: " + w.__renders);
   await wait(330); ok(w.__renders === 1 && titles().every((t) => t.startsWith("네이버")), "멈추면 한 번만 다시 그린다: " + w.__renders);
   done();

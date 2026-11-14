@@ -184,7 +184,9 @@ function renderNaverList() {
   updateNaverListBulkBar(); // 남아 있는 카드의 체크 상태는 유지되므로, 선택 수만 다시 센다
   if (built > 0) {
     naverListBulkSelectStartScrollY = null; // 카드 구성이 바뀌었으니 "선택을 시작한 위치"도 다시 잡아야 함
-    pruneMissingViewerIcons(); // 새로 만든 카드의 뷰어 아이콘만 확인하면 된다
+    pruneMissingViewerIcons();
+  } else if (grid.querySelector('[data-reader-status="indexing"]')) {
+    pruneMissingViewerIcons({ pendingOnly: true });
   }
   updateFilterToggleLabels(); // 모바일의 접힌 "필터" 버튼에 적용된 필터 수를 맞춘다
 }
@@ -192,7 +194,7 @@ function renderNaverList() {
 let naverListBulkSelectStartScrollY = null;
 
 // 읽기 버튼을 숨기지 않고 현재 준비 상태를 설명한다.
-async function pruneMissingViewerIcons() {
+async function pruneMissingViewerIcons({ pendingOnly = false } = {}) {
   const buttons = [...document.querySelectorAll("[data-viewer-check-title]")];
   const seen = new Map();
   for (const button of buttons) {
@@ -202,7 +204,7 @@ async function pruneMissingViewerIcons() {
     if (!seen.has(key)) seen.set(key, { title, platform, buttons: [] });
     seen.get(key).buttons.push(button);
   }
-  const tasks = [...seen.values()];
+  const tasks = [...seen.values()].filter(({ buttons: matching }) => !pendingOnly || matching.some((button) => button.dataset.readerStatus === "indexing"));
   async function worker() {
     while (tasks.length) {
       const { title, platform, buttons: matching } = tasks.shift();
@@ -211,10 +213,7 @@ async function pruneMissingViewerIcons() {
         data = await apiCall(`/api/reader/status?title=${encodeURIComponent(title)}&platform=${encodeURIComponent(platform)}`);
       } catch (e) { data = { status: "error", message: e.message }; }
       for (const button of matching) {
-        const labels = { not_downloaded: "읽기 · 아직 받은 회차 없음", not_configured: "읽기 · 뷰어 미설정", error: "읽기 · 연결 확인 필요" };
-        button.textContent = labels[data.status] || "읽기";
-        button.dataset.readerStatus = data.status || "error";
-        button.title = data.status === "ready" ? "다운로드한 회차를 관리기 안에서 읽기" : workflowReaderMessage(data.status, data.message);
+        applyWorkflowReaderAvailability(button, data);
       }
     }
   }

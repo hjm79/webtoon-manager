@@ -6,6 +6,7 @@ const { makeApp, idle, ok, done } = require("./harness");
   const server = { time: null, discord: true, quiet: [], posts: [] };
   const state = () => ({ time: server.time, default_time: "07:00", discord_configured: server.discord, quiet_hours_set: server.quiet.length > 0, mode: server.time || !server.quiet.length ? "time" : "quiet" });
   const { w, run, calls } = makeApp({
+    "/api/settings/discord": () => ({ webhook_url_set: server.discord, bot_token_set: false, notify_channel_id: "", bot_ready: false }),
     "/api/settings/report": (opts) => { if (opts && opts.method === "POST") { const body = JSON.parse(opts.body); server.quiet = body.quiet_hours; server.posts.push(["report", body]); } return { quiet_hours: server.quiet, batch_minutes: 10 }; },
     "/api/settings/list-alert": (opts) => { if (opts && opts.method === "POST") { const body = JSON.parse(opts.body); server.time = body.time; server.posts.push(["list-alert", body]); } return state(); },
     "/api/settings/viewer-scan": { enabled: false, max_wait_minutes: 10, token_set: false },
@@ -13,7 +14,7 @@ const { makeApp, idle, ok, done } = require("./harness");
   await idle();
   const $ = (id) => w.document.getElementById(id);
   const shown = (id) => !$(id).classList.contains("hidden");
-  const load = async () => { run("loadReportSettings();"); await idle(); };
+  const load = async () => { run("loadReportSettings(); loadDiscordSettings();"); await idle(); };
   const QUIET = { start_hour: 23, start_minute: 0, end_hour: 6, end_minute: 0, days: [] };
   let confirms = [], answer = true; w.confirm = (message) => { confirms.push(message); return answer; };
 

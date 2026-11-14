@@ -8,7 +8,7 @@ from urllib.parse import urlencode, urlsplit, urlunsplit
 import aiohttp
 from fastapi import APIRouter, HTTPException, Query
 
-from app import repository, viewer_connection
+from app import reader_files, repository, viewer_connection
 from app.config import get_settings
 from app.file_utils import remove_forbidden_str, remove_forbidden_str_kakao
 
@@ -76,7 +76,13 @@ async def reader_status(title: str = Query(min_length=1, max_length=300), platfo
             if status == 404:
                 status, data = await _lookup(session, base, {"series": safe_title})
             if status == 404:
-                return _result("not_downloaded", "아직 받은 회차가 없습니다. 다운로드와 뷰어 스캔이 끝나면 읽을 수 있습니다.")
+                count = await asyncio.to_thread(reader_files.completed_count, get_settings(), title, platform)
+                if count is None:
+                    return _result("error", "로컬 다운로드 폴더를 확인하지 못했습니다. 저장소 연결과 권한을 확인해주세요.")
+                if count > 0:
+                    return {**_result("indexing", f"받은 회차 {count}개를 서재에 반영하고 있습니다. 잠시 후 다시 눌러주세요."),
+                            "downloaded_count": count}
+                return {**_result("not_downloaded", "아직 받은 회차가 없습니다. 다운로드 후 읽을 수 있습니다."), "downloaded_count": 0}
             if status in (401, 403):
                 return _result("error", "뷰어 인증이 필요합니다. 뷰어에 로그인한 뒤 다시 시도해주세요.")
             if status == 409:

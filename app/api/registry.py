@@ -15,7 +15,7 @@ from app import (
     repository,
     tracker,
 )
-from app import kakao_api
+from app import auto_subscribe, kakao_api
 from app.config import get_settings
 
 
@@ -173,7 +173,10 @@ async def add_kakao_watched_author(payload: KakaoWatchedAuthorIn):
     방식이 아니라 이름을 직접 입력받으므로, 여기서 확인 안 하면 오타를 못 잡는다)."""
     settings = get_settings()
     async with aiohttp.ClientSession() as session:
-        results = await kakao_api.search_by_author(session, payload.author_name, settings.request_timeout_seconds)
+        try:
+            results = await kakao_api.search_by_author(session, payload.author_name, settings.request_timeout_seconds)
+        except kakao_api.KakaoLookupError as exc:
+            raise HTTPException(status_code=502, detail="카카오 작가 조회에 실패했습니다. 잠시 뒤 다시 시도해주세요.") from exc
     if not results:
         raise HTTPException(status_code=404, detail=f"'{payload.author_name}' 이름으로 카카오웹툰에서 작품을 찾지 못했습니다.")
 
@@ -231,7 +234,7 @@ async def add_watched_tag(payload: WatchedTagIn):
             tag_name = await naver_api.fetch_curation_title_name(
                 session, int(payload.tag_id), settings.request_timeout_seconds
             )
-    await asyncio.to_thread(repository.upsert_watched_tag, payload.tag_id, tag_name, True)
+    await asyncio.to_thread(repository.upsert_watched_tag, payload.tag_id, tag_name, True, select=True)
     rows = await asyncio.to_thread(repository.list_watched_tags)
     match = next(r for r in rows if r.tag_id == payload.tag_id)
     return WatchedTagOut(tag_id=match.tag_id, tag_name=match.tag_name, enabled=match.enabled)
@@ -282,6 +285,11 @@ async def search_authors(name: str):
     settings = get_settings()
     async with aiohttp.ClientSession() as session:
         return await tracker.search_authors_by_name(session, name.strip(), settings)
+
+
+@router.get("/registry/discoveries")
+async def registry_discoveries():
+    return await asyncio.to_thread(auto_subscribe.discoveries)
 
 
 @router.post("/registry/resync")

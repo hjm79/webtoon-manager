@@ -1,5 +1,5 @@
 // 설정 > 다운로드 리포트: 발송 시각 스케줄은 없어지고 "발송하지 않는 시간"(시작~끝 + 요일 칩, 여러 개)과 "모으는 시간(N분)"만 설정한다.
-// 같은 카드의 웹툰 뷰어 서버 항목에는 "다운로드 뒤 뷰어 스캔"(켜기, 연동 토큰, 최대 대기 시간) 설정이 있다.
+// 뷰어·연동 메뉴의 스캔 설정은 알림과 독립적으로 로드한다.
 const { makeApp, sleep, idle, ok, done } = require("./harness");
 (async () => {
   const quiet = (sh, sm, eh, em, days = []) => ({ start_hour: sh, start_minute: sm, end_hour: eh, end_minute: em, days });
@@ -8,9 +8,10 @@ const { makeApp, sleep, idle, ok, done } = require("./harness");
   let serverUrl = "http://viewer";
   const posts = { report: [], scan: [] }; let reportError = null, scanError = null;
   const routes = {
+    "/api/settings/discord": { webhook_url_set: true, bot_token_set: false, notify_channel_id: "", bot_ready: false },
     "/api/settings/kakao-webtoons-enabled": { enabled: true }, "/api/settings/webtoon-server": (o) => { if (o && o.method === "POST") serverUrl = JSON.parse(o.body).webtoon_server_url; return { webtoon_server_url: serverUrl }; },
     "/api/settings": { discovery_job: { mode: "off", interval_minutes: 60, cron_times: [{ hour: 3, minute: 0, days: [] }], target: "naver" }, download_job: [], archive_job: { mode: "off", interval_minutes: 60, cron_times: [{ hour: 3, minute: 0, days: [] }], target: "naver" } },
-    "/api/settings/report": (o) => { if (o && o.method === "POST") { if (reportError) throw new Error(reportError); report = JSON.parse(o.body); posts.report.push(report); } return report; },
+    "/api/settings/report": (o) => { if (o && o.method === "POST") { if (reportError) throw new Error(reportError); const body = JSON.parse(o.body); report = { ...report, ...body }; posts.report.push(body); } return report; },
     "/api/settings/viewer-scan": (o) => { if (o && o.method === "POST") { if (scanError) throw new Error(scanError); const b = JSON.parse(o.body); posts.scan.push(b); scan = { ...scan, enabled: b.enabled, max_wait_minutes: b.max_wait_minutes, token_set: b.clear_token ? false : (b.token ? true : scan.token_set) }; } return scan; },
     "/api/webtoons": () => [], "/api/kakao-webtoons": () => [],
   };
@@ -43,7 +44,7 @@ const { makeApp, sleep, idle, ok, done } = require("./harness");
   rows()[0].querySelector(".quiet-start-hour").value = "22"; rows()[0].querySelector(".quiet-end-hour").value = "7"; rows()[0].querySelectorAll(".quiet-day")[0].checked = true;
   $("report-batch-minutes").value = "20";
   $("btn-save-report-settings").click(); await idle();
-  ok(JSON.stringify(posts.report[0]) === JSON.stringify({ quiet_hours: [quiet(22, 0, 7, 0, ["mon"])], batch_minutes: 20 }), "저장 내용: " + JSON.stringify(posts.report[0]));
+  ok(JSON.stringify(posts.report[0]) === JSON.stringify({ quiet_hours: [quiet(22, 0, 7, 0, ["mon"])] }) && report.batch_minutes === 15 && $("report-batch-minutes").value === "20", "알림 시간 저장은 리포트 묶음 대기 시간과 미저장 초안을 건드리지 않음: " + JSON.stringify(posts.report[0]));
   ok($("report-settings-save-result").textContent === "저장했습니다.", "성공 메시지");
 
   // Scenario 4: 겹침 같은 서버 오류는 메시지로 보이고 입력한 행은 그대로 남는다

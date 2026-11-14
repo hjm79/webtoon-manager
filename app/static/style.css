@@ -1203,6 +1203,12 @@ select {
 .workflow-subscriptions > div > span { min-width: 0; overflow-wrap: anywhere; flex: 1 1 220px; }
 .workflow-subscription-actions { display: flex; gap: 6px; flex-wrap: wrap; flex: 0 0 auto; max-width: 100%; }
 .workflow-subscriptions button { flex: 0 0 auto; }
+.badge.subscription-source { background: #eef0ff; color: #4a4ad6; white-space: nowrap; }
+.workflow-queue-panel h3 { margin: 14px 0 6px; font-size: 15px; }
+.workflow-queue { display: grid; gap: 8px; padding-left: 24px; }
+.workflow-queue li > div { display: flex; align-items: center; justify-content: space-between; gap: 8px; flex-wrap: wrap; }
+.workflow-queue li span { min-width: 0; overflow-wrap: anywhere; flex: 1 1 220px; }
+.workflow-queue li button { flex: 0 0 auto; }
 .workflow-result-card { justify-content: space-between; }
 .workflow-preview-cover { padding: 0; border: 0; border-radius: 0; background: transparent; display: block; width: 100%; }
 .workflow-preview-cover img { display: block; }
@@ -1258,4 +1264,35 @@ select {
   .workflow-reader-head strong { flex-basis: calc(100% - 100px); }
   .workflow-reader-head a { order: 3; font-size: 12px; }
   .workflow-dialog { padding: 14px; }
+}
+
+/* 설정 메뉴는 기존 입력을 유지한 채 작업별로 나눈다. */
+.settings-heading h2 { margin: 0 0 6px; font-size: 22px; }
+.settings-heading p { color: var(--muted); margin: 0 0 16px; line-height: 1.6; }
+.settings-section-tabs { display: flex; flex-wrap: wrap; gap: 6px; margin: 0 0 20px; padding-bottom: 12px; border-bottom: 1px solid var(--border); }
+.settings-section-tab { background: var(--card); color: var(--muted); font-weight: 600; padding: 10px 16px; }
+.settings-section-tab.active { color: var(--accent); border-color: var(--accent); }
+.settings-section-tab:focus-visible, .card-tab:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+#page-settings .hint { margin: 0 0 14px; line-height: 1.6; }
+#page-settings .field-hint { line-height: 1.6; }
+#page-settings .settings-card { min-width: 0; }
+#page-settings input, #page-settings textarea { max-width: 100%; }
+#page-settings fieldset { border: 0; margin: 0; padding: 0; min-width: 0; }
+#page-settings fieldset:disabled { opacity: .62; }
+.settings-details { margin: 10px 0 18px; font-size: 12px; color: var(--muted); line-height: 1.6; }
+.settings-details summary { cursor: pointer; color: var(--text); }
+.settings-details p { margin: 8px 0 0; }
+.download-storage { margin-top: 12px; padding: 12px 14px; background: var(--bg); border: 1px solid var(--border); border-radius: 6px; }
+.download-storage p { margin: 0; font-size: 15px; font-weight: 600; line-height: 1.5; }
+.download-storage .storage-details { display: block; color: var(--muted); font-size: 12px; margin-top: 4px; line-height: 1.5; }
+.download-storage progress { display: block; width: 100%; height: 8px; margin-top: 10px; accent-color: var(--accent); }
+.download-storage.storage-unavailable p { color: var(--muted); font-size: 13px; font-weight: 400; }
+#download-storage-shared { padding: 10px 12px; background: var(--bg); border-radius: 6px; }
+@media (max-width: 640px) {
+  .settings-section-tabs { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .settings-section-tab { padding: 10px 8px; font-size: 13px; }
+  #page-settings .settings-card { padding: 16px 14px; }
+  .download-storage p { font-size: 14px; }
+  #page-settings .registry-add-row { flex-wrap: wrap; }
+  #page-settings .registry-add-row input { min-width: 0; }
 }

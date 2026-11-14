@@ -490,11 +490,14 @@ async def fetch_other_titles_by_artist(
             timeout=aiohttp.ClientTimeout(total=timeout_seconds),
         ) as response:
             if response.status != 200:
-                return []
-            return await response.json()
+                raise NaverApiError(f"작가의 다른 작품 조회 실패: HTTP {response.status}")
+            data = await response.json()
+            if not isinstance(data, list) or any(not isinstance(item, dict) or item.get("titleId") is None for item in data):
+                raise NaverApiError("작가의 다른 작품 응답 형식 오류")
+            return data
     except Exception as e:
         log.error("작가의 다른 작품 조회 실패 (titleId=%s): %s", title_id, e)
-        return []
+        raise NaverApiError("작가의 다른 작품 목록을 완전히 조회하지 못했습니다") from e
 
 
 async def fetch_curation_title_name(
@@ -529,16 +532,23 @@ async def fetch_curation_titles(
                 timeout=aiohttp.ClientTimeout(total=timeout_seconds),
             ) as response:
                 if response.status != 200:
-                    log.error("curation/list 조회 실패 (tag_id=%s, page=%s): HTTP %s", tag_id, page, response.status)
-                    break
+                    raise NaverApiError(f"태그 목록 {page}페이지 조회 실패: HTTP {response.status}")
                 data = await response.json()
+                if not isinstance(data, dict) or not isinstance(data.get("curationViewList"), list):
+                    raise NaverApiError(f"태그 목록 {page}페이지 응답 형식 오류")
+                items = data["curationViewList"]
+                if any(not isinstance(item, dict) or item.get("titleId") is None for item in items):
+                    raise NaverApiError(f"태그 목록 {page}페이지 작품 정보 오류")
+                page_info = data.get("pageInfo") or {}
+                total_pages = page_info.get("totalPages", page)
+                if type(total_pages) is not int or (total_pages < page and not (page == 1 and total_pages == 0 and not items)):
+                    raise NaverApiError(f"태그 목록 {page}페이지 페이지 정보 오류")
         except Exception as e:
             log.error("curation/list 예외 (tag_id=%s, page=%s): %s", tag_id, page, e)
-            break
+            raise NaverApiError(f"태그 목록 {page}페이지를 완전히 조회하지 못했습니다") from e
 
-        all_items.extend(data.get("curationViewList") or [])
-        page_info = data.get("pageInfo") or {}
-        if page >= page_info.get("totalPages", page):
+        all_items.extend(items)
+        if page >= total_pages:
             break
         page += 1
         await asyncio.sleep(delay_seconds)

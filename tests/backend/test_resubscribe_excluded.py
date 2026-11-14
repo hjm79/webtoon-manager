@@ -1,6 +1,5 @@
 """신작 스캔의 구독 규칙 — 등록한 작가/태그에 해당하는 작품 중
-  · 제외됨 + 구독 이력 없음 + 완결 아님 → 구독한다(목록제외로 보낸 작품 포함). 알림에 "제외됨에서 구독"을 표시한다.
-  · 제외됨 + 구독 이력 있음 → 다시 구독하지 않는다(구독 중에 "제외됨으로"를 눌렀거나, 구독했다가 제외한 작품).
+  · 제외됨은 구독 이력 유무와 관계없이 자동으로 다시 구독하지 않는다.
   · 구독해제/목록(미등록)/구독 중/완결/매일+/등록 안 된 작가의 작품은 그대로다.
 사용자가 제외됨 작품을 직접 다시 구독하면 구독 중이 되어 제외됨 상태는 사라지고(이력은 남음), 나중에 다시 제외하면 강제 제외로 자리 잡는다.
 네이버(작가 두 경로가 공유하는 _add_discovered_titles, 태그)와 카카오(작가) 모두 같은 규칙이다."""
@@ -9,10 +8,16 @@ from types import SimpleNamespace as NS
 
 import httpx
 
-from app import daily_plus, db, discord_notify, kakao_api, naver_api, repository, tracker
+from app import auto_subscribe, daily_plus, db, discord_notify, kakao_api, naver_api, repository, tracker
 from fakes import discord_fake
 from app.config import get_settings
 db.get_connection()
+from registry_fakes import automatic_scope
+tracker._automatic_scope = automatic_scope
+auto_subscribe.set_enabled(True)
+repository.set_watched_author_enabled("test-author", True, "테스트 작가")
+repository.set_setting("registry_seen:naver:artist:test-author", "[]")
+repository.set_setting("registry_seen:naver:tag:77", "[]")
 import app.main as m
 
 settings = get_settings()
@@ -53,9 +58,9 @@ async def naver_authors():
     others = [{"titleId": t, "titleName": n} for t, n in (("701", "제외 이력없음"), ("702", "제외 이력있음"), ("703", "완결"), ("704", "불일치"), ("705", "매일+"),
                                                        ("706", "구독해제"), ("707", "목록"), ("708", "구독 중"), ("709", "새 작품"))]
     # Scenario 1: 작가 신작(구독 작가/미구독 관심 작가 두 경로가 함께 쓰는 함수)
-    added = await tracker._add_discovered_titles(None, settings, others, set())
-    assert added == [("701", "제외 이력없음 (제외됨에서 구독)"), ("709", "새 작품")], added
-    assert status("701") == repository.STATUS_ACTIVE and subscribed_ever("701") is True and status("709") == repository.STATUS_ACTIVE
+    added = await tracker._add_discovered_titles(None, settings, others, {"test-author"})
+    assert added == [("709", "새 작품")], added
+    assert status("701") == repository.STATUS_EXCLUDED and subscribed_ever("701") is False and status("709") == repository.STATUS_ACTIVE
     assert [status(t) for t in ("702", "703", "704", "705")] == [repository.STATUS_EXCLUDED] * 4        # 이력 있음/완결/작가 불일치/매일+는 그대로
     assert [status(t) for t in ("706", "707", "708")] == [repository.STATUS_UNSUBSCRIBED, repository.STATUS_UNREGISTERED, repository.STATUS_ACTIVE]
     print("1) 네이버 작가 신작 OK")
@@ -73,11 +78,11 @@ async def naver_tags():
                 {"titleId": "803", "titleName": "완결", "finished": True}, {"titleId": "805", "titleName": "매일+"}, {"titleId": "806", "titleName": "태그 새 작품"}]
     naver_api.fetch_curation_title_name, naver_api.fetch_curation_titles = tag_name, tag_titles
     sent.clear()
-    # Scenario 2: 태그 신작 — 같은 규칙, 알림 줄에 "제외됨에서 구독" 표시
+    # Scenario 2: 태그 신작 — 제외 상태는 유지하고 새 작품만 추가
     await tracker.scan_curation_tags(None, settings)
-    assert status("801") == repository.STATUS_ACTIVE and subscribed_ever("801") is True and status("806") == repository.STATUS_ACTIVE
+    assert status("801") == repository.STATUS_EXCLUDED and subscribed_ever("801") is False and status("806") == repository.STATUS_ACTIVE
     assert [status(t) for t in ("802", "803", "805")] == [repository.STATUS_EXCLUDED] * 3
-    assert len(sent) == 1 and "태그 제외 이력없음" in sent[0] and "제외됨에서 구독" in sent[0] and "태그 새 작품" in sent[0] and "완결" not in sent[0] and "매일+" not in sent[0], sent
+    assert len(sent) == 1 and "태그 제외 이력없음" not in sent[0] and "제외됨에서 구독" not in sent[0] and "태그 새 작품" in sent[0] and "완결" not in sent[0] and "매일+" not in sent[0], sent
     print("2) 네이버 태그 신작 OK")
 
 
@@ -94,10 +99,11 @@ async def button_flow():
         assert status("901") == repository.STATUS_ACTIVE
         await c.post("/api/naver-list/901/exclude", json={"title": "버튼 작품", "thumbnail_url": ""})
         assert await tracker._add_discovered_titles(None, settings, others("901", "버튼 작품"), set()) == [] and status("901") == repository.STATUS_EXCLUDED
-        # Scenario 5: 구독한 적 없이 "목록제외"로 보낸 작품은 이력이 없어서 규칙대로 다시 구독된다(사용자가 정한 규칙)
+        # Scenario 5: 구독한 적 없이 목록제외한 작품도 자동으로 다시 구독하지 않는다
         r = (await c.post("/api/naver-list/902/exclude", json={"title": "목록제외 작품", "thumbnail_url": ""})).json()
         assert r["status"] == "excluded" and r["ever_subscribed"] is False
-        assert await tracker._add_discovered_titles(None, settings, others("902", "목록제외 작품"), set()) == [("902", "목록제외 작품 (제외됨에서 구독)")]
+        assert await tracker._add_discovered_titles(None, settings, others("902", "목록제외 작품"), set()) == []
+        assert status("902") == repository.STATUS_EXCLUDED and subscribed_ever("902") is False
     print("3~5) 버튼/직접 재구독/목록제외 흐름 OK")
 
 
@@ -120,7 +126,7 @@ async def kakao_authors():
     from app import job_status
     job_status.start("discovery")
     repository.set_setting("kakao_webtoons_enabled", "1")
-    repository.upsert_watched_author("작가A", "작가A", True, "kakao"); repository.upsert_watched_author("작가B", "작가B", True, "kakao")
+    repository.upsert_watched_author("작가A", "작가A", True, "kakao")
     # 작가A는 이미 한 번 스캔한 상태(기준선 있음)
     results["작가A"] = [kcard(1100, "기존작")]
     await tracker.scan_kakao_authors_for_new_titles(None, S)
@@ -131,19 +137,20 @@ async def kakao_authors():
     results["작가A"] = [kcard(1100, "기존작"), kcard(1101, "제외 이력없음"), kcard(1102, "제외 이력있음"), kcard(1103, "제외 이력없음 완결", finished=True),
                       kcard(1104, "구독해제"), kcard(1105, "새 작품"), kcard(1106, "새 완결작", finished=True)]
     sent.clear()
-    # Scenario 6: 제외됨 + 이력 없음 + 완결 아님 → 구독(이미 본 작품이어도), 이력 있음/완결/구독해제는 그대로, 새 완결작은 추가하지 않는다
-    assert await tracker.scan_kakao_authors_for_new_titles(None, S) == 2
-    assert kstatus(1101) == "active" and repository.get_kakao_webtoon(1101)["ever_subscribed"] is True and kstatus(1105) == "active"
+    # Scenario 6: 제외 이력 유무와 무관하게 기존 상태 유지, 새 미완결 작품만 추가
+    assert await tracker.scan_kakao_authors_for_new_titles(None, S) == 1
+    assert kstatus(1101) == "excluded" and repository.get_kakao_webtoon(1101)["ever_subscribed"] is False and kstatus(1105) == "active"
     assert kstatus(1102) == "excluded" and kstatus(1103) == "excluded" and kstatus(1104) == "unsubscribed" and repository.get_kakao_webtoon(1106) is None
-    assert len(sent) == 2 and any("제외 이력없음" in s and "제외됨에서 구독" in s for s in sent) and any("새 작품" in s and "제외됨에서 구독" not in s for s in sent), sent
+    assert len(sent) == 1 and "새 작품" in sent[0] and "제외됨에서 구독" not in sent[0], sent
     # Scenario 7: 새 완결작도 "본 작품"으로는 기록되어 다음 스캔에서 다시 보지 않고, 다시 돌려도 중복 알림이 없다
     assert 1106 in repository.get_seen_kakao_title_ids("작가A")
     sent.clear(); assert await tracker.scan_kakao_authors_for_new_titles(None, S) == 0 and sent == []
-    # Scenario 8: 처음 스캔하는 작가(기준선)여도 제외됨 + 이력 없음 + 완결 아님은 구독하고, 나머지 기존 작품은 기준선으로만 저장한다
+    # Scenario 8: 첫 스캔도 제외 상태 유지, 나머지 기존 작품은 기준선으로만 저장한다
+    repository.upsert_watched_author("작가B", "작가B", True, "kakao")
     kakao_row(1201, "처음 스캔 제외 이력없음", repository.STATUS_EXCLUDED, False)
     results["작가B"] = [kcard(1201, "처음 스캔 제외 이력없음"), kcard(1202, "처음 스캔 새 작품")]
-    assert await tracker.scan_kakao_authors_for_new_titles(None, S) == 1
-    assert kstatus(1201) == "active" and repository.get_kakao_webtoon(1202) is None
+    assert await tracker.scan_kakao_authors_for_new_titles(None, S) == 0
+    assert kstatus(1201) == "excluded" and repository.get_kakao_webtoon(1202) is None
     print("6~8) 카카오 작가 신작 OK")
 
 asyncio.run(naver_authors())

@@ -48,7 +48,7 @@ async def main():
     print("2) 요일 목록 OK")
 
     # Scenario 3: 검색(수동 다운로드), 작가 검색(작가 신작 구독), 제목 검색(옛 기록의 번호 찾기) — 모두 단행본 제외. 못 찾은 제목의 후보에도 안 나온다
-    async def fake_cards(session, keyword, timeout, pages): return [NORMAL, BOOK, card(3, "정상 작품 후보")]
+    async def fake_cards(session, keyword, timeout, pages, **kwargs): return [NORMAL, BOOK, card(3, "정상 작품 후보")]
     real_cards = kakao_api._search_webtoon_cards; kakao_api._search_webtoon_cards = fake_cards
     assert [i["title_id"] for i in await kakao_api.search_series(None, "정상", 5)] == [1, 3]
     assert [i["title_id"] for i in await kakao_api.search_by_author(None, "가", 5)] == [1, 3]

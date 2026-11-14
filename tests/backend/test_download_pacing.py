@@ -76,7 +76,7 @@ kp.persist_refreshed_cookies = lambda client: None
 async def no_notify(*a, **k): return False
 auth.notify_if_needed = no_notify
 def E(n): return kp.Episode(product_id=n, title="t", number=n, subtitle=f"{n}화", is_free=True, accessible=True, page_count=1, hidden=False)
-async def fake_run_download(client, *, series_id, title, download_root, max_episodes, on_progress=None, use_rental_tickets=False):
+async def fake_run_download(client, *, series_id, title, download_root, max_episodes, on_progress=None, use_rental_tickets=False, should_continue=None):
     calls.append(max_episodes)
     todo = [n for n in range(1, STATE["total"] + 1) if n not in STATE["have"]]
     plan = kp.DownloadPlan(mode="compare", to_download=[E(n) for n in todo])

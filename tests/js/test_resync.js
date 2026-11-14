@@ -9,7 +9,7 @@ const { makeApp, sleep, idle, ok, done } = require("./harness");
   };
   const { w, run, calls } = makeApp(routes); await idle(); run("kakaoWebtoonsEnabled = true;");
   const $ = (id) => w.document.getElementById(id);
-  ok($("page-registry").textContent.includes("카카오웹툰 관리를 켰으면 카카오페이지 작품도 함께 처리"), "안내 문구에 카카오 처리 설명이 있음");
+  ok($("page-registry").textContent.includes("카카오웹툰 관리가 켜져 있으면 카카오페이지도 함께 처리"), "안내 문구에 카카오 처리 설명이 있음");
   $("btn-resync-registry").click(); await idle();
   ok(calls.some((c) => c.url === "/api/registry/resync" && c.method === "POST"), "재동기화 요청을 보냄");
   const before = kakaoAuthorCalls; status = { status: "success", log: [] };

@@ -4,10 +4,12 @@
 
 const BOT_TOKEN_MASK = "••••••••••••••••";
 const WEBHOOK_URL_MASK = "••••••••••••••••••••••••••••";
+let savedWebhookConfigured = false;
 
 async function loadDiscordSettings() {
   try {
     const s = await apiCall("/api/settings/discord");
+    savedWebhookConfigured = Boolean(s.webhook_url_set);
 
     const webhookInput = document.getElementById("discord-webhook-url");
     webhookInput.value = s.webhook_url_set ? WEBHOOK_URL_MASK : "";
@@ -26,19 +28,13 @@ async function loadDiscordSettings() {
   }
 }
 
-// 설정 카드 중 조건이 있는 것은 "다운로드 리포트" 하나뿐이다 — 보낼 곳(디스코드 웹훅)이 있어야
-// 의미가 있어서 웹훅이 저장돼야 나타난다. "카카오웹툰 관리"는 예전엔 리포트의 한 항목(미등록 새
-// 에피소드)에 얹힌 기능이라 웹훅과 그 옵션 뒤에 숨겼지만, 이제 카카오페이지 다운로드(로그인 쿠키
-// 입력 포함)를 하는 곳이라 항상 보인다. 웹훅이 없으면 그 카드에 "알림은 못 받는다"는 안내만 띄운다.
-// 화면에 보일지만 정할 뿐, 저장된 설정 값은 건드리지 않는다.
+// 알림의 발송 조건만 반영한다. 뷰어·다운로드 설정과 상위 메뉴의 표시 상태는 바꾸지 않는다.
 function updateSettingsCardVisibility() {
-  // "다운로드 · 실행 스케줄"은 신작 스캔/다운로드/아카이빙처럼 디스코드와 무관한 것도 다루니
-  // 웹훅 여부와 상관없이 항상 보인다. "다운로드 리포트"와 "연동 주소"(리포트의 바로가기/목록 제외
-  // 링크에 쓰는 주소)는 보낼 곳이 있어야 의미가 있어서 웹훅이 설정돼야 나타난다.
-  const webhookConfigured = document.getElementById("discord-webhook-url").dataset.masked === "true";
-  document.getElementById("settings-card-report").classList.toggle("hidden", !webhookConfigured);
-  document.getElementById("settings-card-links").classList.toggle("hidden", !webhookConfigured);  // 연동 주소(뷰어/외부 접속 주소)도 리포트 링크용이라 같은 조건
-
+  const webhookConfigured = savedWebhookConfigured;
+  document.getElementById("report-controls").disabled = !webhookConfigured;
+  document.getElementById("report-delivery-status").textContent = webhookConfigured
+    ? "저장된 Discord 웹훅으로 알림을 보냅니다."
+    : "Discord 웹훅을 먼저 저장하면 리포트 발송 설정을 사용할 수 있습니다. 기존 설정값은 유지됩니다.";
   document.getElementById("kakao-no-webhook-hint").classList.toggle("hidden", webhookConfigured);
 }
 
@@ -81,10 +77,11 @@ document.getElementById("btn-save-discord").addEventListener("click", async () =
     // 빈 문자열로 저장해도 기존 웹훅은 안 지워지므로(discord_config.set_webhook_url
     // 참고), "이미 마스킹돼 있었다" OR "방금 뭔가 입력했다" 둘 중 하나면 바로 설정된
     // 것으로 보고 3초씩 기다리지 않고 즉시 다음 카드들을 보여준다.
-    if (webhookInput.dataset.masked === "true" || webhookToSend !== "") {
+    if (savedWebhookConfigured || webhookToSend !== "") {
+      savedWebhookConfigured = true;
       webhookInput.dataset.masked = "true";
-      updateSettingsCardVisibility();
     }
+    updateSettingsCardVisibility();
     setTimeout(loadDiscordSettings, 3000);
   } catch (e) {
     resultEl.textContent = e.message;

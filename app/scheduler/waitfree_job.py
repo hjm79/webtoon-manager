@@ -41,21 +41,27 @@ async def _run_waitfree_batch(due: list[dict], now: datetime) -> None:
     job_status.log_line("download", f"기다무 충전 시각이 된 작품 {len(due)}개를 받습니다: " + ", ".join(w["title"] for w in due))
     had_error = False
     outcomes: list = []
+    failures: list[dict] = []
     try:
-        outcomes = await _download_kakao_subscriptions(settings, [], only=due, now=now)
+        outcomes = await _download_kakao_subscriptions(settings, failures, only=due, now=now)
     except Exception as e:
         had_error = True
         log.error("기다무 충전 시각 다운로드 중 예외: %s", e)
         job_status.log_line("download", f"기다무 충전 시각 다운로드 중 오류: {e}")
+    had_error = had_error or bool(failures)
+    failure_titles = {failure["title_name"] for failure in failures if failure.get("title_name")}
     done = {webtoon["title_id"]: result for webtoon, result in outcomes}
     for webtoon in due:
         result = done.get(webtoon["title_id"])
-        failed = webtoon["title_id"] not in done or result is None or getattr(result, "error", None) is not None
+        failed = (
+            result is None or getattr(result, "error", None) is not None or getattr(result, "failed", None) is not None
+            or webtoon["title"] in failure_titles or getattr(result, "title", None) in failure_titles
+        )
         current = repository.get_kakao_webtoon(webtoon["title_id"]) or webtoon
         next_at = current.get("waitfree_next_at")
         if failed:
             waitfree_sync.delay(webtoon["title_id"], waitfree_sync.ERROR_MINUTES, now)  # 오류/로그인 문제 — 같은 작품을 계속 두드리지 않는다
-            had_error = had_error or webtoon["title_id"] in done
+            had_error = True
         elif next_at and not waitfree_sync.is_waiting(current, now):
             waitfree_sync.delay(webtoon["title_id"], waitfree_sync.RETRY_MINUTES, now)  # 받았는데 충전 시각이 그대로 — 서버 반영이 늦은 것이니 잠시 뒤에 다시
     job_status.finish("download", success=not had_error)

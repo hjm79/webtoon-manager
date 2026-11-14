@@ -2,10 +2,13 @@
 import asyncio
 from types import SimpleNamespace as NS
 
-from app import db, repository, tracker, job_status, kakao_api, discord_notify
+from app import auto_subscribe, db, repository, tracker, job_status, kakao_api, discord_notify
 from fakes import discord_fake
 
 db.get_connection()
+from registry_fakes import automatic_scope
+tracker._automatic_scope = automatic_scope
+auto_subscribe.set_enabled(True)
 S = NS(request_timeout_seconds=5, delay_seconds=0)
 sent = []; results = {}
 fake_send = discord_fake(sent, result=None)

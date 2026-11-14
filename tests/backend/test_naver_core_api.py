@@ -167,26 +167,36 @@ async def search():
 
 
 async def artist_and_curation():
-    # Scenario 15: 작가의 다른 작품 — 200이면 응답 그대로, 실패나 예외면 빈 목록
+    # Scenario 15: 작가의 다른 작품 — 200이면 응답 그대로, 실패나 예외면 기준선 저장을 막는 오류
     other = FakeSession(lambda *a: FakeResponse(200, json_data=[{"titleId": 5}]))
     assert await naver_api.fetch_other_titles_by_artist(other, "1", 10) == [{"titleId": 5}] and other.calls[0][0] == NAVER_ARTIST_OTHER_TITLES_URL
-    assert await naver_api.fetch_other_titles_by_artist(FakeSession(lambda *a: FakeResponse(500)), "1", 10) == []
-    assert await naver_api.fetch_other_titles_by_artist(FakeSession(lambda *a: RuntimeError("x")), "1", 10) == []
+    for session in [FakeSession(lambda *a: FakeResponse(500)), FakeSession(lambda *a: RuntimeError("x"))]:
+        try:
+            await naver_api.fetch_other_titles_by_artist(session, "1", 10)
+        except naver_api.NaverApiError:
+            pass
+        else:
+            raise AssertionError("Failed artist lookup must not return an empty baseline")
     # Scenario 16: 태그 이름 — 못 읽으면 태그 번호 문자열
     named = FakeSession(lambda *a: FakeResponse(200, json_data={"curationTitle": "먼치킨"}))
     assert await naver_api.fetch_curation_title_name(named, 134, 10) == "먼치킨" and named.calls[0][0] == NAVER_CURATION_META_URL
     assert await naver_api.fetch_curation_title_name(FakeSession(lambda *a: FakeResponse(200, json_data={})), 134, 10) == "134"
     assert await naver_api.fetch_curation_title_name(FakeSession(lambda *a: FakeResponse(404)), 134, 10) == "134"
     assert await naver_api.fetch_curation_title_name(FakeSession(lambda *a: RuntimeError("x")), 134, 10) == "134"
-    # Scenario 17: 태그의 작품은 totalPages까지 페이지를 이어 받고(페이지 사이에 간격), 도중에 실패하면 거기까지만
+    # Scenario 17: 태그의 작품은 totalPages까지 페이지를 이어 받고(페이지 사이에 간격), 도중에 실패하면 부분 목록을 반환하지 않는다
     sleeps.clear()
     pages = {1: {"curationViewList": [{"titleId": 1}], "pageInfo": {"totalPages": 3}}, 2: {"curationViewList": [{"titleId": 2}], "pageInfo": {"totalPages": 3}}, 3: {"curationViewList": [{"titleId": 3}], "pageInfo": {"totalPages": 3}}}
     session = FakeSession(lambda url, params, n: FakeResponse(200, json_data=pages[params["page"]]))
     assert [i["titleId"] for i in await naver_api.fetch_curation_titles(session, 134, 10, 0.5)] == [1, 2, 3] and sleeps == [0.5, 0.5]
     assert all(c[0] == NAVER_CURATION_LIST_URL and c[1]["pageSize"] == 100 for c in session.calls)
     cut = FakeSession(lambda url, params, n: FakeResponse(200, json_data=pages[1]) if params["page"] == 1 else FakeResponse(500))
-    assert [i["titleId"] for i in await naver_api.fetch_curation_titles(cut, 134, 10, 0)] == [1]
-    assert await naver_api.fetch_curation_titles(FakeSession(lambda *a: RuntimeError("x")), 134, 10, 0) == []
+    for session in [cut, FakeSession(lambda *a: RuntimeError("x"))]:
+        try:
+            await naver_api.fetch_curation_titles(session, 134, 10, 0)
+        except naver_api.NaverApiError:
+            pass
+        else:
+            raise AssertionError("Failed or partial tag lookup must not return a baseline")
     assert len(await naver_api.fetch_curation_titles(FakeSession(lambda *a: FakeResponse(200, json_data={"curationViewList": [{"titleId": 1}]})), 134, 10, 0)) == 1   # 페이지 정보가 없으면 한 페이지
     print("15~17) 작가의 다른 작품/태그 작품 OK")
 

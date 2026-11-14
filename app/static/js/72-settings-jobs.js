@@ -22,6 +22,8 @@ async function loadHelpPage() {
 }
 
 async function loadSettingsPage() {
+  const scheduleSave = document.getElementById("btn-save-settings");
+  scheduleSave.disabled = true;
   try {
     const schedules = await apiCall("/api/settings");
     for (const jobId of SCHEDULE_JOB_IDS) {
@@ -29,11 +31,14 @@ async function loadSettingsPage() {
       block.innerHTML = "";
       block.appendChild(jobId === "download_job" ? buildDownloadScheduleEditor(schedules[jobId]) : buildScheduleControls(jobId, schedules[jobId]));
     }
+    scheduleSave.disabled = false;
+    document.getElementById("settings-save-result").textContent = "";
   } catch (e) {
     document.getElementById("settings-save-result").textContent = e.message;
   }
   loadDiscordSettings();
   loadWebtoonServerUrl();
+  loadViewerScanSettings();
   loadReportSettings();
   loadAppPublicBaseUrl();
   loadUnregisteredNewEpisodesToggle();
@@ -44,15 +49,73 @@ async function loadSettingsPage() {
   loadDownloadPacing();
   loadDownloadRoots();
   loadAuthorAutoRegisterSetting();
+  loadAutoSubscribeSetting();
   loadUnsubscribeHistoryList();
 }
 
+function autoSubscribeStatus(enabled) {
+  return enabled ? "저장된 상태: 자동 구독 켜짐 — 등록된 작가·태그의 새 작품을 자동 구독할 수 있습니다." : "저장된 상태: 자동 구독 꺼짐 — 새 구독은 직접 추가할 때만 등록됩니다.";
+}
+
+function autoSubscribeControls(disabled) {
+  ["auto-subscribe-toggle", "btn-save-auto-subscribe", "auto-subscribe-scope", "auto-subscribe-latest"].forEach((id) => document.getElementById(id).disabled = disabled);
+}
+function updateAutoSubscribeScope() {
+  document.getElementById("auto-subscribe-latest-label").classList.toggle("hidden", document.getElementById("auto-subscribe-scope").value !== "latest");
+}
+document.getElementById("auto-subscribe-scope").addEventListener("change", updateAutoSubscribeScope);
+
+async function loadAutoSubscribeSetting() {
+  const input = document.getElementById("auto-subscribe-toggle");
+  const result = document.getElementById("auto-subscribe-save-result");
+  autoSubscribeControls(true);
+  try {
+    const [data, scope] = await Promise.all([apiCall("/api/settings/auto-subscribe"), apiCall("/api/settings/auto-subscribe-scope")]);
+    if (!["future", "latest", "all"].includes(scope.mode)) throw new Error("자동 구독 범위를 확인하지 못했습니다.");
+    document.getElementById("auto-subscribe-scope").value = scope.mode;
+    document.getElementById("auto-subscribe-latest").value = scope.latest_count || 3;
+    updateAutoSubscribeScope();
+    if (typeof data.enabled !== "boolean") throw new Error("자동 구독 상태를 확인하지 못했습니다.");
+    input.checked = data.enabled;
+    result.classList.remove("error");
+    result.textContent = autoSubscribeStatus(data.enabled);
+    autoSubscribeControls(false);
+  } catch (e) {
+    result.classList.add("error");
+    result.textContent = `${e.message} 설정 화면을 다시 열어 확인해주세요.`;
+  }
+}
+
+document.getElementById("btn-save-auto-subscribe").addEventListener("click", async () => {
+  const input = document.getElementById("auto-subscribe-toggle");
+  const result = document.getElementById("auto-subscribe-save-result");
+  autoSubscribeControls(true);
+  result.classList.remove("error");
+  try {
+    const data = await apiCall("/api/settings/auto-subscribe", { method: "POST", body: JSON.stringify({ enabled: input.checked, scope: { mode: document.getElementById("auto-subscribe-scope").value, latest_count: Number(document.getElementById("auto-subscribe-latest").value) } }) });
+    if (typeof data.enabled !== "boolean") throw new Error("자동 구독 저장 결과를 확인하지 못했습니다.");
+    input.checked = data.enabled;
+    result.textContent = `저장했습니다. ${autoSubscribeStatus(data.enabled)}`;
+  } catch (e) {
+    result.classList.add("error");
+    result.textContent = `저장하지 못했습니다. 화면의 선택은 아직 적용되지 않았습니다. ${e.message}`;
+  } finally {
+    autoSubscribeControls(false);
+  }
+});
+
 async function loadAuthorAutoRegisterSetting() {
+  const controls = ["author-auto-register-toggle", "btn-save-author-auto-register"].map((id) => document.getElementById(id));
+  const result = document.getElementById("author-auto-register-save-result");
+  controls.forEach((control) => control.disabled = true);
   try {
     const data = await apiCall("/api/settings/author-auto-register");
+    if (typeof data.enabled !== "boolean") throw new Error("작가 추적 설정을 확인하지 못했습니다.");
     document.getElementById("author-auto-register-toggle").checked = data.enabled;
+    controls.forEach((control) => control.disabled = false);
+    result.textContent = "";
   } catch (e) {
-    // 조용히 무시
+    result.textContent = `${e.message} 설정 화면을 다시 열어 확인해주세요. 저장은 차단했습니다.`;
   }
 }
 
@@ -277,10 +340,16 @@ function renderDownloadPacing(data) {
 }
 
 async function loadDownloadPacing() {
+  const controls = ["pacing-cap", "pacing-rest", "btn-save-pacing", "btn-reset-pacing"].map((id) => document.getElementById(id));
+  controls.forEach((control) => control.disabled = true);
   try {
-    renderDownloadPacing(await apiCall("/api/settings/download-pacing"));
+    const data = await apiCall("/api/settings/download-pacing");
+    if (!Number.isInteger(data.max_new_episodes_per_title) || !Number.isFinite(data.batch_rest_minutes)) throw new Error("다운로드 속도 설정을 확인하지 못했습니다.");
+    controls.forEach((control) => control.disabled = false);
+    renderDownloadPacing(data);
+    document.getElementById("pacing-save-result").textContent = "";
   } catch (e) {
-    // 조용히 무시
+    document.getElementById("pacing-save-result").textContent = `${e.message} 설정 화면을 다시 열어 확인해주세요. 저장은 차단했습니다.`;
   }
 }
 

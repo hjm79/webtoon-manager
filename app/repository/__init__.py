@@ -15,7 +15,7 @@ from app.repository.common import (
     STATUS_UNSUBSCRIBED,
 )
 from app.repository.scoped_subscription import (
-    AlreadySubscribedError, activate_scoped_subscription, download_subscription_snapshot,
+    AlreadySubscribedError, activate_scoped_subscription, cancel_queued_download, download_subscription_snapshot,
     enqueue_download, list_download_queue, set_scoped_subscription_status, update_download_queue,
 )
 from app.repository.naver_webtoons import (
@@ -160,6 +160,7 @@ from app.repository.backup import (
 __all__ = [
     "AlreadySubscribedError",
     "activate_scoped_subscription",
+    "cancel_queued_download",
     "download_subscription_snapshot",
     "enqueue_download",
     "list_download_queue",

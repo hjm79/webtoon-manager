@@ -29,7 +29,7 @@ const { kakao } = require("./factories");
     "/api/kakao-manual/analyze": () => current, "/api/kakao-manual/search": [{ title_id: 68239972, title: "개미", thumbnail_url: "https://k/ant", authors: "김용회, 베르나르 베르베르", status: "연재", subscription: null }, { title_id: 61641075, title: "쌍갑포차", thumbnail_url: "https://k/s", authors: "배혜수", status: "연재", subscription: "active" }],
     "/api/kakao-manual/run": { status: "started" }, "/api/jobs/status": { manual: { status: "running", log: [] } },
     "/api/naver-list": () => [], "/api/kakao-list": { items: [kakao(71000001, "달마부장"), kakao(71000002, "궁", { status: "active", ever_subscribed: true })], version: "v1", refreshing: false, refreshed_at: "2026-09-30T01:00:00+00:00" },
-    "/api/webtoons": () => [], "/api/kakao-webtoons": () => [], "/api/webtoon-server/lookup": { url: "http://viewer/x" },
+    "/api/webtoons": () => [], "/api/kakao-webtoons": () => [], "/api/reader/status": { status: "not_configured", url: null },
   };
   routes["/api/workflow/preview"] = { available_count: 1, episodes: [{ episode_no: 1, subtitle: "1화", available: true }] };
   routes["/api/workflow/subscribe"] = (opts) => { const data = JSON.parse(opts.body); return { subscription: { status: "active", ever_subscribed: true }, execution: "scheduled" }; };
@@ -44,7 +44,7 @@ const { kakao } = require("./factories");
   ok(!$("naver-download-root") && !$("kakao-download-root"), "직접 입력하는 칸은 없어짐");
   ok($("naver-download-root-picker").querySelector(".drp-path").textContent === HOST && $("naver-download-root-picker").textContent.includes("(컨테이너: /webtoon_download, 기본 폴더)"), "네이버: 호스트 경로(" + HOST + ")가 앞에, 컨테이너 경로는 괄호로 보임");
   ok($("kakao-download-root-picker").textContent.includes("네이버와 같은 폴더"), "카카오: 비워 두면 '네이버와 같은 폴더'로 표시");
-  ok($("download-roots-status").textContent.includes("네이버: " + HOST + " (컨테이너: /webtoon_download)"), "현재 받는 폴더 문구가 호스트 경로 + (컨테이너 경로)로 나옴: " + $("download-roots-status").textContent.slice(0, 90));
+  ok(/저장된 폴더/.test($("download-roots-status").textContent) && /저장해야/.test($("download-roots-status").textContent), "경로 중복 대신 현재값과 저장 전 선택을 구분해 안내");
   const openPicker = async (kind) => { const b = Array.from($(`${kind}-download-root-picker`).querySelectorAll("button")).find((x) => x.textContent === "폴더 선택"); b.click(); await idle(); };
   const pbtn = (kind, text) => Array.from($(`${kind}-download-root-picker`).querySelectorAll("button")).find((x) => x.textContent.trim() === text);
   await openPicker("kakao");
@@ -59,7 +59,7 @@ const { kakao } = require("./factories");
   await openPicker("naver"); pbtn("naver", "📁 Naver").click(); await idle(); pbtn("naver", "이 폴더 선택").click(); await idle();
   $("btn-download-roots-save").click(); await idle();
   ok(posted && posted.naver === "/webtoon_download/Naver" && posted.kakao === "/webtoon_download/Kakao/개미모음", "저장 요청에 고른 두 폴더(절대 경로)가 따로 담김: " + JSON.stringify(posted));
-  ok($("download-roots-status").textContent.includes("저장했습니다") && $("download-roots-status").textContent.includes(HOST + "\\Naver (컨테이너: /webtoon_download/Naver)"), "저장 뒤 실제로 쓰는 폴더가 표시됨");
+  ok($("download-roots-status").textContent.includes("저장했습니다") && $("naver-download-root-picker").textContent.includes(HOST + "\\Naver") && $("naver-download-root-picker").textContent.includes("(컨테이너: /webtoon_download/Naver)"), "저장 결과와 선택기의 실제 경로를 확인");
   pbtn("kakao", "네이버와 같게").click(); ok($("kakao-download-root-picker").textContent.includes("네이버와 같은 폴더"), "카카오를 '네이버와 같게'로 되돌릴 수 있음");
   w.prompt = origPrompt;
   run("kakaoWebtoonsEnabled = false; syncDownloadRootsVisibility();");
@@ -70,8 +70,8 @@ const { kakao } = require("./factories");
   run("webtoonServerConfigured = false;"); run("window.__p = loadNaverList(true);"); await w.__p; await idle();
   const cards = Array.from(w.document.querySelectorAll("#naver-list-grid .webtoon-card"));
   const btnTexts = (c) => Array.from(c.querySelectorAll(".webtoon-card-actions button")).map((b) => b.textContent.trim());
-  ok(JSON.stringify(btnTexts(cards.find((c) => c.textContent.includes("달마부장")))) === '["구독","목록제외","읽기","분석"]', "뷰어 서버가 없어도 미구독 카카오 카드에 '구독/목록제외'(와 분석)가 보임");
-  ok(JSON.stringify(btnTexts(cards.find((c) => c.textContent.includes("궁")))) === '["구독해제","범위 변경","제외됨으로","읽기","분석"]', "구독 중 카드는 '구독해제'/'범위 변경'/'제외됨으로'/'읽기'/'분석'");
+  ok(JSON.stringify(btnTexts(cards.find((c) => c.textContent.includes("달마부장")))) === '["구독","목록제외","읽기 · 뷰어 미설정","분석"]', "뷰어 미설정을 안내하면서도 미구독 카카오 카드의 구독·목록제외·분석을 유지");
+  ok(JSON.stringify(btnTexts(cards.find((c) => c.textContent.includes("궁")))) === '["구독해제","범위 변경","제외됨으로","읽기 · 뷰어 미설정","분석"]', "구독 중 카드는 '구독해제'/'범위 변경'/'제외됨으로'/'읽기'/'분석'");
   let confirmed = 0; w.confirm = () => { confirmed++; return true; };
   routes["/api/kakao-webtoons/71000001/subscribe"] = () => kakao(71000001, "달마부장", { status: "active", ever_subscribed: true });
   cards.find((c) => c.textContent.includes("달마부장")).querySelector(".webtoon-card-actions button").click(); await idle();

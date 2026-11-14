@@ -2,23 +2,29 @@
 
 
 import asyncio
+import json
 import logging
 import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Literal
 
 import aiohttp
-from fastapi import APIRouter, HTTPException, Request
-from pydantic import BaseModel
+from fastapi import APIRouter, HTTPException, Query, Request
+from pydantic import BaseModel, StrictBool
 
 from app import (
+    auto_subscribe,
     download_roots,
+    download_storage,
     repository,
 )
 from app import discord_config, download_pacing, kakao_page_download, list_alert, report_dispatch, viewer_scan, waitfree_sync
 from app import viewer_connection, webtoon_server_client
 from app.file_utils import remove_forbidden_str, remove_forbidden_str_kakao
 from app.config import get_settings
+from app.path_guard import PathOutsideRootError
+from app.db import write_transaction
 
 from app.api.common import (
     _is_author_auto_register_enabled,
@@ -78,7 +84,28 @@ def _validate_download_folder(raw_path: str) -> str:
 
 @router.get("/settings/download-roots")
 async def get_download_roots():
-    return await asyncio.to_thread(_download_roots_state)
+    state = await asyncio.to_thread(_download_roots_state)
+    naver, kakao = await asyncio.gather(*(download_storage.capacity(state[kind]["effective"]) for kind in ("naver", "kakao")))
+    state["naver"]["storage"], state["kakao"]["storage"] = naver, kakao
+    return state
+
+
+@router.get("/settings/download-storage")
+async def get_download_storage(kind: Literal["naver", "kakao"] = "naver", path: str | None = Query(default=None, max_length=4096)):
+    """Current configured folder or a base-relative picker draft; never saves settings."""
+    settings = get_settings()
+    if path is None:
+        state = await asyncio.to_thread(_download_roots_state)
+        return {"storage": await download_storage.capacity(state[kind]["effective"])}
+    relative = Path(path)
+    if relative.is_absolute() or ".." in relative.parts or "\x00" in path:
+        raise HTTPException(status_code=400, detail="잘못된 경로입니다.")
+    target = str(Path(settings.download_root) / relative)
+    try:
+        result = await download_storage.capacity(target, allowed_root=settings.download_root)
+    except PathOutsideRootError as error:
+        raise HTTPException(status_code=400, detail="잘못된 경로입니다.") from error
+    return {"storage": result}
 
 
 @router.post("/settings/download-roots")
@@ -90,7 +117,7 @@ async def set_download_roots(payload: DownloadRootsIn):
     kakao = _validate_download_folder(payload.kakao)
     await asyncio.to_thread(repository.set_setting, download_roots.NAVER_ROOT_SETTING_KEY, naver or None)
     await asyncio.to_thread(repository.set_setting, kakao_page_download.DOWNLOAD_ROOT_SETTING_KEY, kakao or None)
-    return await asyncio.to_thread(_download_roots_state)
+    return await get_download_roots()
 
 
 class AuthorAutoRegisterOut(BaseModel):
@@ -115,6 +142,33 @@ async def set_author_auto_register(payload: AuthorAutoRegisterIn):
         repository.set_setting, "auto_register_author_on_subscribe", None if payload.enabled else "0"
     )
     return await get_author_auto_register()
+
+
+class AutoSubscribeSetting(BaseModel):
+    enabled: StrictBool
+
+
+class AutoSubscribeInput(AutoSubscribeSetting):
+    scope: dict | None = None
+
+
+@router.get("/settings/auto-subscribe-scope")
+async def get_auto_subscribe_scope():
+    return await asyncio.to_thread(auto_subscribe.scope_config)
+
+
+@router.get("/settings/auto-subscribe", response_model=AutoSubscribeSetting)
+async def get_auto_subscribe():
+    return AutoSubscribeSetting(enabled=await asyncio.to_thread(auto_subscribe.is_enabled))
+
+
+@router.post("/settings/auto-subscribe", response_model=AutoSubscribeSetting)
+async def set_auto_subscribe(payload: AutoSubscribeInput):
+    try:
+        await asyncio.to_thread(auto_subscribe.set_config, payload.enabled, payload.scope)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    return await get_auto_subscribe()
 
 
 class DownloadPacingOut(BaseModel):
@@ -208,8 +262,16 @@ async def get_report_settings():
 @router.post("/settings/report", response_model=ReportSettingsModel)
 async def set_report_settings(payload: ReportSettingsModel):
     def _save() -> dict:
-        report_dispatch.set_quiet_hours([q.model_dump() for q in payload.quiet_hours])
-        report_dispatch.set_batch_minutes(payload.batch_minutes)
+        updates = {}
+        if "quiet_hours" in payload.model_fields_set:
+            updates[report_dispatch.QUIET_KEY] = json.dumps(report_dispatch.parse_quiet_hours([q.model_dump() for q in payload.quiet_hours]), ensure_ascii=False)
+        if "batch_minutes" in payload.model_fields_set:
+            if not 0 <= payload.batch_minutes <= report_dispatch.MAX_BATCH_MINUTES:
+                raise ValueError(f"모으는 시간은 0~{report_dispatch.MAX_BATCH_MINUTES}분이어야 합니다(0이면 바로 보냅니다).")
+            updates[report_dispatch.BATCH_KEY] = str(payload.batch_minutes)
+        if updates:
+            with write_transaction() as conn:
+                conn.executemany("INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", updates.items())
         return _report_settings()
 
     try:

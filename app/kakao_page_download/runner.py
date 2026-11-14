@@ -133,6 +133,7 @@ def _plan_for_run(series_id: int, series_item: dict, episodes: list[Episode], ex
 
 async def _download_in_number_order(
     client: KakaoPageClient, series_id: int, series_item: dict, plan: DownloadPlan, folder: Path, max_episodes: int, on_progress=None,
+    should_continue=None,
 ) -> tuple[list[int], list[tuple[int, str]], int | None, int | None]:
     """계획대로 번호순으로 받는다 → (받은 번호, (번호, 부제목), 실패한 회차, 기다무로 연 회차).
     받을 수 있는 회차는 받고, 가장 앞의 잠긴 회차는 자기 번호 차례에 기다무로 연다(한 장뿐이라 그 뒤 잠긴 회차는 대기).
@@ -148,9 +149,11 @@ async def _download_in_number_order(
     for episode in sorted([*plan.to_download, *([waitfree_target] if waitfree_target else [])], key=lambda e: e.number):
         if len(downloaded) >= max_episodes:
             break
+        if should_continue is not None and not should_continue():
+            break
         workflow_progress.episode(episode.number)
         if episode is waitfree_target:
-            ticket_used, failed = await _download_first_locked_with_waitfree(client, series_id, episode, folder, downloaded, items, on_progress)
+            ticket_used, failed = await _download_first_locked_with_waitfree(client, series_id, episode, folder, downloaded, items, on_progress, should_continue=should_continue)
             if failed is not None:
                 break
             if ticket_used is not None:
@@ -172,10 +175,23 @@ async def _download_in_number_order(
 
 async def run_download(
     client: KakaoPageClient, *, series_id: int, title: str | None, download_root: str, max_episodes: int, on_progress=None,
-    use_rental_tickets: bool = False,
+    use_rental_tickets: bool = False, should_continue=None,
 ) -> RunResult:
     """폴더 규칙(자동 다운로드용)으로 받을 회차를 정해 번호순으로 최대 max_episodes개 받는다(기다무로 여는 회차도 자기 번호 차례에). 실패하면 그 회차에서 멈춘다.
     폴더 이름은 title(있으면), 없으면 카카오페이지에 등록된 작품 제목을 쓴다."""
+    stopped_reason = None
+
+    def may_continue():
+        nonlocal stopped_reason
+        if stopped_reason is not None:
+            return False
+        if should_continue is None or should_continue():
+            return True
+        stopped_reason = "구독이 해제되어 추가 다운로드를 중단했습니다."
+        return False
+
+    if not may_continue():
+        return RunResult([], [], None, DownloadPlan(mode="new_folder"), stopped_reason=stopped_reason)
     listing = await client.list_episodes(series_id)
     if listing is None:
         return RunResult([], [], None, DownloadPlan(mode="new_folder"), "회차 목록을 가져오지 못했습니다.")
@@ -185,26 +201,31 @@ async def run_download(
     folder_title = title or series_item.get("title") or str(series_id)
     folder = series_folder(download_root, folder_title)
     plan = _plan_for_run(series_id, series_item, episodes, scan_existing_files(folder))
-    downloaded, items, failed, ticket_used = await _download_in_number_order(client, series_id, series_item, plan, folder, max_episodes, on_progress)
+    downloaded, items, failed, ticket_used = await _download_in_number_order(
+        client, series_id, series_item, plan, folder, max_episodes, on_progress, should_continue=may_continue
+    )
     rental_used: list[int] = []
     rental_remaining: int | None = None
-    if failed is None and use_rental_tickets and plan.locked:
+    if failed is None and use_rental_tickets and plan.locked and may_continue():
         # 설정에서 켠 경우: 기다무로 못 여는 잠긴 회차(기다무 대기·"N일 후 무료" 회차는 건너뜀)를 이 작품의 보유 대여권 수까지 번호순으로 열어 받는다.
         # 이미 받은 회차는 plan.locked에 없으므로(폴더/기록에 있으면 제외) 대여가 끝나 다시 잠겨 보이는 회차에 또 쓰는 일은 없다. 기다무로 막 연 회차는 뺀다.
         candidates = [episode for episode in plan.locked if episode.number != ticket_used]
         rental_used, rental_remaining, failed = await _download_locked_with_rental(
-            client, series_id, series_item, candidates, folder, downloaded, items, max_episodes, on_progress
+            client, series_id, series_item, candidates, folder, downloaded, items, max_episodes, on_progress,
+            should_continue=may_continue,
         )
-    if downloaded:
-        await write_series_metadata(series_item, series_id, folder, on_progress, await client.fetch_about(series_id))
+    if downloaded and may_continue():
+        about = await client.fetch_about(series_id)
+        if may_continue():
+            await write_series_metadata(series_item, series_id, folder, on_progress, about)
     return RunResult(
         downloaded, items, failed, plan, title=folder_title, ticket_used=ticket_used, finished=series_item.get("on_issue") == "N",
         waitfree_supported=waitfree_supported(series_item), rental_used=rental_used, rental_remaining=rental_remaining,
-        rental_skip_mode=use_rental_tickets,
+        rental_skip_mode=use_rental_tickets, stopped_reason=stopped_reason,
     )
 
 
-async def _download_first_locked_with_waitfree(client, series_id, episode, folder, downloaded, items, on_progress) -> tuple[int | None, int | None]:
+async def _download_first_locked_with_waitfree(client, series_id, episode, folder, downloaded, items, on_progress, should_continue=None) -> tuple[int | None, int | None]:
     """(기다무로 연 회차 번호 또는 None, 받기에 실패한 회차 번호 또는 None). 기다무를 못 쓰면 아무것도 안 한다."""
     if episode.waitfree_blocked:
         return None, None
@@ -213,6 +234,8 @@ async def _download_first_locked_with_waitfree(client, series_id, episode, folde
         return None, None
     if not info.waitfree_ready:
         waitfree_sync.remember(series_id, info.waitfree_available_at)  # 아직 충전 전 — 서버가 알려 준 다음 충전 시각을 저장해 둔다(그 시각에 맞춰 받기/정기 다운로드 건너뛰기에 쓴다)
+        return None, None
+    if should_continue is not None and not should_continue():
         return None, None
     ok, reason = await client.use_waitfree_ticket(episode.product_id)
     if not ok:
@@ -235,7 +258,7 @@ async def _download_first_locked_with_waitfree(client, series_id, episode, folde
 
 
 async def _download_locked_with_rental(
-    client, series_id, series_item, locked, folder, downloaded, items, max_episodes, on_progress
+    client, series_id, series_item, locked, folder, downloaded, items, max_episodes, on_progress, should_continue=None,
 ) -> tuple[list[int], int | None, int | None]:
     """(대여권으로 연 회차 번호들, 남은 대여권 수 또는 None, 받기에 실패한 회차 번호 또는 None). 잠긴 회차를 번호순으로 보되, 기다무로 열 수 있는 회차(충전 대기)나
     "N일 후 무료" 회차는 기다리면 열리므로 건너뛰고(대여권을 쓰지 않는다), 기다무로 못 여는 회차에만 쓴다. 대여권을 못 쓰거나 사용이 거절되면 이 작품은 거기서 멈춘다
@@ -246,6 +269,8 @@ async def _download_locked_with_rental(
     attempted = False
     for episode in locked:
         if len(downloaded) >= max_episodes:
+            break
+        if should_continue is not None and not should_continue():
             break
         if not rental_eligible(episode, series_item):
             if not attempted:

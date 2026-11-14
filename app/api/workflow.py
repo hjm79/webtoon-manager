@@ -9,7 +9,7 @@ import aiohttp
 from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel, Field, field_validator
 
-from app import daily_plus, download_roots, job_status, kakao_api, kakao_catalog, kakao_page_download
+from app import auto_subscribe, daily_plus, download_cooldown, download_roots, job_status, kakao_api, kakao_catalog, kakao_page_download
 from app import manual_download, naver_api, repository, subscription_scope, workflow_progress
 from app.api import kakao_webtoons, webtoons
 from app.config import get_settings
@@ -331,6 +331,19 @@ async def queue_download(payload: TitleIn):
         return {"execution": "queued", "queue": queue}
 
 
+@router.post("/queue/cancel")
+async def cancel_queue_download(payload: TitleIn):
+    async with _subscription_lock:
+        try:
+            cancelled = await asyncio.to_thread(repository.cancel_queued_download, payload.platform, payload.title_id)
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from exc
+        if not cancelled:
+            raise HTTPException(404, "다운로드 대기 중인 작품을 찾지 못했습니다.")
+        workflow_progress.clear_title(payload.platform, payload.title_id)
+        return {"execution": "cancelled", "queue": await asyncio.to_thread(repository.list_download_queue)}
+
+
 def _file_count(root: str, title: str, platform: str) -> int:
     safe = remove_forbidden_str(title) if platform == "naver" else remove_forbidden_str_kakao(title)
     if safe in ("", ".", ".."):
@@ -354,6 +367,7 @@ def _subscriptions() -> list[dict]:
             title_id, title = (row.title_id, row.title) if platform == "naver" else (str(row["title_id"]), row["title"])
             progress = workflow_progress.title_snapshot(platform, title_id)
             result.append({"platform": platform, "title_id": title_id, "title": title,
+                           "added_source": row.added_source if platform == "naver" else auto_subscribe.kakao_source(row["title_id"]),
                            "scope": subscription_scope.get(platform, title_id),
                            "downloaded_count": _file_count(root, title, platform),
                            "last_downloaded_no": row.last_downloaded_no if platform == "naver" else None,
@@ -365,6 +379,9 @@ def _subscriptions() -> list[dict]:
 async def status(request: Request):
     subscriptions = await asyncio.to_thread(_subscriptions)
     queue = await asyncio.to_thread(repository.list_download_queue)
+    busy = download_job.download_busy() or kakao_page_download.download_lock.locked()
+    for entry in queue:
+        entry["rest_until"] = download_cooldown.deadline(entry["platform"], entry["title_id"])
     queued = {(row["platform"], row["title_id"]): (index, row) for index, row in enumerate(queue, 1)}
     for row in subscriptions:
         row["next_run_at"] = next_run_at(request, row["platform"])
@@ -376,5 +393,11 @@ async def status(request: Request):
         if (row["platform"], row["title_id"]) in queued:
             row["queue_position"], entry = queued[(row["platform"], row["title_id"])]
             row["status"] = entry["state"]
+            if entry["state"] == "running" and row["progress"] and row["progress"]["state"] == "resting":
+                row["status"] = "resting"
+            row["scope_edit_reason"] = "다운로드 대기열에 있는 작품입니다. 대기 취소 또는 실행 완료 후 범위를 변경해주세요."
+        else:
+            row["scope_edit_reason"] = "다른 다운로드가 실행 중입니다. 완료 후 범위를 변경해주세요." if busy else None
     return {"next_run_at": next_run_at(request), "jobs": job_status.snapshot(), "progress": workflow_progress.snapshot(),
-            "subscriptions": subscriptions, "queue": queue, "checked_at": datetime.now(timezone.utc).isoformat()}
+            "subscriptions": subscriptions, "queue": queue, "download_busy": busy,
+            "checked_at": datetime.now(timezone.utc).isoformat()}

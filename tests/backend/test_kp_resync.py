@@ -38,21 +38,21 @@ def log_text(): return "\n".join(job_status.snapshot()["registry"]["log"])
 async def main():
     setup_rows(); settings = get_settings()
     repository.set_watched_author_enabled("꺼둔작가", False, "꺼둔작가", "kakao")                                  # 사용자가 직접 꺼 둔 작가
-    repository.set_setting("auto_register_author_on_subscribe", "0")                                                # 구독 시 자동 등록 설정이 꺼져 있어도, 재동기화는 사용자가 직접 누른 것이라 등록한다
+    repository.set_setting("auto_register_author_on_subscribe", "0")                                                # 재동기화는 자동 등록 설정과 무관하게 기존 선택을 보존한다
     job_status.start("registry")
 
     # ── 1. 카카오 재동기화 ──
     client = kp.KakaoPageClient(None, {}, 10)
     count = await tracker.resync_kakao_registry(client, settings)
     w = watched()
-    assert w == {"원작1": True, "글2": True, "제외작가": False, "글4": True, "꺼둔작가": False}, w                    # 원작자 우선, 없으면 글 / 제외됨은 "전체 작가 목록"(꺼짐)으로만 / 꺼 둔 것은 그대로 / 그림 작가는 없음
-    assert count == 4, count                                                                                          # 제외되지 않은 채로 작가 등록이 처리된 작품 수(1·2·4·6 — 6은 사용자가 꺼 둔 작가라 켜지진 않지만 처리는 됨)
+    assert w == {"원작1": False, "글2": False, "제외작가": False, "글4": False, "꺼둔작가": False}, w                    # 원작자 우선, 없으면 글 / 제외됨은 "전체 작가 목록"(꺼짐)으로만 / 꺼 둔 것은 그대로 / 그림 작가는 없음
+    assert count == 5, count                                                                                          # 정보 갱신에 성공한 5개 작품 (선택 상태는 유지)
     g = repository.get_kakao_webtoon
     assert g(1)["writer_names"] == ["글1"] and g(2)["writer_names"] == ["글2"] and g(3)["writer_names"] == ["제외작가"] and g(7)["writer_names"] == []     # {author}용 글 작가 저장, 정보 없으면 그대로
     assert sorted(calls) == [1, 2, 3, 4, 5, 6, 7]                                                                     # 상태와 무관하게 모두 훑는다
     t = log_text()
-    assert "[카카오] 원작있는작품 — 원작자 등록: 원작1" in t and "[카카오] 글만있는작품 — 작가 등록: 글2" in t and "[카카오] 제외된작품 — 작가 등록(전체 작가 목록만): 제외작가" in t
-    assert "[카카오] 예외작품 — 작품 정보 조회 실패" in t and "[카카오] 정보없는작품 — 작품 정보 조회 실패" in t and "[카카오] 꺼둔작가작품 — 작가 등록: 꺼둔작가" in t
+    assert "[카카오] 원작있는작품 — 작가 정보 갱신(선택 유지): 원작1" in t and "[카카오] 글만있는작품 — 작가 정보 갱신(선택 유지): 글2" in t and "[카카오] 제외된작품 — 작가 정보 갱신(선택 유지): 제외작가" in t
+    assert "[카카오] 예외작품 — 작품 정보 조회 실패" in t and "[카카오] 정보없는작품 — 작품 정보 조회 실패" in t and "[카카오] 꺼둔작가작품 — 작가 정보 갱신(선택 유지): 꺼둔작가" in t
     print("1) 카카오 재동기화 OK (원작자 우선, 상태별 규칙, 꺼 둔 작가 유지, 글 작가 저장, 실패 격리, 로그)")
 
     # ── 2. 다시 눌러도 같은 결과(멱등) ──

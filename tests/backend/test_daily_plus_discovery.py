@@ -5,12 +5,18 @@
 """
 import asyncio
 
-from app import daily_plus, db, naver_api, repository, scheduler, tracker
+from app import auto_subscribe, daily_plus, db, naver_api, repository, scheduler, tracker
 from fakes import discord_fake
 from app import new_episode_watch
 from app import cookie_health
 from app.config import get_settings
 db.get_connection()
+from registry_fakes import automatic_scope
+tracker._automatic_scope = automatic_scope
+auto_subscribe.set_enabled(True)
+repository.set_watched_author_enabled("test-author", True, "테스트 작가")
+repository.set_setting("registry_seen:naver:artist:test-author", "[]")
+repository.set_setting("registry_seen:naver:tag:77", "[]")
 
 settings = get_settings()
 HIDDEN = {"852534", "852535", "852600", "852601", "852602", "852603"}   # 지금 알려진 매일+ titleId
@@ -37,7 +43,7 @@ state = lambda tid: repository.get(tid).status if repository.exists(tid) else No
 async def adding():
     # Scenario 1: 작가 신작(구독 작가/미구독 관심 작가 두 경로가 함께 쓰는 _add_discovered_titles) — 일반 작품은 추가하고 매일+ 작품은 추가하지 않는다
     others = [{"titleId": "111", "titleName": "일반 작품"}, {"titleId": "852534", "titleName": "매일+ 작품"}]
-    added = await tracker._add_discovered_titles(None, settings, others, set())
+    added = await tracker._add_discovered_titles(None, settings, others, {"test-author"})
     assert added == [("111", "일반 작품")], added
     assert state("111") == repository.STATUS_ACTIVE and not repository.exists("852534")
     print("1) 작가 신작: 매일+ 추가 안 함 OK")
@@ -56,7 +62,7 @@ async def adding():
     # Scenario 3: 매일+ 목록을 한 번도 못 받아서 모르는 상태(빈 목록)에서는 아무것도 거르지 않는다 — 일반 작품이 사라지는 사고를 막고, 나중에 정리로 바로잡는다
     daily_plus.current_ids = lambda timeout_seconds, session=None: _empty()
     others = [{"titleId": "301", "titleName": "목록 모를 때 작품"}]
-    assert await tracker._add_discovered_titles(None, settings, others, set()) == [("301", "목록 모를 때 작품")]
+    assert await tracker._add_discovered_titles(None, settings, others, {"test-author"}) == [("301", "목록 모를 때 작품")]
     daily_plus.current_ids = current_ids
     print("3) 목록을 모를 때는 거르지 않음 OK")
 

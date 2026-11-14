@@ -278,12 +278,16 @@ async def fetch_latest_episode_url(
     return KAKAO_VIEWER_URL_TMPL.format(series_id=series_id, product_id=latest["product_id"])
 
 
+class KakaoLookupError(RuntimeError):
+    """A complete author lookup is required before updating discovery baselines."""
+
+
 async def _search_webtoon_cards(
-    session: aiohttp.ClientSession, keyword: str, timeout_seconds: int, max_pages: int
+    session: aiohttp.ClientSession, keyword: str, timeout_seconds: int, max_pages: int, *, require_complete: bool = False
 ) -> list[dict]:
     """검색어로 검색해서 웹툰(웹소설/책 제외) 결과 카드를 최대 max_pages 페이지까지 모은다. 검색어는
-    제목과 저자 양쪽에 걸리고, 완결/휴재 작품도 요일 목록과 달리 전부 나온다. 실패하면 그때까지
-    모은 것만 돌려준다."""
+    제목과 저자 양쪽에 걸리고, 완결/휴재 작품도 요일 목록과 달리 전부 나온다. 수동 검색은 실패 전까지
+    모은 것을 반환하며, require_complete인 작가 추적은 실패·페이지 상한 도달 시 오류를 올린다."""
     cards: list[dict] = []
     for page in range(max_pages):
         data = await _get_json(
@@ -297,13 +301,23 @@ async def _search_webtoon_cards(
             f"검색 keyword={keyword} page={page}",
         )
         if data is None:
+            if require_complete:
+                raise KakaoLookupError(f"카카오 작가 검색 {page + 1}페이지 조회 실패")
             break
+        if require_complete and (not isinstance(data, dict) or not isinstance(data.get("result"), dict)
+                                 or not isinstance(data["result"].get("list"), list)):
+            raise KakaoLookupError(f"카카오 작가 검색 {page + 1}페이지 응답 형식 오류")
         result = data.get("result") or {}
         entries = result.get("list") or []
+        if require_complete and any(not isinstance(entry, dict) for entry in entries):
+            raise KakaoLookupError(f"카카오 작가 검색 {page + 1}페이지 작품 정보 오류")
         cards.extend(c for c in entries if c.get("category_uid") == WEBTOON_CATEGORY_UID and c.get("series_id") is not None)
         if result.get("is_end") or not entries:
             break
         await asyncio.sleep(_REQUEST_INTERVAL_SECONDS)
+    else:
+        if require_complete:
+            raise KakaoLookupError("카카오 작가 검색 페이지 상한에 도달해 전체 목록을 확인하지 못했습니다")
     return cards
 
 
@@ -320,7 +334,7 @@ async def search_by_author(
     """작가 이름으로 검색해서, 실제로 그 이름이 저자로 걸린 웹툰만 골라 반환한다(검색어는 제목에도
     걸릴 수 있어서 authors 목록에 그 이름이 정확히 있는 것만 남긴다. 완결작 포함). 반환은
     title_id/title_name/is_adult/is_finished만 담은 dict 리스트."""
-    cards = await _search_webtoon_cards(session, author_name, timeout_seconds, _MAX_SEARCH_PAGES)
+    cards = await _search_webtoon_cards(session, author_name, timeout_seconds, _MAX_SEARCH_PAGES, require_complete=True)
     return [
         {
             "title_id": c["series_id"],

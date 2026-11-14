@@ -8,6 +8,7 @@ async function loadRegistryPage() {
   await loadAuthorList();
   await loadTagList();
   await loadKakaoAuthorList();
+  await loadRegistryDiscoveries();
   await refreshRegistryJobStatuses();
 }
 
@@ -28,6 +29,7 @@ async function refreshRegistryJobStatuses() {
   if (statuses.registry?.status !== "running") {
     loadAuthorList();
     loadTagList();
+    loadRegistryDiscoveries();
     if (kakaoWebtoonsEnabled) loadKakaoAuthorList(); // 카카오 작가도 함께 채워졌으니 목록을 새로 불러온다
     stopRegistryPolling();
   }
@@ -69,25 +71,70 @@ function buildChip(label, selected, onAction) {
   return chip;
 }
 
+let authorSearchGeneration = 0;
+const authorDialog = document.getElementById("registry-author-dialog");
+function closeAuthorChooser() {
+  authorSearchGeneration++;
+  closeWorkflowDialog(authorDialog);
+}
+document.getElementById("registry-author-close").addEventListener("click", closeAuthorChooser);
+authorDialog.addEventListener("cancel", (event) => { event.preventDefault(); closeAuthorChooser(); });
+
 async function searchAndRegisterAuthor(name) {
+  const generation = ++authorSearchGeneration;
+  const status = document.getElementById("registry-author-status");
+  const resultsEl = document.getElementById("registry-author-results");
+  document.getElementById("registry-author-title").textContent = `${name} · 작가 선택`;
+  resultsEl.replaceChildren(); status.textContent = "대표 작품을 확인하고 등록할 작가를 선택해주세요. 검색 중…";
+  if (!authorDialog.open) showWorkflowDialog(authorDialog);
   try {
     const results = await apiCall(`/api/authors/search?name=${encodeURIComponent(name)}`);
-    if (results.length === 0) {
-      alert(`"${name}"과 일치하는 작가를 찾지 못했습니다.`);
-      return;
+    if (generation !== authorSearchGeneration || !authorDialog.open) return;
+    status.textContent = results.length ? "동명이인이 있을 수 있습니다. 대표 작품과 ID를 확인해주세요." : "일치하는 작가를 찾지 못했습니다.";
+    for (const r of results) {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.textContent = `${r.author_name} · 대표 작품: ${r.sample_title || "정보 없음"} · ID ${r.author_id}`;
+      button.addEventListener("click", async () => {
+        if (generation !== authorSearchGeneration) return;
+        const buttons = Array.from(resultsEl.querySelectorAll("button"));
+        buttons.forEach((b) => b.disabled = true);
+        status.textContent = "작가를 등록하고 있습니다. 창을 닫아도 요청은 계속됩니다.";
+        try {
+          await apiCall("/api/watched-authors", { method: "POST", body: JSON.stringify({ author_id: r.author_id, author_name: r.author_name }) });
+          if (generation === authorSearchGeneration && authorDialog.open) closeAuthorChooser();
+          await loadAuthorList();
+        } catch (e) {
+          if (generation === authorSearchGeneration && authorDialog.open) {
+            status.textContent = e.message;
+            buttons.forEach((b) => b.disabled = false);
+          }
+        }
+      });
+      resultsEl.appendChild(button);
     }
-    // 이름으로 정확히 검색했을 때 후보가 여러 명이면(동명이인 등) 첫 번째로 등록한다 —
-    // 후보가 여러 개 나오는 경우는 드물고, 필요하면 언제든 "제외"로 되돌릴 수 있다.
-    const r = results[0];
-    await apiCall("/api/watched-authors", {
-      method: "POST",
-      body: JSON.stringify({ author_id: r.author_id, author_name: r.author_name }),
-    });
-    loadAuthorList();
-  } catch (e) {
-    alert(e.message);
-  }
+  } catch (e) { if (generation === authorSearchGeneration) status.textContent = e.message; }
 }
+
+async function loadRegistryDiscoveries() {
+  const container = document.getElementById("registry-discoveries");
+  try {
+    const records = await apiCall("/api/registry/discoveries");
+    if (!Array.isArray(records)) throw new Error("신작 후보를 확인하지 못했습니다.");
+    container.replaceChildren();
+    if (!records.length) { container.textContent = "새로 발견한 후보가 없습니다. 첫 신작 스캔은 기존 작품을 기준선으로 저장합니다."; return; }
+    for (const item of records) {
+      const row = document.createElement("p");
+      const text = document.createElement("span");
+      text.textContent = `${item.title} · ${item.platform === "kakao" ? "카카오페이지" : "네이버"} · ${item.sources.map((s) => s.name || s.id).join(", ")} `;
+      const button = document.createElement("button");
+      button.type = "button"; button.textContent = "범위 선택 후 구독";
+      button.addEventListener("click", async () => { if (await chooseSubscriptionScope(item)) await loadRegistryDiscoveries(); });
+      row.append(text, button); container.appendChild(row);
+    }
+  } catch (e) { container.textContent = e.message; }
+}
+document.getElementById("btn-refresh-discoveries").addEventListener("click", loadRegistryDiscoveries);
 
 // 등록된 작가(watchedAuthorsCache, enabled=true) / 사용 가능(네이버 연재중 목록에서
 // 뽑은 이름 후보 중 아직 등록 안 한 것) — 칩을 클릭하면 서로 반대쪽으로 이동한다.
@@ -121,13 +168,13 @@ function renderRegisteredAuthors() {
   container.innerHTML = "";
   if (registered.length === 0) {
     container.innerHTML =
-      '<p class="chip-empty-message">구독중인 웹툰이 없거나, 아직 저자 정보를 확인하지 못했습니다. "지금 전체 재동기화"를 눌러보세요.</p>';
+      '<p class="chip-empty-message">선택한 작가가 없습니다. 사용 가능 목록에서 추적할 작가를 직접 선택해주세요.</p>';
     return;
   }
   for (const a of registered) {
     container.appendChild(
       buildChip(`${a.author_name || a.author_id}${a.is_origin ? " (원작)" : ""}`, true, async () => {
-        await apiCall(`/api/watched-authors/${a.author_id}/disable`, {
+        await apiCall(`/api/watched-authors/${encodeURIComponent(a.author_id)}/disable`, {
           method: "POST",
           body: JSON.stringify({ author_name: a.author_name }),
         });
@@ -171,7 +218,7 @@ function renderAllAuthors() {
 }
 
 async function enableKnownAuthor(author) {
-  await apiCall(`/api/watched-authors/${author.author_id}/enable`, {
+  await apiCall(`/api/watched-authors/${encodeURIComponent(author.author_id)}/enable`, {
     method: "POST",
     body: JSON.stringify({ author_name: author.author_name }),
   });

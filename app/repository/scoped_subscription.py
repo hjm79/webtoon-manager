@@ -61,6 +61,18 @@ def update_download_queue(item_id: str | None = None, *, state: str | None = Non
         _save_queue(conn, items)
 
 
+def cancel_queued_download(platform: str, title_id: str) -> bool:
+    with write_transaction() as conn:
+        items = _queue(conn)
+        selected = [row for row in items if row["platform"] == platform and row["title_id"] == str(title_id)]
+        if not selected:
+            return False
+        if any(row["state"] != "queued" for row in selected):
+            raise ValueError("이미 실행 중인 작업은 대기 취소할 수 없습니다.")
+        _save_queue(conn, [row for row in items if row not in selected])
+        return True
+
+
 def set_scoped_subscription_status(platform: str, title_id: str, status: str) -> None:
     if platform not in ("naver", "kakao"):
         raise ValueError("지원하지 않는 플랫폼입니다.")

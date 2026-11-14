@@ -29,7 +29,7 @@ AUTHOR_ALREADY_OFF = "already_off"  # 후보로 꺼져 있고, 이번에도 꺼�
 AUTHOR_USER_DISABLED = "user_disabled"  # 사용자가 직접 꺼 둔 작가라 그대로 둔다
 
 
-def upsert_watched_author(author_id: str, author_name: str, enabled: bool, platform: str = "naver") -> str:
+def upsert_watched_author(author_id: str, author_name: str, enabled: bool, platform: str = "naver", *, preserve_selection: bool = False) -> str:
     """없으면 넣고, 있으면 이름만 최신화한다. enabled=True(구독 등 켜달라는 요청)면 앱이 후보로 채워 둔 꺼진 작가는 켠다.
     **사용자가 직접 끈 작가는 켜지 않는다**(set_watched_author_enabled로 끈 것). 결과(AUTHOR_*)를 돌려준다."""
     now = _now()
@@ -47,7 +47,7 @@ def upsert_watched_author(author_id: str, author_name: str, enabled: bool, platf
                 return AUTHOR_ALREADY_ON
             if existing["user_disabled"]:
                 return AUTHOR_USER_DISABLED
-            if not enabled:
+            if preserve_selection or not enabled:
                 return AUTHOR_ALREADY_OFF
             conn.execute(
                 "UPDATE watched_authors SET enabled = 1, updated_at = ? WHERE author_id = ? AND platform = ?",
@@ -57,7 +57,7 @@ def upsert_watched_author(author_id: str, author_name: str, enabled: bool, platf
         conn.execute(
             "INSERT INTO watched_authors (author_id, author_name, enabled, platform, created_at, updated_at) "
             "VALUES (?, ?, ?, ?, ?, ?)",
-            (author_id, author_name, int(enabled), platform, now, now),
+            (author_id, author_name, int(enabled and not preserve_selection), platform, now, now),
         )
         return AUTHOR_ADDED
 
@@ -106,11 +106,13 @@ def list_watched_tags() -> list[WatchedTag]:
     return [_tag_row_to_record(r) for r in rows]
 
 
-def upsert_watched_tag(tag_id: str, tag_name: str, enabled: bool = True) -> None:
+def upsert_watched_tag(tag_id: str, tag_name: str, enabled: bool = True, *, select: bool = False) -> None:
     now = _now()
     with write_transaction() as conn:
         existing = conn.execute("SELECT 1 FROM watched_tags WHERE tag_id = ?", (tag_id,)).fetchone()
         if existing:
+            if select:
+                conn.execute("UPDATE watched_tags SET enabled=?, updated_at=? WHERE tag_id=?", (int(enabled), now, tag_id))
             if tag_name:
                 conn.execute(
                     "UPDATE watched_tags SET tag_name = ?, updated_at = ? WHERE tag_id = ?",
