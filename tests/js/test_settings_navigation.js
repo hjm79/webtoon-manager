@@ -56,7 +56,9 @@ const { makeApp, idle, ok, done } = require("./harness");
   }
   for (const name of ["naver-list", "unsubscribed", "excluded", "manual-download"]) {
     run(`switchToTab(${JSON.stringify(name)});`); await idle();
-    ok(!overview.classList.contains("hidden"), `${name}에서는 다운로드 현황을 유지함`);
+    ok(overview.classList.contains("hidden"), `${name}에서는 다운로드 현황을 숨김`);
   }
+  run('switchToTab("downloads");'); await idle();
+  ok(!overview.classList.contains("hidden"), "다운로드 현황 전용 탭에서만 표시");
   done();
 })();

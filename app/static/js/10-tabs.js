@@ -16,7 +16,7 @@ function switchToTab(page) {
   const library = page === "library";
   if (!library) lastCollectionTab = page;
   document.querySelector(".main-tabs").classList.toggle("hidden", library);
-  document.getElementById("workflow-overview").classList.toggle("hidden", !["naver-list", "unsubscribed", "excluded", "manual-download"].includes(page));
+  document.getElementById("workflow-overview").classList.toggle("hidden", page !== "downloads");
   document.querySelectorAll(".workspace-tab").forEach((tab) => {
     const active = tab.dataset.workspace === (library ? "library" : "collection");
     tab.classList.toggle("active", active);

@@ -7,6 +7,7 @@ const pageLoaders = {
   unsubscribed: () => loadSubscriptionTab("unsubscribed"),
   excluded: () => loadSubscriptionTab("excluded"),
   "manual-download": () => {},
+  downloads: refreshWorkflowStatus,
   registry: loadRegistryPage,
   history: loadHistoryPage,
   "manual-run": loadManualRunPage,

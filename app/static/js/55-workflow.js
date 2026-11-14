@@ -322,7 +322,12 @@ async function searchWorkflow(event) {
       const platformLabel = item.platform === "kakao" ? "카카오페이지" : "네이버";
       const info = document.createElement("div");
       info.className = "webtoon-card-body";
-      const heading = makeButton(item.title, () => openWorkflowPreview(item));
+      const heading = document.createElement("a");
+      heading.textContent = item.title;
+      heading.href = item.platform === "kakao" ? kakaoContentUrl(item.title_id) : naverUrl(item.title_id);
+      heading.target = "_blank";
+      heading.rel = "noopener";
+      heading.title = "공식 작품 페이지를 새 탭으로 열기";
       heading.className = "workflow-result-title";
       const meta = document.createElement("p");
       meta.className = "webtoon-card-meta";
@@ -553,9 +558,15 @@ document.getElementById("workflow-subscribe-form").addEventListener("submit", as
 
 function renderWorkflowStatus(data) {
   workflowStatusData = data;
-  const progress = data.progress || {};
-  const labels = { idle: "대기 중", queued: "다운로드 대기", running: "다운로드 중", resting: "묶음 다운로드 사이 휴식", success: "다운로드 완료", deferred: "구독 해제로 중단", error: "다운로드 실패" };
-  document.getElementById("workflow-state").textContent = labels[progress.state] || "대기 중";
+  const running = (data.queue || []).find((item) => item.state === "running");
+  const waiting = (data.queue || []).filter((item) => item.state === "queued");
+  const progress = running && !["running", "resting"].includes(data.progress?.state)
+    ? { state: running.rest_until ? "resting" : "running", title: running.title, rest_until: running.rest_until }
+    : data.progress || {};
+  document.getElementById("workflow-progress-heading").textContent = ["running", "resting"].includes(progress.state)
+    ? "실행 중인 작업" : ["success", "error", "deferred"].includes(progress.state) ? "최근 실행 결과" : "현재 작업";
+  const labels = { idle: "실행 중인 다운로드가 없습니다.", queued: "다운로드 대기", running: "다운로드 중", resting: "묶음 다운로드 사이 휴식", success: "다운로드 완료", deferred: "구독 해제로 중단", error: "다운로드 실패" };
+  document.getElementById("workflow-state").textContent = labels[progress.state] || "실행 중인 다운로드가 없습니다.";
   document.getElementById("workflow-next-run").textContent = data.next_run_at ? `다음 다운로드 예약: ${formatKoreanTime(data.next_run_at)} (한국 시간)` : "등록된 다운로드 예약이 없습니다.";
   const details = [];
   if (progress.title) details.push(progress.title);
@@ -570,11 +581,11 @@ function renderWorkflowStatus(data) {
   bar.max = Math.max(1, Number(progress.total) || 1); bar.value = Number(progress.completed) || 0;
   const queue = document.getElementById("workflow-queue");
   queue.replaceChildren();
-  for (const item of data.queue || []) {
+  for (const item of waiting) {
     const row = document.createElement("li");
     const content = document.createElement("div");
     const text = document.createElement("span");
-    text.textContent = `${item.title} · ${item.state === "running" ? item.rest_until ? `${formatKoreanTimeOnly(item.rest_until)}까지 휴식` : "다운로드 중" : "다운로드 대기"}`;
+    text.textContent = `${item.title} · 다운로드 대기`;
     const cancel = makeButton("대기 취소", async () => {
       cancel.disabled = true;
       try {
@@ -605,7 +616,8 @@ function renderWorkflowStatus(data) {
     const text = document.createElement("span");
     const modeLabel = { all: "전체 공개 회차", latest: `최근 ${item.scope?.latest_count || 0}회차부터`, selected: "선택한 회차만", future: "새 회차만" }[item.scope?.mode] || "기존 구독 범위";
     const stateLabel = { available: "받은 회차 있음", idle: "대기 중", scheduled: "예약 대기", queued: "다운로드 대기", running: "다운로드 중", resting: "휴식 중", success: "완료", deferred: "구독 해제로 중단", error: "실패" }[item.status] || "구독 중";
-    text.textContent = `${item.title} · ${stateLabel}${item.queue_position ? ` · 대기열 ${item.queue_position}번째` : ""} · 받은 회차 ${item.downloaded_count || 0}개 · ${modeLabel}`;
+    const waitingPosition = waiting.findIndex((row) => row.platform === item.platform && String(row.title_id) === String(item.title_id)) + 1;
+    text.textContent = `${item.title} · ${stateLabel}${waitingPosition ? ` · 대기열 ${waitingPosition}번째` : ""} · 받은 회차 ${item.downloaded_count || 0}개 · ${modeLabel}`;
     const sourceLabel = item.added_source === "artist" ? "작가 자동 구독" : item.added_source === "tag" ? "태그 자동 구독" : null;
     if (sourceLabel) {
       const source = document.createElement("span");

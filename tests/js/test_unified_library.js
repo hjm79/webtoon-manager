@@ -75,7 +75,7 @@ const { makeApp, idle, waitFor, ok, done } = require("./harness");
   $("workflow-reader-close").click(); message("http://localhost", frame.contentWindow, "close"); await idle();
 
   $("workspace-collection").click();
-  ok(!$("page-manual-download").classList.contains("hidden") && !w.document.querySelector(".main-tabs").classList.contains("hidden") && !$("workflow-overview").classList.contains("hidden") && $("workspace-collection").getAttribute("aria-pressed") === "true", "수집으로 돌아오면 이전 수집 탭과 기존 메뉴·현황을 복원");
+  ok(!$("page-manual-download").classList.contains("hidden") && !w.document.querySelector(".main-tabs").classList.contains("hidden") && $("workflow-overview").classList.contains("hidden") && $("workspace-collection").getAttribute("aria-pressed") === "true", "수집으로 돌아오면 이전 수집 탭과 기존 메뉴를 복원하고 다운로드 현황은 별도 탭에 유지");
   run("window.__setting = loadWebtoonServerUrl();"); await w.__setting;
   ok($("webtoon-server-url").value === "/viewer" && $("webtoon-server-url").disabled && $("btn-save-webtoon-server-url").disabled && $("viewer-connection-hint").textContent.includes("같은 주소"), "통합 연결 주소는 읽기 전용으로 표시하여 이전 별도 포트 주소를 노출·변경하지 않음");
   routes["/api/settings/webtoon-server"] = { webtoon_server_url: "http://viewer.example" };

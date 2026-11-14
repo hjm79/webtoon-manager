@@ -21,12 +21,12 @@ const { makeApp, idle, ok, done } = require("./harness");
   const { w, run, calls } = makeApp(routes); await idle();
   const $ = (id) => w.document.getElementById(id);
   const rows = [...$("workflow-queue").children];
-  ok(rows.length === 3 && rows[0].textContent.includes("실행 작품") && rows[1].textContent.includes("다음 작품") && rows[2].textContent.includes("마지막 작품"), "대기열은 서버 FIFO 순서대로 별도 패널에 표시");
-  ok(rows[0].querySelector("button").disabled && rows[0].textContent.includes("휴식") && !rows[1].querySelector("button").disabled, "실행·휴식 작업은 취소할 수 없고 대기 작업만 취소 가능");
+  ok(rows.length === 2 && rows[0].textContent.includes("다음 작품") && rows[1].textContent.includes("마지막 작품"), "대기열은 대기 항목만 서버 FIFO 순서대로 표시");
+  ok(!rows[0].querySelector("button").disabled && $("workflow-progress-detail").textContent.includes("실행 작품") && $("workflow-state").textContent.includes("휴식"), "실행·휴식 작업은 진행 상태로 표시하고 대기 작업만 취소 가능");
   ok([...$("workflow-subscriptions").querySelectorAll("[data-scope-title-id]")].every((button) => button.disabled && button.title.includes("완료")), "다운로드 중 범위 변경은 사유와 함께 사전 비활성화");
-  rows[1].querySelector("button").click(); await idle();
+  rows[0].querySelector("button").click(); await idle();
   ok(cancelled.length === 1 && cancelled[0].platform === "kakao" && cancelled[0].title_id === "102", "선택한 대기 작품만 취소 API로 전달");
-  ok($("workflow-queue").children.length === 2 && $("workflow-queue").children[1].textContent.includes("마지막 작품"), "취소 후 대기 순서를 다시 표시");
+  ok($("workflow-queue").children.length === 1 && $("workflow-queue").children[0].textContent.includes("마지막 작품"), "취소 후 대기 순서를 다시 표시");
   ok(!calls.some((call) => /unsubscribe|\/scope$|\/subscribe$/.test(call.url)), "대기 취소는 구독·범위 변경 요청을 하지 않음");
 
   const previews = () => calls.filter((call) => call.url === "/api/workflow/preview").length;

@@ -1195,10 +1195,17 @@ select {
 /* 작품 찾기와 읽기를 연결하는 운영 현황 */
 .workflow-overview, .workflow-search { margin: 14px 16px; padding: 14px 16px; border: 1px solid var(--border); border-radius: 10px; background: var(--card); }
 .workflow-search { margin: 0 0 18px; }
+#page-downloads > h2 { margin: 0 16px; }
+#page-downloads .hint { margin: 0 0 12px; line-height: 1.6; }
+#page-downloads #workflow-next-run { margin-top: 8px; }
+.workflow-subscription-panel { margin: 14px 16px; padding: 14px 16px; border: 1px solid var(--border); border-radius: 10px; background: var(--card); }
+.workflow-subscription-panel > summary { cursor: pointer; font-weight: 600; }
+.workflow-subscription-panel[open] > summary { margin-bottom: 12px; }
+.workflow-overview h3 { margin: 0 0 8px; font-size: 16px; }
 .workflow-search h2 { margin: 0 0 8px; font-size: 18px; }
 .workflow-overview > div, .workflow-overview > progress { margin-bottom: 8px; }
 .workflow-overview progress { width: 100%; }
-.workflow-subscriptions { display: grid; gap: 6px; max-height: 140px; overflow: auto; }
+.workflow-subscriptions { display: grid; gap: 6px; }
 .workflow-subscriptions > div { display: flex; align-items: center; gap: 10px; justify-content: space-between; flex-wrap: wrap; }
 .workflow-subscriptions > div > span { min-width: 0; overflow-wrap: anywhere; flex: 1 1 220px; }
 .workflow-subscription-actions { display: flex; gap: 6px; flex-wrap: wrap; flex: 0 0 auto; max-width: 100%; }
@@ -1214,7 +1221,8 @@ select {
 .workflow-preview-cover img { display: block; }
 .workflow-preview-cover .thumb-placeholder { display: grid; place-items: center; color: var(--muted); }
 .workflow-result-card .webtoon-card-body { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
-.workflow-result-title { display: block; padding: 0; border: 0; background: transparent; text-align: left; font-size: 14px; line-height: 1.4; font-weight: 600; overflow-wrap: anywhere; }
+.workflow-result-title { display: block; padding: 0; border: 0; background: transparent; color: inherit; text-decoration: none; text-align: left; font-size: 14px; line-height: 1.4; font-weight: 600; overflow-wrap: anywhere; }
+.workflow-result-title:hover { text-decoration: underline; }
 .workflow-result-card .webtoon-card-meta { margin: 0; line-height: 1.4; }
 .workflow-preview-episodes { display: grid; gap: 10px; padding-left: 0; list-style: none; max-height: 50vh; overflow: auto; overflow-wrap: anywhere; }
 .workflow-search .toolbar { flex-wrap: wrap; }
