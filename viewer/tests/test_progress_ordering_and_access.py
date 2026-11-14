@@ -25,6 +25,7 @@ def _body(chapter, sequence, **values):
 @pytest.mark.parametrize("as_profile", [False, True])
 def test_delayed_older_completion_cannot_overwrite_latest_precise_position(client, library, monkeypatch, as_profile):
     sid, chapters = _series(client, library)
+    chapter_paths = [chapter["path"] for chapter in catalog.get_series(sid)["chapters"]]
     profile = None
     if as_profile:
         profile_progress.init_schema()
@@ -41,13 +42,16 @@ def test_delayed_older_completion_cannot_overwrite_latest_precise_position(clien
 
         async def delayed_io(platform, function, *args):
             nonlocal blocked_once
-            if function is scan.list_zip_image_names and not blocked_once:
+            if function is scan.list_zip_image_names and args == (chapter_paths[-1],) and not blocked_once:
                 blocked_once = True
                 entered.set()
                 await release.wait()
             return await original_io(platform, function, *args)
 
         monkeypatch.setattr(services, "run_platform_io", delayed_io)
+        # Cover precomputation reads the first chapter and must not consume the progress barrier.
+        assert len(await asyncio.wait_for(services.run_platform_io(
+            "naver", scan.list_zip_image_names, chapter_paths[0]), 2)) == 2
         async with httpx.AsyncClient(transport=httpx.ASGITransport(app=client.app), base_url="http://test") as api:
             older = asyncio.create_task(api.put(f"/api/series/{sid}/progress", json=_body(
                 chapters[-1], 1, page_index=1, completed=True)))
@@ -112,13 +116,14 @@ def test_partial_or_invalid_client_sequence_is_rejected(client, library, extra):
 
 def test_manual_unread_invalidates_pending_older_progress(client, library, monkeypatch):
     sid, chapters = _series(client, library)
+    target_path = catalog.get_series(sid)["chapters"][-1]["path"]
     original_io = services.run_platform_io
 
     async def scenario():
         entered, release = asyncio.Event(), asyncio.Event()
 
         async def delayed_io(platform, function, *args):
-            if function is scan.list_zip_image_names:
+            if function is scan.list_zip_image_names and args == (target_path,):
                 entered.set()
                 await release.wait()
             return await original_io(platform, function, *args)
