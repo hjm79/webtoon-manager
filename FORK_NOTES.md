@@ -19,7 +19,7 @@
 
 단일 주소 구성에서는 관리기에 `VIEWER_INTERNAL_URL=http://webtoon-server:8000`, `VIEWER_PUBLIC_PATH=/viewer`를 설정하고 뷰어에는 `BASE_PATH=/viewer`와 `/viewer`를 포함한 `PUBLIC_BASE_URL`을 설정한다. 뷰어의 호스트 포트는 공개하지 않는다. 브라우저는 관리기의 `/viewer/` 경로를 사용하고, 조회·스캔 등 서버 간 요청은 Docker 내부 주소를 사용한다. 기존 DB의 뷰어 주소와 스캔 토큰은 유지하며 통합 환경변수가 전송 주소를 우선한다.
 
-독립 실행 구성에서는 관리기의 기존 **뷰어 서버 주소**와 **다운로드 뒤 뷰어 스캔** 설정을 그대로 사용한다. 다른 origin에서 삽입하는 경우 대응하는 `hjm79/webtoon-server` 포크의 `EMBED_ALLOWED_ORIGINS`에 관리기의 정확한 origin을 설정한다. 같은 origin의 통합 리더는 기본 허용한다.
+독립 실행 구성에서는 관리기의 기존 **뷰어 서버 주소**와 **다운로드 뒤 뷰어 스캔** 설정을 그대로 사용한다. 뷰어 소스는 이 저장소의 `viewer/`에 포함되어 있다. 다른 origin에서 삽입하는 경우 뷰어의 `EMBED_ALLOWED_ORIGINS`에 관리기의 정확한 origin을 설정한다. 같은 origin의 통합 리더는 기본 허용한다.
 
 ```text
 EMBED_ALLOWED_ORIGINS=http://192.168.1.26:8230
@@ -37,12 +37,15 @@ EMBED_ALLOWED_ORIGINS=http://192.168.1.26:8230
 
 ```sh
 docker build -f Dockerfile.fork -t webtoon-manager:fork .
+docker build -f viewer/Dockerfile.fork -t webtoon-manager-viewer:fork viewer
 python tests/run_backend.py
 npm ci --prefix tests/js
 npm test --prefix tests/js
 ```
 
 위 자동 테스트는 임시 DB·다운로드 폴더와 네트워크 차단 장치를 사용한다. 운영 DB·로그인 쿠키를 자동 테스트 환경으로 복사하지 않는다.
+
+뷰어 테스트는 `viewer/`를 작업 디렉토리로 하고 별도 Python 환경에서 실행한다. 두 구성요소의 의존성·기본 패키지 이름이 다르므로 한 Python 환경이나 프로세스로 합치지 않는다. 자세한 통합 빌드·검증 절차는 [저장소 구성](docs/REPOSITORY_LAYOUT.md)을 따른다.
 
 ## 원본 라이선스
 

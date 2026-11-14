@@ -2,6 +2,8 @@
 
 The browser uses one service origin. Collection and the library live in the manager, while the existing viewer is reached through `/viewer/` on that same origin.
 
+Both components are maintained in this repository: the manager at the root and the viewer under `viewer/`. `compose.integrated.yml` builds both without checking out a separate viewer fork. See [repository layout and upgrade preservation](REPOSITORY_LAYOUT.md).
+
 ## Addresses
 
 | Purpose | Address or configuration |
@@ -21,7 +23,7 @@ The scope dialog offers `구독만 저장` separately from `구독하고 다운�
 
 The `workflow_download_queue` setting persists pending and running items. Startup recovers interrupted running items as queued. Duplicate queue entries and attempts to change a queued title's scope are rejected with 409. Unsubscribing a pending title cancels its queue entry atomically; unsubscribing a title already running from the queue is rejected. Normal and wait-free automatic batches exclude queued titles, and each batch fixes its target subscription snapshot before execution.
 
-Search cards show covers and open an in-page episode preview from the cover, title, or `회차 미리보기` button. Previewing does not subscribe or download.
+Search titles open the provider's official work page in a new tab. Covers and the separate `회차 미리보기` button open an in-page episode preview. The separate `읽기` button opens downloaded files in the embedded reader. Previewing does not subscribe or download.
 
 ## Read-only consumer contract
 

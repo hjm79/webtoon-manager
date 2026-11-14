@@ -1,0 +1,327 @@
+"""
+webtoon-server FastAPI 앱 진입점.
+
+이 파일은 앱 생성, 미들웨어, 생명주기(시작 시 스캔/자동 재스캔 예약), 라우터 등록,
+정적 프론트엔드 마운트만 담당한다. 실제 라우트 구현은 도메인별로 나뉜
+app/routers/*.py에 있고, 여러 라우터가 공유하는 백그라운드 작업/헬퍼는
+app/services.py에 있다:
+  - routers/library.py   스캔 트리거 + 시리즈 폴더 제외/재포함
+  - routers/series.py    시리즈 목록/조회, 이어보기, 진행률, 읽음 상태, 커버, info.xml
+  - routers/chapters.py  회차 페이지 서빙, 회차 겹침 감지
+  - routers/settings.py  앱 설정 저장/조회
+  - routers/backup.py    백업/복원
+  - routers/auth.py      (PROFILES_ENABLED일 때만) 관리자 로그인 + 기억된 기기 관리
+  - routers/profiles.py  (PROFILES_ENABLED일 때만) 프로필 관리(관리자 전용)
+  - services.py          위 라우터들이 공유하는 백그라운드 스캔/커버 사전생성 등
+  - db.py       읽음 진행률 / 설정 / 제외목록 / 겹침캐시 / 백업·복원 (SQLite) - 관리자 전용
+  - auth.py, profiles.py, access_requests.py, profile_progress.py, discord_notify.py
+                (PROFILES_ENABLED일 때만 실질적으로 쓰이는 공유 프로필 기능)
+  - catalog.py  스캔 결과를 담아두는 메모리 상태
+  - scan.py     파일시스템 스캔 + 회차 라벨 파싱
+  - overlap.py  회차 겹침(리캡) 감지 알고리즘 + 백그라운드 사전계산
+  - covers.py   시리즈 커버 썸네일 생성/캐싱
+
+PROFILES_ENABLED(공유 프로필) 기능: 환경변수가 없거나 "true"가 아니면 완전히 비활성화되고,
+그 상태에서는 이 파일의 나머지 로직이 기존과 100% 동일하게 동작한다(관련 라우터도
+등록되지 않고, 관련 스키마도 만들어지지 않음) - 이 기능을 켜지 않은 사용자에게는
+아무 영향이 없다.
+"""
+
+import asyncio
+import logging
+import os
+import re
+import secrets
+
+from fastapi import FastAPI
+from fastapi.responses import JSONResponse, RedirectResponse
+
+from . import base_path, db, embedding, services
+from .routers import backup, chapters, integration, library, series, series_lists, settings, supporter
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+log = logging.getLogger("webtoon-server")
+
+PROFILES_ENABLED = os.environ.get("PROFILES_ENABLED", "").lower() == "true"
+STATIC_DIR = os.environ.get("STATIC_DIR", "/app/static")  # 미들웨어에서도 device-approval.html을 직접
+# 서빙해야 해서(기기 승인 대기 화면), 파일 맨 아래 정적 마운트보다 위로 옮겨서 정의한다.
+EMBED_ALLOWED_ORIGINS = embedding.parse_allowed_origins(os.environ.get("EMBED_ALLOWED_ORIGINS", ""))
+
+app = FastAPI(title="webtoon-server")
+
+# 커버/페이지 이미지는 내용이 거의 안 바뀌니 캐싱이 오히려 유리해서 캐시 금지 대상에서 뺀다.
+_CACHEABLE_IMAGE_PATH = re.compile(r"^/api/series/[^/]+/cover$|^/api/chapters/[^/]+/pages/\d+$")
+_SUPPORTER_COVER_PATH = re.compile(r"^/api/supporter/covers/[A-Za-z0-9_-]{1,128}$")
+
+
+def _is_supporter_endpoint(path):
+    return path in ("/api/supporter/shelf", "/api/supporter/health") or bool(_SUPPORTER_COVER_PATH.fullmatch(path))
+
+
+@app.middleware("http")
+async def cache_control_for_api(request, call_next):
+    """
+    /api/* 응답은 매번 최신 상태를 반영해야 하는 동적 데이터라(읽음 진행률, 안읽음 개수 등),
+    브라우저가 임의로 캐싱하면 안 된다. 실제로 브라우저 자체 뒤로가기로 목록 화면에 돌아왔을 때
+    fetch 자체는 다시 일어나면서도 브라우저가 이전 응답을 재사용해 안읽음 개수가 갱신 안
+    되는 문제가 있었다 - 이 헤더가 없으면 캐시 여부가 브라우저 판단에 맡겨지는 게 원인이었다.
+
+    반대로 커버/페이지 이미지는 내용이 거의 안 바뀌니(바뀌면 서버가 자체적으로
+    cover_mtime/파일 mtime 기준으로 캐시를 무효화함) 오히려 적극적으로, 오래 캐싱해도
+    된다는 걸 명시해야 한다 - 그냥 "금지 안 함" 정도로는 브라우저가 알아서 캐싱해준다는
+    보장이 없어서, 실제로 리더 갔다가 메인화면에 돌아올 때마다 섬네일을 매번 새로
+    받아오는 문제가 있었다.
+
+    다만 서버가 자기 캐시를 정확히 갱신해도 브라우저는 그걸 모르므로, 커버가 바뀌었을 때
+    오래된 이미지가 7일간 계속 보이지 않으려면 "주소가 바뀌어야" 한다 - 커버 주소에
+    붙는 ?v= 값이 그 역할을 한다(covers.cover_version). 그리고 에러 응답(404/504 등)은
+    캐싱하면 안 된다: 나중에 이미지가 생기거나 일시적 실패가 풀려도 7일간 계속 에러로
+    보이게 되기 때문이다 - 그래서 정상(200) 응답에만 이 긴 캐시를 붙인다.
+    """
+    response = await call_next(request)
+    path = request.url.path
+    if path.startswith("/api/"):
+        if _CACHEABLE_IMAGE_PATH.match(path) and response.status_code == 200:
+            response.headers["Cache-Control"] = "public, max-age=604800"
+        else:
+            response.headers["Cache-Control"] = "no-store"
+    return response
+
+
+# ---------------------------------------------------------------------------
+# 공유 프로필 인증 게이트 (PROFILES_ENABLED일 때만 동작)
+# ---------------------------------------------------------------------------
+
+DEVICE_COOKIE_NAME = "webtoon_device"
+
+# 비밀번호 없이 항상 통과시켜야 하는 경로 - 로그인 화면 자체와 로그인 API, 로그인
+# 화면이 그리는 데 필요한 최소한의 정적 자원, 그리고 브라우저 쿠키가 없는 외부
+# 연동(디스코드 알림 봇, webtoon-manager 등)이 호출하는 /api/lookup/latest, /api/lookup/read-state, 그리고 토큰으로 따로 인증하는 스캔 연동(/api/integration/*).
+_ADMIN_GATE_ALLOWLIST = (
+    "/login.html",
+    "/api/auth/login",
+    "/favicon.ico",
+    "/manifest.json",
+    "/icons/",
+    "/style.css",
+    "/base-path.js",
+    "/api/lookup/latest",
+    "/api/lookup/read-state",
+    "/api/integration/rescan",  # 토큰(INTEGRATION_TOKEN)으로 따로 인증한다 — 라우터에서 확인(routers/integration.py)
+    "/api/integration/scan-status",
+    "/api/embed/config",
+)
+
+
+@app.middleware("http")
+async def profile_and_admin_gate(request, call_next):
+    """
+    PROFILES_ENABLED가 꺼져있으면 아무것도 안 하고 그대로 통과시킨다(request.state.profile만
+    None으로 채워둠) - 이 기능을 안 쓰는 사람에게는 기존과 동일하게 동작한다.
+
+    켜져있으면:
+    - "/p/<토큰>/..." 경로는 그 토큰이 유효한 프로필인지 확인하고, request.state.profile에
+      그 프로필을 담아둔 뒤, 경로에서 "/p/<토큰>" 부분을 떼어내고 나머지 요청을 그대로
+      진행시킨다 - 그러면 "/p/xyz/api/series"가 실제로는 "/api/series"와 똑같이
+      라우팅되어, 기존 라우트 코드를 하나도 복제/중복 등록할 필요가 없다.
+    - 그 외 경로(관리자용 루트)는 "기억된 기기" 쿠키가 있어야 통과한다. 없으면 API
+      요청은 401, 화면 요청은 로그인 화면으로 리다이렉트한다.
+    """
+    if not PROFILES_ENABLED:
+        request.state.profile = None
+        return await call_next(request)
+
+    from . import auth, profile_devices, profiles  # 지연 import: 기능이 꺼져있을 때 불필요한 로드를 피함
+
+    path = request.scope["path"]
+
+    if path.startswith("/p/"):
+        parts = path.split("/", 3)  # ["", "p", "<토큰>", "나머지..."]
+        token = parts[2] if len(parts) > 2 else ""
+        profile = profiles.get_profile_by_token(token)
+        if profile is None:
+            return JSONResponse({"detail": "profile link not found"}, status_code=404)
+        request.state.profile = profile
+        rest = "/" + parts[3] if len(parts) > 3 else "/"
+        if _is_supporter_endpoint(rest):
+            return JSONResponse({"detail": "Not Found"}, status_code=404, headers={"Cache-Control": "no-store"})
+
+        # 기기 승인 게이트 - 최대 2대까지는 자동 등록, 3번째부터는 관리자 승인이
+        # 필요하다. 상태 조회/신청 API 자체는 항상 통과시켜야(안 그러면 대기 화면
+        # 자신이 자기 상태를 확인할 방법이 없어짐) 예외로 둔다.
+        device_id = base_path.device_cookie(request, profile_devices.PROFILE_DEVICE_COOKIE_NAME)
+        is_new_device_cookie = device_id is None
+        if is_new_device_cookie:
+            device_id = secrets.token_urlsafe(24)
+        request.state.profile_device_id = device_id
+
+        device_status = "approved"
+        if profile_devices.is_device_registered(profile["id"], device_id):
+            profile_devices.touch_device(profile["id"], device_id)
+        elif profile_devices.count_devices(profile["id"]) < profile_devices.MAX_DEVICES_PER_PROFILE:
+            label = request.headers.get("user-agent", "알 수 없는 기기")[:120]
+            profile_devices.register_device(profile["id"], device_id, label)
+        else:
+            pending = profile_devices.get_pending_request(profile["id"], device_id)
+            device_status = "pending" if pending else "needs_request"
+
+        if device_status != "approved" and rest not in ("/api/device/status", "/api/device/request"):
+            if rest.startswith("/api/"):
+                response = JSONResponse(
+                    {"detail": "device_not_approved", "status": device_status}, status_code=403
+                )
+            else:
+                response = await base_path.html_response(os.path.join(STATIC_DIR, "device-approval.html"))
+        else:
+            request.scope["path"] = rest
+            response = await call_next(request)
+
+        if not rest.startswith("/api/"):
+            # "/p/<토큰>/" 같은 페이지 경로는 같은 URL이라도 승인 상태에 따라 완전히
+            # 다른 내용(대기 화면 vs 실제 화면)을 내려주는 것이라, 브라우저가 예전
+            # 응답을 캐시해서 재사용하면 안 된다 - 그러면 승인된 뒤에도 브라우저가
+            # 서버한테 다시 묻지도 않고 캐시된 대기 화면을 계속 보여주는 문제가
+            # 생긴다(실제로 이 문제가 있었다: 승인 후 새로고침해도 대기 화면만 반복).
+            response.headers["Cache-Control"] = "no-store"
+
+        if is_new_device_cookie or device_status == "approved":
+            # 새로 발급했거나(최초 방문), 이미 승인되어 정상 접속 중이면(계속 쓰는
+            # 기기) 매 접속마다 유효기간을 다시 늘려서 롤링 갱신한다 - 그래야 자주
+            # 쓰는 기기가 유효기간 만료로 갑자기 다시 승인이 필요해지는 일이 없다.
+            response.set_cookie(
+                profile_devices.PROFILE_DEVICE_COOKIE_NAME,
+                device_id,
+                max_age=profile_devices.PROFILE_DEVICE_COOKIE_MAX_AGE,
+                httponly=True,
+                samesite="lax",
+                path=base_path.cookie_path(),
+            )
+        return response
+
+    request.state.profile = None
+    device_id = base_path.device_cookie(request, DEVICE_COOKIE_NAME)
+    if auth.is_device_remembered(device_id):
+        auth.touch_device(device_id)
+        return await call_next(request)
+
+    if _is_supporter_endpoint(path):
+        return await call_next(request)
+
+    if any(path == allowed or path.startswith(allowed) for allowed in _ADMIN_GATE_ALLOWLIST):
+        return await call_next(request)
+
+    if path.startswith("/api/"):
+        return JSONResponse({"detail": "unauthorized"}, status_code=401)
+    return RedirectResponse(base_path.public_path("/login.html"))
+
+
+@app.middleware("http")
+async def reader_frame_policy(request, call_next):
+    response = await call_next(request)
+    response.headers["Content-Security-Policy"] = embedding.frame_ancestors(EMBED_ALLOWED_ORIGINS)
+    if not EMBED_ALLOWED_ORIGINS:
+        response.headers["X-Frame-Options"] = "SAMEORIGIN"
+    response.headers["Referrer-Policy"] = "same-origin"
+    return response
+
+
+@app.middleware("http")
+async def public_prefix(request, call_next):
+    prefix = base_path.BASE_PATH
+    path = request.scope["path"]
+    if prefix and (path == prefix or path.startswith(prefix + "/")):
+        request.scope["path"] = path[len(prefix):] or "/"
+        raw_path = request.scope.get("raw_path", b"")
+        if raw_path.startswith(prefix.encode()):
+            request.scope["raw_path"] = raw_path[len(prefix):] or b"/"
+    if prefix:
+        request.scope["root_path"] = prefix
+    return await call_next(request)
+
+
+@app.get("/api/embed/config")
+def embed_config():
+    return {"enabled": bool(EMBED_ALLOWED_ORIGINS), "allowed_origins": list(EMBED_ALLOWED_ORIGINS),
+            "protocol": "webtoon-reader", "version": 1}
+
+
+# ---------------------------------------------------------------------------
+# 앱 생명주기: 시작 시 스캔, 자동 재스캔 예약, (켜져있으면) 프로필 기능 초기화
+# ---------------------------------------------------------------------------
+
+
+@app.on_event("startup")
+async def startup_scan():
+    db.init_schema()
+    # 첫 스캔도 백그라운드로 돌린다 - 네트워크 드라이브(원드라이브 등)가 섞여 있으면
+    # 전체 스캔에 시간이 걸릴 수 있는데, 그걸 여기서 기다리면 컨테이너 시작 자체가
+    # 그만큼 느려진다. create_task로 넘기면 서버는 바로 요청을 받기 시작하고,
+    # 플랫폼별로 스캔이 끝나는 대로 목록에 자연스럽게 반영된다.
+    asyncio.create_task(services.initial_scan())
+
+    if services.is_rescan_enabled():
+        if services.RESCAN_SCHEDULE and not services.RESCAN_SCHEDULE.lstrip("-").isdigit():
+            schedule = " ; ".join(services._cron_expressions(services.RESCAN_SCHEDULE))  # 줄바꿈으로 쓴 경우도 한 줄로
+            log.info(f"자동 재스캔 활성화 - 크론 일정({schedule})에 따라 실행")
+        else:
+            interval = (
+                int(services.RESCAN_SCHEDULE) if services.RESCAN_SCHEDULE else services.RESCAN_INTERVAL_SECONDS
+            )
+            log.info(f"자동 재스캔 활성화 - {interval / 60:.0f}분마다 실행")
+        asyncio.create_task(services.auto_rescan_loop())
+    else:
+        log.info("자동 재스캔 비활성화됨 (RESCAN_INTERVAL_SECONDS <= 0)")
+
+    if PROFILES_ENABLED:
+        from . import access_requests, auth, discord_notify, profile_devices, profile_progress, profile_settings, profile_time_restrictions, profiles
+
+        auth.init_schema()
+        profiles.init_schema()
+        access_requests.init_schema()
+        profile_progress.init_schema()
+        profile_settings.init_schema()
+        profile_time_restrictions.init_schema()
+        profile_devices.init_schema()
+
+        # 서버가 켜질 때마다 새 비밀번호를 만들어서 로그(+디스코드)에 남긴다. 이미
+        # 로그인해서 기억된 기기는 비밀번호가 아니라 기기 쿠키로만 통과되므로(위
+        # ensure_admin_password_exists 설명 참고) 전혀 영향이 없다 - 이 값은 "지금부터
+        # 새로 로그인하려는 기기"가 써야 하는 값이다.
+        new_password = auth.ensure_admin_password_exists()
+        log.warning(f"관리자 비밀번호(새로 접속하는 기기용): {new_password}")
+        log.warning("이미 로그인해서 기억된 기기는 이 값과 무관하게 계속 그대로 접속됩니다.")
+        asyncio.create_task(
+            discord_notify.send(f"🔑 webtoon-server 관리자 비밀번호(새로 접속하는 기기용): `{new_password}`")
+        )
+
+
+# ---------------------------------------------------------------------------
+# 라우터 등록
+# ---------------------------------------------------------------------------
+
+app.include_router(library.router)
+app.include_router(integration.router)
+app.include_router(series.router)
+app.include_router(series_lists.router)
+app.include_router(chapters.router)
+app.include_router(settings.router)
+app.include_router(supporter.router)
+app.include_router(backup.router)
+
+if PROFILES_ENABLED:
+    from .routers import auth as auth_router
+    from .routers import browse as browse_router
+    from .routers import device as device_router
+    from .routers import profiles as profiles_router
+
+    app.include_router(auth_router.router)
+    app.include_router(browse_router.router)
+    app.include_router(device_router.router)
+    app.include_router(profiles_router.router)
+
+
+# ---------------------------------------------------------------------------
+# 정적 프론트엔드 (API 라우트 전부 등록된 다음 마지막에 마운트)
+# ---------------------------------------------------------------------------
+
+app.mount("/", base_path.PublicStaticFiles(directory=STATIC_DIR, html=True), name="static")

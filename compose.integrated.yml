@@ -1,0 +1,62 @@
+services:
+  webtoon-manager:
+    image: ${WEBTOON_MANAGER_IMAGE:-local/webtoon-manager:integrated}
+    build:
+      context: .
+      dockerfile: Dockerfile.fork
+    container_name: webtoon-manager
+    restart: unless-stopped
+    ports:
+      - "${WEB_BIND_IP:?Set the host LAN address}:${WEB_PORT:-8230}:8000"
+    environment:
+      DOWNLOAD_ROOT: /webtoon_download
+      WEBTOON_DOWNLOAD_HOST_PATH: ${WEBTOON_DOWNLOAD_HOST_PATH:?Set the existing download folder}
+      ARCHIVE_ROOT: /webtoon_archive
+      DATABASE_PATH: /data/webtoons.db
+      COOKIE_FILE_PATH: /cookies/${COOKIE_FILE_NAME:-cookies.json}
+      VIEWER_INTERNAL_URL: http://webtoon-server:8000
+      VIEWER_PUBLIC_PATH: /viewer
+    volumes:
+      - ${WEBTOON_DOWNLOAD_HOST_PATH}:/webtoon_download
+      - ${WEBTOON_ARCHIVE_HOST_PATH:?Set the existing archive folder}:/webtoon_archive
+      - ${APP_DATA_HOST_PATH:?Set the existing manager data folder}:/data
+      - ${COOKIE_DIR_HOST_PATH:?Set the existing cookie folder}:/cookies:ro
+    depends_on:
+      webtoon-server:
+        condition: service_healthy
+    healthcheck:
+      test: [CMD, python, -c, "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/', timeout=5).read(1)"]
+      interval: 30s
+      timeout: 8s
+      start_period: 30s
+      retries: 3
+    labels:
+      com.centurylinklabs.watchtower.enable: "false"
+
+  webtoon-server:
+    image: ${WEBTOON_VIEWER_IMAGE:-local/webtoon-manager-viewer:integrated}
+    build:
+      context: ./viewer
+      dockerfile: Dockerfile.fork
+    container_name: webtoon-server
+    restart: unless-stopped
+    environment:
+      BASE_PATH: /viewer
+      PUBLIC_BASE_URL: ${WEB_PUBLIC_ORIGIN:?Set the public application origin}/viewer
+      EMBED_ALLOWED_ORIGINS: ${WEB_PUBLIC_ORIGIN}
+      INTEGRATION_TOKEN: ${VIEWER_INTEGRATION_TOKEN:?Keep the existing scan integration token}
+      SUPPORTER_API_TOKEN: ${SUPPORTER_API_TOKEN:-}
+      PROFILES_ENABLED: ${VIEWER_PROFILES_ENABLED:-false}
+    volumes:
+      - ${WEBTOON_DOWNLOAD_HOST_PATH}/naver:/library/naver:ro
+      - ${WEBTOON_DOWNLOAD_HOST_PATH}/kakao:/library/kakao:ro
+      - ${WEBTOON_ARCHIVE_HOST_PATH}:/library/archive:ro
+      - ${VIEWER_DATA_HOST_PATH:?Set the existing reading-data folder}:/data
+    healthcheck:
+      test: [CMD, python, -c, "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/', timeout=5).read(1)"]
+      interval: 30s
+      timeout: 8s
+      start_period: 30s
+      retries: 3
+    labels:
+      com.centurylinklabs.watchtower.enable: "false"

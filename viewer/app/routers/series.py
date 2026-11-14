@@ -1,0 +1,474 @@
+"""
+시리즈 목록/조회, 이어보기, 진행률, 읽음 상태, 회차 목록, 커버, info.xml 관련 라우트.
+
+각 라우트는 request.state.profile을 확인해서, 공유 프로필로 들어온 요청이면
+access_control을 통해 (a) 그 프로필이 이 시리즈에 접근 권한이 있는지 확인하고
+(b) 진행률/읽음기록을 관리자와 완전히 분리된 프로필 전용 저장소에서 읽고 쓴다.
+profile이 None(관리자)일 때는 access_control이 그대로 db.py에 위임하므로, 관리자
+경로의 동작은 이 파일을 프로필 인식하게 고치기 전과 100% 동일하다.
+"""
+
+import asyncio
+import math
+from datetime import datetime, timezone
+from html.parser import HTMLParser
+
+from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi.responses import Response
+from pydantic import BaseModel, Field, field_validator, model_validator
+
+from .. import access_control, catalog, covers, db, profiles as profiles_module, scan, series_lists, services
+
+router = APIRouter()
+
+
+class _SummaryText(HTMLParser):
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.parts = []
+        self.hidden_depth = 0
+
+    def handle_starttag(self, tag, attrs):
+        if tag in {"script", "style"}:
+            self.hidden_depth += 1
+        elif not self.hidden_depth and tag in {"br", "p", "div", "li"}:
+            self.parts.append(" ")
+
+    def handle_endtag(self, tag):
+        if tag in {"script", "style"}:
+            self.hidden_depth = max(0, self.hidden_depth - 1)
+        elif not self.hidden_depth and tag in {"p", "div", "li"}:
+            self.parts.append(" ")
+
+    def handle_data(self, data):
+        if not self.hidden_depth:
+            self.parts.append(data)
+
+
+def _brief_summary(series: dict) -> str:
+    raw = (series.get("info") or {}).get("summary")
+    if not isinstance(raw, str):
+        return ""
+    parser = _SummaryText()
+    parser.feed(raw[:16384])
+    parser.close()
+    return " ".join("".join(parser.parts).split())[:1000].rstrip()
+
+
+def _latest_chapter(chapters: list) -> dict | None:
+    if not chapters:
+        return None
+    chapter = chapters[-1]
+    date = None
+    try:
+        timestamp = float(chapter.get("mtime", 0))
+        if math.isfinite(timestamp) and timestamp > 0:
+            date = datetime.fromtimestamp(timestamp, timezone.utc).isoformat()
+    except (TypeError, ValueError, OverflowError, OSError):
+        pass
+    return {"id": chapter["id"], "label": chapter["label"], "date": date,
+            "date_source": "file_modified" if date else "unknown"}
+
+
+@router.get("/api/series")
+def list_series(request: Request):
+    profile = access_control.get_profile(request)
+    allowed_ids = profiles_allowed_ids(profile)
+    # 관리자일 때만 필요하고, 시리즈마다 DB를 읽지 않도록 한 번만 읽어 둔다
+    later_ids = db.get_later_series_ids() if profile is None else set()
+
+    result = []
+    for series in catalog.get_series_map().values():
+        # "제외"는 관리자 메인 화면에서만 숨기는 것이다 - 프로필에게 이미 허용된
+        # 시리즈라면, 관리자가 자기 목록에서 안 보이게 해뒀어도 그 프로필한테는
+        # 그대로 보여야 한다(전체 라이브러리 중 아무거나 공유할 수 있어야 하므로).
+        if profile is None and series.get("excluded"):
+            continue
+        if allowed_ids is not None and series["id"] not in allowed_ids:
+            continue
+
+        chapters = series["chapters"]
+        total = len(chapters)
+        if profile is None:
+            prog = db.get_progress(series["id"])
+            services.migrate_legacy_progress_if_needed(series["id"], chapters, prog)
+        else:
+            prog = access_control.get_progress(profile, series["id"])
+        read_ids = access_control.get_read_chapter_ids(profile, series["id"])
+        unread = sum(1 for chapter in chapters if chapter["id"] not in read_ids)
+
+        reading = services.reading_chapter(chapters, prog)
+        last_read_index = services.resolve_read_index(chapters, prog)
+        last_read = chapters[last_read_index] if last_read_index >= 0 else None
+
+        if total == 0:
+            progress_display = ""
+        elif reading is None and unread == 0:
+            progress_display = "완독"
+        else:
+            # 카드에 적는 회차: 지금 읽고 있는 회차가 있으면 그 회차, 없으면 아직 안 읽은 회차 중 가장 앞선 것
+            # (중간에 빠졌던 회차일 수도 있음). 읽고 있는 회차를 우선하는 이유: 카드를 누르면 그 회차가 열리고
+            # 사이드바에도 "읽는 중"으로 표시되는데, 카드만 "안 읽은 첫 회차"를 적으면 어긋난다 - 예를 들어
+            # 8화까지 갔다가 7화로 돌아와 읽는 중이면(7화는 이미 읽음 기록에 있음) 안 읽은 첫 회차는 8화다.
+            # 전부 읽음 처리된 웹툰의 회차를 다시 열어 읽는 중일 때도 같은 규칙으로 그 회차가 적힌다.
+            current = reading or next(chapter for chapter in chapters if chapter["id"] not in read_ids)
+            current_label = services.chapter_number_part(current["label"])
+            last_label = services.chapter_number_part(chapters[-1]["label"])
+            progress_display = f"{current_label}/{last_label}"
+
+        item = {
+            "id": series["id"],
+            "platform": series["platform"],
+            "title": series["title"],
+            "chapter_count": total,
+            "unread_count": unread,
+            "progress_display": progress_display,
+            # 지금 읽고 있는 회차가 있는지(회차 목록에 "읽는 중"으로 표시되는 회차가 있는지). 읽음 처리된
+            # 회차 수(unread_count)만으로는 알 수 없다: 새 웹툰의 1화를 읽는 중이어도 읽은 회차는 0개이고,
+            # 전부 읽은 웹툰의 마지막 회차를 다시 열어 읽는 중이어도 안 읽은 회차는 0개다.
+            "reading_now": reading is not None,
+            "latest_update": series["latest_mtime"],
+            "cover_url": covers.cover_url(series, access_control.profile_path_prefix(profile)),
+            "summary": _brief_summary(series),
+            "latest_chapter": _latest_chapter(chapters),
+            "recently_read_chapter": {"id": last_read["id"], "label": last_read["label"]} if last_read else None,
+        }
+        if profile is None:
+            # 관리자 개인 정리 상태라, 공유 프로필 응답에는 아예 넣지 않는다
+            item["list"] = series_lists.list_name_of(series["id"], later_ids)
+        result.append(item)
+    result.sort(key=lambda item: (item["platform"], item["title"]))
+    return result
+
+
+def profiles_allowed_ids(profile: dict | None) -> set[str] | None:
+    """profile이 없으면(관리자) None(=전체 다 허용, 필터링 안 함), 있으면 그 프로필의
+    허용 목록 집합을 반환한다. list_series에서만 쓰는 작은 헬퍼라 여기 둔다."""
+    if profile is None:
+        return None
+    return profiles_module.get_allowed_series_ids(profile["id"])
+
+
+def _find_series_by_title(series: str, platform: str | None) -> dict | None:
+    """시리즈 폴더명(과 선택적으로 플랫폼 폴더명)으로 시리즈를 찾는다. lookup 계열 API가 공유한다."""
+    matches = [candidate for candidate in catalog.get_series_map().values()
+               if candidate["title"] == series and (platform is None or candidate["platform"] == platform)]
+    if len(matches) > 1:
+        raise HTTPException(409, detail={"reason": "ambiguous_series", "platforms": sorted({c["platform"] for c in matches})})
+    return matches[0] if matches else None
+
+
+@router.get("/api/lookup/latest", dependencies=[Depends(access_control.require_admin)])
+def lookup_latest(series: str, platform: str | None = None):
+    """
+    hermes(webtoon_checker.py 등)가 디스코드 알림에 붙일 바로가기 URL을 구할 때 쓰는 API.
+    시리즈 폴더명만으로 찾을 수 있다 - platform은 선택사항이며, 여러 플랫폼에 같은 이름의
+    시리즈가 있어 구분이 필요할 때만 넘기면 된다. (platform을 필수로 요구하면, 서버 쪽
+    /library 폴더명을 나중에 바꿀 때마다 호출하는 쪽 코드도 같이 고쳐야 하는 문제가 있었음)
+
+    관리자 전용 기능이라(알림 봇은 관리자 쪽 데이터만 다룸) 공유 프로필에서는 아예 막는다
+    (require_admin). 또한 알림 봇처럼 브라우저 쿠키가 없는 외부 서비스가 호출하는
+    경로라, main.py의 관리자 비밀번호 게이트에서도 예외로 빼둬야 한다(그렇지 않으면
+    이 API를 쓰는 외부 연동이 전부 401로 막혀버린다).
+    """
+    candidate = _find_series_by_title(series, platform)
+    if candidate is None:
+        raise HTTPException(404, "series not found")
+    if not candidate["chapters"]:
+        raise HTTPException(404, "series has no chapters")
+    latest = candidate["chapters"][-1]
+    url = None
+    if services.PUBLIC_BASE_URL:
+        url = f"{services.PUBLIC_BASE_URL}/reader.html?series={candidate['id']}&chapter={latest['id']}&page=0"
+    return {
+        "series_id": candidate["id"],
+        "chapter_id": latest["id"],
+        "chapter_label": latest["label"],
+        "url": url,
+    }
+
+
+@router.get("/api/lookup/read-state", dependencies=[Depends(access_control.require_admin)])
+def lookup_read_state(series: str, request: Request, platform: str | None = None):
+    """
+    webtoon-manager 같은 외부 연동이 "이 시리즈에서 관리자가 읽은 회차"를 구하는 API(읽지 않은 회차를
+    아카이빙에서 빼는 용도). lookup/latest와 같은 방식으로 시리즈 폴더명(+선택적 platform)으로 찾고,
+    같은 이유로 관리자 전용(require_admin)이며 main.py의 관리자 비밀번호 게이트 예외 목록에 있다.
+
+    read_numbers는 회차 번호(sort_key, 파일명 앞의 숫자)다. 회차 목록과 같은 기준을 쓰므로 '읽는 중'인
+    회차는 읽음에 들어가지 않는다. 한 번호에 회차가 여러 개(분할 회차)면 전부 읽었을 때만 그 번호를 읽음으로 본다.
+    """
+    candidate = _find_series_by_title(series, platform)
+    if candidate is None:
+        raise HTTPException(404, "series not found")
+    chapters = list_chapters(candidate["id"], request)["chapters"]
+    unread_numbers = {c["sort_key"] for c in chapters if not c["read"]}
+    read_numbers = sorted({c["sort_key"] for c in chapters} - unread_numbers)
+    return {"series_id": candidate["id"], "read_numbers": read_numbers}
+
+
+@router.get("/api/series/{series_id}/continue")
+async def continue_reading(series_id: str, request: Request):
+    """이 시리즈를 열었을 때 바로 이동해야 할 (회차, 페이지) 반환."""
+    profile = access_control.get_profile(request)
+    access_control.ensure_series_accessible(profile, series_id)
+
+    series = catalog.get_series(series_id)
+    if not series:
+        raise HTTPException(404, "series not found")
+    if not series["chapters"]:
+        raise HTTPException(404, "no chapters")
+
+    prog = access_control.get_progress(profile, series_id)
+    if prog:
+        idx = next((i for i, ch in enumerate(series["chapters"]) if ch["id"] == prog["chapter_id"]), None)
+        if idx is not None:
+            # zip을 열어 페이지 수를 세는 건 네트워크 드라이브(원드라이브 등)에서 캐시가
+            # 안 되어 있으면 느릴 수 있는 블로킹 작업이다. run_platform_io로 넘겨서,
+            # 이 플랫폼이 네트워크 드라이브면 격리된 전용 스레드풀로 보내(로컬 작업까지
+            # 덩달아 느려지지 않게), 그게 아니면 평소처럼 기본 스레드풀로 보낸다.
+            page_count = len(await services.run_platform_io(series["platform"], scan.list_zip_image_names, series["chapters"][idx]["path"]))
+            # 저장된 page_index가 실제 페이지 수 이상이면 "이 회차는 다 읽음" 신호 ->
+            # 다음 화가 있으면 그쪽으로, 없으면(마지막 화) 마지막 페이지로 보정
+            if prog["page_index"] >= page_count and idx + 1 < len(series["chapters"]):
+                next_chapter = series["chapters"][idx + 1]
+                return {"chapter_id": next_chapter["id"], "page_index": 0}
+            clamped_page = min(max(prog["page_index"], 0), max(page_count - 1, 0))
+            result = {"chapter_id": prog["chapter_id"], "page_index": clamped_page}
+            offset = db.normalize_page_offset(prog.get("page_offset", 0))
+            if offset > 0 and clamped_page == prog["page_index"]:
+                result["page_offset"] = offset
+            return result
+
+    first_chapter = series["chapters"][0]
+    return {"chapter_id": first_chapter["id"], "page_index": 0}
+
+
+class ProgressIn(BaseModel):
+    chapter_id: str
+    page_index: int = Field(default=0, ge=0, lt=db.PAGE_FINISHED_SENTINEL, strict=True)
+    page_offset: float = Field(default=0.0, ge=0, le=1, allow_inf_nan=False, strict=True)
+    completed: bool | None = Field(default=None, strict=True)
+    client_session_id: str | None = Field(default=None, min_length=16, max_length=128, pattern=r"^[A-Za-z0-9_-]+$", strict=True)
+    client_sequence: int | None = Field(default=None, ge=1, le=9_007_199_254_740_991, strict=True)
+
+    @model_validator(mode="after")
+    def sequence_requires_session(self):
+        if (self.client_session_id is None) != (self.client_sequence is None):
+            raise ValueError("client_session_id and client_sequence must be supplied together")
+        return self
+
+    @field_validator("page_offset", mode="before")
+    @classmethod
+    def finite_offset(cls, value):
+        if isinstance(value, float) and not math.isfinite(value):
+            raise HTTPException(422, "page_offset must be a finite number between 0 and 1")
+        return value
+
+    @field_validator("completed", mode="before")
+    @classmethod
+    def explicit_completed(cls, value):
+        if not isinstance(value, bool):
+            raise HTTPException(422, "completed must be a boolean when provided")
+        return value
+
+
+@router.put("/api/series/{series_id}/progress")
+async def save_progress(series_id: str, body: ProgressIn, request: Request):
+    profile = access_control.get_profile(request)
+    access_control.ensure_series_accessible(profile, series_id)
+
+    series = catalog.get_series(series_id)
+    if not series:
+        raise HTTPException(404, "series not found")
+    chapters = series["chapters"]
+    idx = next((i for i, ch in enumerate(chapters) if ch["id"] == body.chapter_id), None)
+    if idx is None:
+        raise HTTPException(404, "chapter not found in series")
+
+    allow_reading_session = access_control.ensure_reading_time_allowed(profile, series_id, body.chapter_id)
+    actor_key = access_control.progress_actor_key(profile)
+    generation = db.register_progress_intent(actor_key, series_id, body.client_session_id, body.client_sequence)
+    if generation is None:
+        return {"ok": True, "saved": False, "reason": "stale_progress"}
+
+    page_count = len(await services.run_platform_io(series["platform"], scan.list_zip_image_names, chapters[idx]["path"]))
+    if page_count == 0 or body.page_index >= page_count:
+        raise HTTPException(422, "page_index must identify an existing page")
+
+    is_last_chapter = idx == len(chapters) - 1
+    legacy_completion = body.completed is None and "page_offset" not in body.model_fields_set
+    completed = False
+    if body.completed is True or (is_last_chapter and legacy_completion):
+        if not is_last_chapter:
+            raise HTTPException(422, "completed is only valid at the end of the last chapter")
+        if body.completed is True and (page_count == 0 or body.page_index != page_count - 1):
+            raise HTTPException(422, "completed requires the last page of the last chapter")
+        completed = page_count > 0 and body.page_index >= page_count - 1
+
+    saved = db.commit_progress_intent(
+        actor_key, series_id, generation, profile_id=profile["id"] if profile else None,
+        chapter_id=body.chapter_id, chapter_index=idx,
+        page_index=db.PAGE_FINISHED_SENTINEL if completed else body.page_index, page_offset=body.page_offset,
+        read_chapter_ids=[ch["id"] for ch in chapters[:idx + int(completed)]],
+        allow_reading_session=allow_reading_session,
+    )
+    return {"ok": True, "saved": saved, **({"reason": "stale_progress"} if not saved else {})}
+
+
+class ReadStateIn(BaseModel):
+    scope: str  # "all" | "chapter"
+    read: bool
+    chapter_id: str | None = None
+
+
+@router.put("/api/series/{series_id}/read-state")
+async def set_read_state(series_id: str, body: ReadStateIn, request: Request):
+    profile = access_control.get_profile(request)
+    access_control.ensure_series_accessible(profile, series_id)
+    actor_key = access_control.progress_actor_key(profile)
+    generation = db.register_progress_intent(actor_key, series_id)
+
+    series = catalog.get_series(series_id)
+    if not series:
+        raise HTTPException(404, "series not found")
+    chapters = series["chapters"]
+    if not chapters:
+        raise HTTPException(404, "no chapters")
+
+    selected_index = None
+    if body.scope == "chapter":
+        if not body.chapter_id:
+            raise HTTPException(400, "chapter_id is required for scope=chapter")
+        selected_index = next((i for i, chapter in enumerate(chapters) if chapter["id"] == body.chapter_id), None)
+        if selected_index is None:
+            raise HTTPException(404, "chapter not found in series")
+    elif body.scope != "all":
+        raise HTTPException(400, "scope must be 'all' or 'chapter'")
+    result = await asyncio.to_thread(db.commit_read_state_intent,
+        actor_key, series_id, generation, profile_id=profile["id"] if profile else None,
+        chapter_ids=[chapter["id"] for chapter in chapters], scope=body.scope, read=body.read,
+        selected_index=selected_index,
+    )
+    return {"ok": True, **result}
+
+
+@router.get("/api/series/{series_id}/chapters")
+def list_chapters(series_id: str, request: Request):
+    profile = access_control.get_profile(request)
+    access_control.ensure_series_accessible(profile, series_id)
+
+    series = catalog.get_series(series_id)
+    if not series:
+        raise HTTPException(404, "series not found")
+    chapters = series["chapters"]
+    prog = access_control.get_progress(profile, series_id)
+    if profile is None:
+        services.migrate_legacy_progress_if_needed(series_id, chapters, prog)
+    read_ids = access_control.get_read_chapter_ids(profile, series_id)
+    # "지금 읽는 중"인 회차의 판단은 목록 화면의 읽는 중 필터와 같은 함수를 쓴다(services.reading_chapter)
+    reading = services.reading_chapter(chapters, prog)
+    reading_id = reading["id"] if reading else None
+
+    chapters_out = []
+    for chapter in chapters:
+        is_reading = chapter["id"] == reading_id
+        # "지금 보고 있는 회차"라는 정보가 "예전에 읽었는지"보다 더 구체적이고 우선한다 -
+        # 사이드바에서 이미 읽었던 회차로 다시 돌아가서 보면(예: 10화까지 읽다가 2화를
+        # 다시 열어봄), 그 회차는 "읽음" 기록이 있어도 지금 보는 중이라는 게 더 중요한
+        # 정보이므로 "읽는 중"으로 표시해야 한다. 예전에는 "이미 읽음"이 우선이라 다시
+        # 펴봐도 "읽는 중"이 뜰 자리가 없는 문제가 있었다.
+        is_read = (chapter["id"] in read_ids) and not is_reading
+        chapters_out.append(
+            {
+                "id": chapter["id"],
+                "label": chapter["label"],
+                "sort_key": chapter["sort_key"],
+                "read": is_read,
+                "reading": is_reading,
+            }
+        )
+
+    return {
+        "id": series["id"],
+        "platform": series["platform"],
+        "title": series["title"],
+        "chapters": chapters_out,
+    }
+
+
+@router.post("/api/series/{series_id}/chapters/{chapter_id}/toggle-read")
+async def toggle_chapter_read(series_id: str, chapter_id: str, request: Request):
+    """
+    회차 하나만 콕 집어 읽음/안읽음을 반전시킨다 (범위 지정 없이 그 회차 자체만).
+    다른 회차의 읽음 기록은 전혀 건드리지 않는다.
+
+    다만 "이어보기(진행률 포인터)"는 이 회차별 읽음 기록과 별개로 저장되어 있어서,
+    그냥 두면 여기서 안읽음으로 바꾼 회차가 이미 지나간 걸로 남아 이어보기가 엉뚱한
+    (더 뒤의) 위치를 계속 가리키게 된다. 그래서 지금 이어보기 위치와 비교해서 필요하면
+    포인터도 같이 당겨준다/밀어준다 - 전체읽음/부분읽음 처리(set_read_state)와 같은 원리.
+    """
+    profile = access_control.get_profile(request)
+    access_control.ensure_series_accessible(profile, series_id)
+    actor_key = access_control.progress_actor_key(profile)
+    generation = db.register_progress_intent(actor_key, series_id)
+
+    series = catalog.get_series(series_id)
+    if not series:
+        raise HTTPException(404, "series not found")
+    chapters = series["chapters"]
+    idx = next((i for i, chapter in enumerate(chapters) if chapter["id"] == chapter_id), None)
+    if idx is None:
+        raise HTTPException(404, "chapter not found in series")
+
+    result = await asyncio.to_thread(db.commit_read_state_intent,
+        actor_key, series_id, generation, profile_id=profile["id"] if profile else None,
+        chapter_ids=[chapter["id"] for chapter in chapters], scope="toggle", selected_index=idx,
+    )
+    return {"ok": True, **result}
+
+
+@router.get("/api/series/{series_id}/info")
+def series_info(series_id: str, request: Request):
+    """
+    info.xml(카카오 등 일부 플랫폼에만 있음)에서 뽑아둔 작가/장르/줄거리/연재상태/연령등급/
+    원작 링크를 반환. info.xml이 없는 시리즈(네이버 등)는 404.
+
+    표지와 마찬가지로 완화된 접근 검사를 쓴다 - 둘러보기(아직 허용 전) 항목도
+    정보를 미리 볼 수 있어야 하기 때문이다.
+    """
+    profile = access_control.get_profile(request)
+    series = catalog.get_series(series_id)
+    if not series:
+        raise HTTPException(404, "series not found")
+    access_control.ensure_series_previewable(profile, series)
+
+    info = series.get("info")
+    if not info:
+        raise HTTPException(404, "no info available for this series")
+    return info
+
+
+@router.get("/api/series/{series_id}/cover")
+async def series_cover(series_id: str, request: Request):
+    profile = access_control.get_profile(request)
+    series = catalog.get_series(series_id)
+    if not series:
+        raise HTTPException(404, "no cover")
+    # 회차 목록/페이지 등과 달리, 표지는 둘러보기(아직 완전히 허용되지 않은 시리즈)
+    # 화면에서도 미리 보여줘야 하므로 완화된 검사를 쓴다 - 실제 콘텐츠(회차)는
+    # 여전히 엄격한 ensure_series_accessible로 막혀있으니 안전하다.
+    access_control.ensure_series_previewable(profile, series)
+
+    try:
+        result = await asyncio.wait_for(
+            services.ensure_cover_cached(series), timeout=services.SERIES_SCAN_TIMEOUT_SECONDS
+        )
+    except asyncio.TimeoutError:
+        # 네트워크 드라이브가 응답이 없어도 브라우저가 무한정 기다리지 않고 에러로
+        # 끝나게 한다 - 그래야 다음에 다시 시도할 수 있다(무한 스피너 방지).
+        raise HTTPException(504, "cover generation timed out")
+    if result is None:
+        raise HTTPException(404, "no cover")
+    data, media_type = result
+    return Response(content=data, media_type=media_type)

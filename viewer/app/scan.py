@@ -1,0 +1,494 @@
+"""
+파일시스템에서 웹툰 라이브러리를 스캔하고, zip 파일명에서 (정렬키, 회차 라벨)을 뽑아낸다.
+
+라이브러리 구조: LIBRARY_ROOT 바로 아래 1depth = 플랫폼(예: 네이버/카카오),
+그 아래 1depth = 시리즈(웹툰) 폴더, 그 안의 zip 파일들 = 회차.
+
+일부 플랫폼(카카오 등)의 다운로드 도구는 시리즈 폴더 안에 대표 이미지(cover.jpg)와
+메타데이터(info.xml, ComicInfo 표준 포맷)를 같이 남겨두는데, 있으면 활용한다.
+"""
+
+import hashlib
+import logging
+import os
+import re
+import threading
+import xml.etree.ElementTree as ET
+import zipfile
+from collections import OrderedDict
+
+from . import db
+
+log = logging.getLogger("webtoon-server")
+
+LIBRARY_ROOT = os.environ.get("LIBRARY_ROOT", "/library")
+
+IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".gif"}
+ARCHIVE_EXTS = {".zip", ".cbz"}
+COVER_FILENAMES = {"cover.jpg", "cover.jpeg", "cover.png", "cover.webp"}
+INFO_FILENAME = "info.xml"
+
+
+def natural_key(name: str):
+    """zip 내부 이미지 파일명을 1,2,3...10 순서로(문자열 사전순이 아니라) 정렬하기 위한 키."""
+    return [int(token) if token.isdigit() else token.lower() for token in re.split(r"(\d+)", name)]
+
+
+def make_id(*parts: str) -> str:
+    return hashlib.sha1("::".join(parts).encode("utf-8")).hexdigest()[:12]
+
+
+def _clean_title(text: str, strip_trailing_hash: bool = True) -> str:
+    """추출된 제목 후보에서 구분자/날짜형 숫자/장식성 특수문자를 정리.
+    완결 표시((完)/(완)/완결)는 여기서 지우지 않는다 - parse_chapter_label이 최종
+    라벨 전체에 대해 한 번만 정규화해서, 원래 어디에 있었든 라벨 끝에 "완결" 하나로
+    통일해서 남긴다(예전에는 여기서 그냥 지워버려서, "세크메트의 분노 (完) 시즌1
+    완결"처럼 회차 제목 자체에 있던 완결 표시까지 통째로 사라지는 문제가 있었다)."""
+    # 앞뒤에 붙는 구분자류 제거 (마커 앞/뒤 어느 쪽 텍스트든 동일하게 적용)
+    text = re.sub(r"^[\s\-–—.:：·‧․・,]+", "", text)
+    text = re.sub(r"[\s\-–—.:：·‧․・,]+$", "", text)
+    if strip_trailing_hash:
+        # 카카오식 파일명 끝의 #숫자(회차 제목과 무관한 부가 번호) 제거
+        text = re.sub(r"#\d+$", "", text)
+    # 날짜로 추정되는 "숫자-숫자" 패턴 제거 (예: 6-28). 다만 "Ep 1-1"처럼 영문
+    # 에피소드 표시 바로 뒤에 붙은 숫자-숫자는 날짜가 아니라 에피소드-파트 번호라
+    # 지우면 안 된다(실제로 "Ep 1-1. BRAVE MAN" ~ "Ep 1-5. BRAVE MAN"처럼 번호만
+    # 다른 회차 5개가 전부 "Ep . BRAVE MAN"으로 뭉개져서 구분이 안 되는 문제가 있었다).
+    # 콜백으로 바로 앞 글자를 직접 확인해서, 공백이 몇 개든(또는 없어도) 안전하게 판단한다.
+    def _strip_date_like(match: re.Match) -> str:
+        before = text[: match.start()].rstrip()
+        if before and before[-1].isalpha() and before[-1].isascii():
+            return match.group(0)  # 영문 바로 뒤라면 에피소드 번호로 보고 그대로 둠
+        return ""
+
+    text = re.sub(r"\b\d{1,2}-\d{1,2}\b", _strip_date_like, text)
+    # 장식성 특수문자 제거 (단어 사이에 있을 수 있으니 공백으로 치환 후 나중에 정리).
+    # "？"/"！"는 장식이 아니라 제목의 일부일 수 있어(예: 가려 둔 제목 "？？의 왕") 남긴다.
+    text = re.sub(r"[～·‧․・•●○◆■□※]", " ", text)
+    # 끝에 남은 "(숫자)"는 " 숫자"로 (예: (2) -> " 2")
+    text = re.sub(r"\((\d+)\)\s*$", r" \1", text)
+    text = re.sub(r"\s+", " ", text).strip(" -_")
+    return text
+
+
+_PAREN_COMPLETION = re.compile(r"\(\s*(?:完|완결|완)\s*\)")  # (完) (완) (완결)
+
+
+def _inside_parens(text: str, index: int) -> bool:
+    return text.count("(", 0, index) > text.count(")", 0, index)
+
+
+def _normalize_completion_marker(label: str) -> str:
+    """라벨의 완결 표시를 지우고, 라벨 맨 끝에 "완결"을 딱 한 번만 다시 붙여서 위치와
+    표기를 통일한다. 표시가 여러 개 겹쳐 있어도(예: "(完) ... 완결") 결과엔 끝에 하나만 남고,
+    완결 표시가 없으면 라벨을 그대로 돌려준다.
+
+    무엇을 "완결 표시"로 볼지가 중요하다. 아래 둘만 표시로 보고, 그 밖의 "완결"은 제목의
+    일부(예: "완결 후기")라서 건드리지 않는다 - 안 그러면 "완결 후기"가 "후기 완결"로 바뀐다.
+      - 괄호로 감싼 표기: (完) (완) (완결)
+      - 단어 "완결"이 라벨 맨 끝에 있거나, 다른 글자와 같은 괄호 안에 있는 경우("(2부 완결)")
+
+    지운 자리에 남는 흔적도 정리한다: "(2부 )"의 공백, "()" 빈 괄호, 파일명에 원래 있던
+    "444화 ·" 같은 구분점.
+    """
+    found = False
+
+    if _PAREN_COMPLETION.search(label):
+        found = True
+        label_without_marker = _PAREN_COMPLETION.sub("", label)
+    else:
+        label_without_marker = label
+
+    pieces = []
+    position = 0
+    for match in re.finditer("완결", label_without_marker):
+        at_end = not label_without_marker[match.end():].strip()
+        if at_end or _inside_parens(label_without_marker, match.start()):
+            found = True
+            pieces.append(label_without_marker[position:match.start()])
+            position = match.end()
+    pieces.append(label_without_marker[position:])
+
+    if not found:
+        return label
+
+    cleaned = "".join(pieces)
+    cleaned = re.sub(r"\(\s*\)", "", cleaned)  # 안이 통째로 비게 된 괄호 "()" 제거
+    cleaned = re.sub(r"\(\s+", "(", cleaned)  # 여는 괄호 뒤에 남은 공백 제거
+    cleaned = re.sub(r"\s+\)", ")", cleaned)  # 닫는 괄호 앞에 남은 공백 제거
+    cleaned = re.sub(r"\s+", " ", cleaned).strip(" -_·")
+    return f"{cleaned} 완결" if cleaned else "완결"
+
+
+def _unwrap_parenthesized(suffix: str) -> str:
+    """번호 바로 뒤에 붙은 설명이 통째로 괄호로 감싸져 있으면 괄호를 푼다.
+
+      - "(시즌2 마지막화)" -> "시즌2 마지막화"
+      - "+ 후기", "아스라이 스러지는" -> 그대로 ("+" 같은 글자는 파일명에 있는 그대로 둔다)
+    """
+    wrapped = re.fullmatch(r"\(([^()]*)\)", suffix)
+    return wrapped.group(1).strip() if wrapped else suffix
+
+
+_SEPARATOR_CLASS = r"[\s：:\-–—·‧․・,]*"
+
+
+def _series_prefix_length(content: str, series_name: str) -> int:
+    """
+    content가 series_name으로 시작하면 그 길이를 반환(없으면 0).
+    "：" vs 공백처럼 구두점/공백 표기가 실제 파일명과 달라도 매칭되도록,
+    시리즈명을 구분자 기준으로 쪼갠 뒤 구분자 자리는 느슨하게(0개 이상) 허용한다.
+    """
+    if not series_name:
+        return 0
+    parts = [p for p in re.split(r"[\s：:\-–—·‧․・,]+", series_name) if p]
+    if not parts:
+        return 0
+    pattern = r"^" + _SEPARATOR_CLASS.join(re.escape(p) for p in parts) + _SEPARATOR_CLASS
+    match = re.match(pattern, content)
+    if match and match.end() > 0:
+        end_pos = match.end()
+        # 숫자가 중간에 잘리는 경우 방지 (예: 시리즈명 '에스탄시아1', 파일명 '에스탄시아10' -> '0'으로 잘리는 것 방지)
+        if end_pos < len(content):
+            if content[end_pos - 1].isdigit() and content[end_pos].isdigit():
+                return 0
+        return end_pos
+    return 0
+
+
+def parse_chapter_label(stem: str, series_name: str = "") -> tuple[int, str]:
+    """
+    zip 파일명(확장자 제외)에서 (정렬키, 표시라벨) 추출. 실제 파싱은
+    _parse_chapter_label_raw가 하고, 여기서는 그 결과 라벨에 완결 표시 정규화만
+    한 번 더 적용한다(어느 파싱 경로를 타든 결과가 일관되게 처리되도록).
+
+    예)
+      "103 마법사랑해 100화 - 아스라이 스러지는 (7)" -> (103, "100화 아스라이 스러지는 7")
+      "172 나이트런 Extra story - 1화" (series=나이트런) -> (172, "Extra story 1화")
+      "651 신의 탑 3부 233화" (series=신의 탑)          -> (651, "3부 233화")
+      "0004_1화#64"                                  -> (4,   "1화")
+      "0003_프롤로그#48"                              -> (3,   "프롤로그")
+      "104 마법사랑해 번외편 - 르네의 일기"           -> (104, "번외편 - 르네의 일기")
+      "117 기기괴괴2 절멸의 도시 #2" (series=기기괴괴2) -> (117, "절멸의 도시 2")
+      "017 로도스도 전기  사령의 여왕 제16화 ..." (series="로도스도 전기 ： 사령의 여왕")
+                                                     -> (17, "16화 ...")
+      "049 퇴마록 세계편 세크메트의 분노 (完) 시즌1 완결" (series=퇴마록 : 세계편)
+                                                     -> (49, "세크메트의 분노 시즌1 완결")
+    """
+    sort_key, label = _parse_chapter_label_raw(stem, series_name)
+    return sort_key, _normalize_completion_marker(label)
+
+
+def _parse_chapter_label_raw(stem: str, series_name: str = "") -> tuple[int, str]:
+    sort_match = re.match(r"^(\d+)", stem)
+    sort_key = int(sort_match.group(1)) if sort_match else 0
+
+    # 맨 앞 정렬번호 뒤 구분자(_ 또는 공백)로 카카오식/네이버식을 구분
+    # 카카오: "0004_1화#64" (언더스코어), 네이버: "103 마법사랑해 ..." (공백)
+    is_underscore_style = bool(re.match(r"^\d+_", stem))
+
+    rest = re.sub(r"^\d+[_\s]*", "", stem)
+
+    # 파일명이 시리즈 폴더명으로 시작하면 그 부분은 제거 (제목 추출에 방해되지 않도록).
+    # 폴더명과 파일명의 구두점 표기가 달라도(예: "：" vs 공백) 매칭되도록 느슨하게 비교.
+    # 시리즈명이 여러 번 반복될 수도 있으니(예: "나이트런 나이트런 신세계 ...")
+    # 더 이상 안 잘릴 때까지 반복해서 제거
+    content = rest
+    while True:
+        prefix_length = _series_prefix_length(content, series_name)
+        if not prefix_length:
+            break
+        content = content[prefix_length:]
+
+    # "화" 앞에 "제"가 붙는 표기("제16화")는 "제"를 회차 번호의 일부로 취급해서
+    # 부제 프리픽스에 안 남게 함
+    marker_match = re.search(r"(?:제\s*)?(\d+)\s*화", content)
+    if marker_match:
+        # 앞자리 0은 떼고 표시 (예: "030화" -> "30화")
+        marker = f"{int(marker_match.group(1))}화"
+        # "화" 앞에 붙는 텍스트(부제/시즌 표시 등)도 그대로 살림 (예: "Extra story", "3부")
+        prefix = _clean_title(content[: marker_match.start()], strip_trailing_hash=False)
+        suffix = _clean_title(content[marker_match.end():])
+        label = f"{prefix} {marker}" if prefix else marker
+        suffix = _unwrap_parenthesized(suffix)
+        if suffix:
+            label = f"{label} {suffix}"  # 부제든 덧붙임이든 구분점 없이 공백으로 잇는다
+        return sort_key, label
+
+    if not is_underscore_style:
+        # "N화" 표시가 없는 네이버식 파일명: "부제목 #번호" 패턴 시도 (예: 기기괴괴2)
+        hash_matches = list(re.finditer(r"#(\d+)", content))
+        if hash_matches:
+            last_hash_match = hash_matches[-1]
+            number = last_hash_match.group(1)
+            title_part = _clean_title(content[: last_hash_match.start()], strip_trailing_hash=False)
+            if title_part:
+                return sort_key, f"{title_part} {number}"
+
+    # 그 외: "화" 표시도 "#번호"도 없는 경우 (예: 번외편)
+    label = _clean_title(content, strip_trailing_hash=True)
+    if not label:
+        # 시리즈 이름을 지웠더니 남은 텍스트가 없는 경우 (예: 0001_에스탄시아1#25)
+        # 이름을 지우기 전 원본 텍스트(rest)에서 부가 번호만 정리하여 차선책으로 씁니다.
+        label = _clean_title(rest, strip_trailing_hash=True)
+        if not label:
+            label = stem
+    return sort_key, label
+
+
+def list_platforms_in_scan_order() -> list[str]:
+    """
+    스캔할 플랫폼 폴더 목록을, 로컬이 먼저 오고 네트워크 드라이브가 나중에 오도록 정렬해서
+    반환한다. 어떤 폴더가 "느린(네트워크) 저장소"인지는 컨테이너 안에서 자동으로 알아낼
+    방법이 마땅치 않아서(마운트 방식이 여러 가지라 자동 판별이 애매함), 환경변수
+    SLOW_PLATFORMS(콤마로 구분한 플랫폼 폴더명)로 직접 지정하게 한다. 지정된 플랫폼은
+    항상 뒤로 미뤄지고, 나머지는 기존처럼 이름순이다.
+    """
+    if not os.path.isdir(LIBRARY_ROOT):
+        return []
+    platforms = [
+        name for name in sorted(os.listdir(LIBRARY_ROOT))
+        if os.path.isdir(os.path.join(LIBRARY_ROOT, name))
+    ]
+    slow = {p.strip() for p in os.environ.get("SLOW_PLATFORMS", "").split(",") if p.strip()}
+    fast_platforms = [p for p in platforms if p not in slow]
+    slow_platforms = [p for p in platforms if p in slow]
+    return fast_platforms + slow_platforms
+
+
+def is_slow_platform(platform: str) -> bool:
+    """SLOW_PLATFORMS 환경변수에 지정된 플랫폼인지(=네트워크 드라이브로 취급) 여부."""
+    slow = {p.strip() for p in os.environ.get("SLOW_PLATFORMS", "").split(",") if p.strip()}
+    return platform in slow
+
+
+def _scan_series_at_path(platform: str, series_ref: str, series_path: str) -> tuple[dict, dict] | None:
+    """
+    시리즈 폴더 하나의 실제 내용(회차 zip 목록, 커버, info.xml)을 읽어서
+    (series_entry, chapters_map)을 만든다. 경로가 이미 확정된 상태에서 호출한다 -
+    호출하는 쪽(발견 즉시 스캔하는 제너레이터든, 폴더 하나만 다시 스캔하는 함수든)이
+    같은 로직을 중복 없이 공유하기 위해 따로 뺀 것.
+    """
+    series_name = os.path.basename(series_ref)
+    zip_filenames = [f for f in os.listdir(series_path) if os.path.splitext(f.lower())[1] in ARCHIVE_EXTS]
+    if not zip_filenames:
+        return None
+
+    series_id = make_id(platform, series_ref)
+    chapters = []
+    chapters_map = {}
+    for zip_filename in zip_filenames:
+        stem = os.path.splitext(zip_filename)[0]
+        sort_key, label = parse_chapter_label(stem, series_name)
+        chapter_id = make_id(platform, series_ref, zip_filename)
+        full_path = os.path.join(series_path, zip_filename)
+        chapters.append(
+            {
+                "id": chapter_id,
+                "label": label,
+                "sort_key": sort_key,
+                "filename": zip_filename,
+                "path": full_path,
+            }
+        )
+        chapters_map[chapter_id] = full_path
+
+    chapters.sort(key=lambda chapter: (chapter["sort_key"], chapter["filename"]))
+    chapter_mtimes = []
+    for chapter in chapters:
+        chapter["mtime"] = os.path.getmtime(chapter["path"])
+        chapter_mtimes.append(chapter["mtime"])
+    latest_mtime = max(chapter_mtimes, default=0)
+
+    cover_path = _find_series_cover(series_path)
+    if cover_path:
+        try:
+            cover_mtime = os.path.getmtime(cover_path)
+        except OSError:
+            cover_mtime = 0
+    else:
+        # 별도 표지 파일이 없으면 1화 첫 페이지를 표지로 쓰는데, 그 원본이 바뀌는 시점은
+        # 곧 1화 자체가 바뀌는 시점이므로 1화 파일의 mtime을 그대로 재사용한다. 이렇게
+        # 스캔 시점에 한 번만 계산해서 저장해두면, 표지 요청이 올 때마다(캐시가 이미
+        # 있어도) zip을 다시 열어서 mtime을 확인하는 불필요한 파일 작업을 안 해도 된다.
+        cover_mtime = chapter_mtimes[0] if chapter_mtimes else 0
+
+    series_entry = {
+        "id": series_id,
+        "platform": platform,
+        "title": series_name,
+        "path": series_path,
+        "chapters": chapters,
+        "latest_mtime": latest_mtime,
+        "cover_path": cover_path,
+        "cover_mtime": cover_mtime,
+        "info": _parse_series_info(series_path),
+    }
+    return series_entry, chapters_map
+
+
+def _resolve_safe_series_path(platform: str, series_ref: str) -> str | None:
+    """
+    platform + series_ref를 실제 폴더 경로로 조합하되, 그 결과가 LIBRARY_ROOT/platform
+    바로 아래(그 하위 어디든)에 있는 게 맞는지 검증한다. series_ref는 API를 통해
+    사용자가 직접 보낼 수 있는 값이라("..") "/api/series-folders/include" 같은
+    엔드포인트에 "../../etc" 같은 값을 넣으면 라이브러리 폴더 밖의 임의 경로를
+    시리즈로 등록해버리는 경로 탐색(path traversal) 문제가 있었다 - 실제로 그
+    경로 밖의 파일이 회차 페이지로 그대로 서빙되는 것까지 확인된 취약점이었다.
+    os.path.realpath로 "../" 등을 전부 해소한 뒤, platform 폴더의 진짜 경로 안에
+    있는지 문자열로 확인해서 벗어난 경우 None을 반환해 걸러낸다.
+    """
+    platform_path = os.path.realpath(os.path.join(LIBRARY_ROOT, platform))
+    series_path = os.path.realpath(os.path.join(platform_path, *series_ref.split("/")))
+    if series_path != platform_path and not series_path.startswith(platform_path + os.sep):
+        log.warning(f"경로 탐색 시도 차단: platform={platform!r}, series={series_ref!r} -> {series_path!r}")
+        return None
+    return series_path
+
+
+def scan_single_series(platform: str, series_ref: str) -> tuple[dict, dict] | None:
+    """
+    시리즈 폴더 딱 하나만 스캔한다(제외했다가 다시 포함시킬 때, 플랫폼 전체를 다시
+    스캔할 필요 없이 이 폴더 하나만 반영하기 위함). 반환값은 (series_entry, chapters_map)
+    이거나, 폴더가 없거나 zip이 없으면 None. (재포함 액션 전용이라 제외 목록 확인을
+    일부러 안 한다 - 호출하는 쪽에서 "방금 제외를 풀었다"는 걸 이미 알고 부르는 것이므로.)
+    """
+    series_path = _resolve_safe_series_path(platform, series_ref)
+    if series_path is None or not os.path.isdir(series_path):
+        return None
+    result = _scan_series_at_path(platform, series_ref, series_path)
+    if result:
+        series_entry, chapters_map = result
+        series_entry["excluded"] = False  # 이 함수는 "방금 제외를 풀었을 때"만 쓰이므로
+        return series_entry, chapters_map
+    return None
+
+
+def iter_platform_series_streaming(platform: str):
+    """
+    플랫폼 폴더를 훑으면서, 시리즈 폴더를 "발견하는 즉시"(전체 폴더 구조를 다 훑기를
+    기다리지 않고) 그 자리에서 스캔까지 마쳐서 (series_ref, series_entry, chapters_map)을
+    하나씩 내놓는 제너레이터다. "폴더 목록을 전부 모은 뒤에 하나씩 스캔"이 아니라
+    "발견 하나당 스캔 하나"라서, 네트워크 드라이브에 폴더가 아주 많아도 첫 번째 결과가
+    나오기까지 전체 탐색이 끝나길 기다릴 필요가 없다.
+
+    제외된 (platform, series_ref) 조합도 다른 시리즈와 똑같이 실제 내용까지 전부
+    스캔한다 - "제외"는 관리자 메인 화면 목록에서만 숨기는 것이지, 데이터 자체를
+    없애는 게 아니다(공유 프로필에는 여전히 선택 후보로 줄 수 있어야 하므로). 대신
+    series_entry에 "excluded" 플래그를 남겨서, 그 판단(숨길지 말지)은 이 결과를
+    쓰는 쪽(관리자 메인 목록 API)이 하도록 넘긴다.
+    """
+    platform_path = os.path.join(LIBRARY_ROOT, platform)
+    if not os.path.isdir(platform_path):
+        return
+    for dirpath, dirnames, filenames in os.walk(platform_path):
+        dirnames.sort()
+        has_archive = any(os.path.splitext(f.lower())[1] in ARCHIVE_EXTS for f in filenames)
+        if not has_archive:
+            continue
+        dirnames.clear()  # 시리즈 폴더로 인식된 곳 안쪽은 더 내려가지 않음(중복/오인 방지)
+        series_ref = os.path.relpath(dirpath, platform_path).replace(os.sep, "/")
+        result = _scan_series_at_path(platform, series_ref, dirpath)
+        if result:
+            series_entry, chapters_map = result
+            # 제외 목록은 폴더마다 최신 값을 읽는다. 시작할 때 한 번만 읽으면 네트워크 드라이브처럼
+            # 스캔이 수십 분 걸릴 때, 그 사이 사용자가 바꾼 제외/포함을 스캔이 낡은 값으로 덮어쓴다.
+            series_entry["excluded"] = (platform, series_ref) in db.get_excluded_series()
+            yield series_ref, series_entry, chapters_map
+        else:
+            yield series_ref, None, None
+
+
+# 회차 zip의 이미지 목록 캐시. 네트워크 드라이브(rclone 등)에서는 zip을 여는 것(중앙 디렉터리 읽기)
+# 자체가 원격 읽기라, 페이지를 읽을 때마다 목록을 다시 만들면 유휴 뒤 첫 회차 열기가 매우 느려진다.
+# 키에 크기/수정시각(mtime)을 넣어서 파일이 바뀌면 자동으로 새로 읽는다. 항목은 이름 몇십 개짜리
+# 튜플이라 가볍고, 오래 안 쓴 것부터 밀려난다.
+ZIP_NAMES_CACHE_SIZE = 512
+_zip_names_cache: "OrderedDict[tuple[str, int, int], tuple[str, ...]]" = OrderedDict()
+_zip_names_lock = threading.Lock()
+
+
+def clear_zip_names_cache() -> None:
+    with _zip_names_lock:
+        _zip_names_cache.clear()
+
+
+def _image_names_in(zf: zipfile.ZipFile) -> list[str]:
+    names = [
+        name
+        for name in zf.namelist()
+        if not name.endswith("/") and os.path.splitext(name)[1].lower() in IMAGE_EXTS
+    ]
+    names.sort(key=natural_key)
+    return names
+
+
+def list_zip_image_names(zip_path: str, zf: zipfile.ZipFile | None = None) -> list[str]:
+    """zip 안의 이미지 파일명을 자연 정렬 순서(1,2,3...10)로 반환. 같은 파일이면 캐시에서 준다.
+
+    zf: 호출부가 이미 이 zip을 열어 두었으면 넘긴다(캐시에 없을 때 다시 열지 않고 그 핸들로 읽는다).
+    """
+    stat = os.stat(zip_path)
+    key = (zip_path, stat.st_mtime_ns, stat.st_size)
+    with _zip_names_lock:
+        cached = _zip_names_cache.get(key)
+        if cached is not None:
+            _zip_names_cache.move_to_end(key)
+            return list(cached)
+    if zf is not None:
+        names = _image_names_in(zf)
+    else:
+        with zipfile.ZipFile(zip_path) as opened:
+            names = _image_names_in(opened)
+    with _zip_names_lock:
+        _zip_names_cache[key] = tuple(names)
+        _zip_names_cache.move_to_end(key)
+        while len(_zip_names_cache) > ZIP_NAMES_CACHE_SIZE:
+            _zip_names_cache.popitem(last=False)
+    return names
+
+
+def _find_series_cover(series_path: str) -> str | None:
+    """시리즈 폴더 바로 아래 cover.jpg(류) 파일이 있으면 절대경로를, 없으면 None을 반환."""
+    for name in os.listdir(series_path):
+        if name.lower() in COVER_FILENAMES:
+            return os.path.join(series_path, name)
+    return None
+
+
+def _parse_series_info(series_path: str) -> dict | None:
+    """
+    시리즈 폴더의 info.xml(ComicInfo 표준 포맷)을 읽어 표시에 쓸만한 필드만 뽑아 반환.
+    파일이 없거나 파싱에 실패하면 None (네이버 등 info.xml이 없는 플랫폼에서는 항상 None).
+
+    SeriesStatus(연재/완결)는 실제로 값이 정확하지 않은 경우가 있어 아예 뽑지 않는다.
+    """
+    info_path = os.path.join(series_path, INFO_FILENAME)
+    if not os.path.isfile(info_path):
+        return None
+    try:
+        root = ET.parse(info_path).getroot()
+    except Exception as e:
+        log.warning(f"info.xml 파싱 실패, 무시하고 진행: {info_path} ({e})")
+        return None
+
+    def text(tag: str) -> str:
+        el = root.find(tag)
+        return el.text.strip() if el is not None and el.text else ""
+
+    genre_raw = text("Genre")
+    genres = [g.strip() for g in genre_raw.split(",") if g.strip()]
+
+    info = {
+        "summary": text("Summary"),
+        "writer": text("Writer"),
+        "genre": genre_raw,
+        "genres": genres,
+        "age_rating": text("AgeRating"),
+        "web_url": text("Web"),
+        "publisher": text("Publisher"),
+        "notes": text("Notes"),
+        "cover_artist": text("CoverArtist"),
+    }
+    # 전부 빈 값이면 사실상 쓸모없으니 None 취급
+    return info if any(info[k] for k in info if k != "genres") or genres else None

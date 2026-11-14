@@ -1,0 +1,140 @@
+"""
+"지금 이 요청이 관리자인지 특정 프로필인지"와 "그 경우 진행률을 어디서 읽고 쓸지"를
+한곳에 모은 모듈. series.py/chapters.py 라우트들은 db.xxx()를 직접 부르는 대신 이
+모듈의 함수를 불러서, admin/profile 분기 로직이 라우트 코드 안에 흩어지지 않게 한다.
+
+profile이 None(관리자)일 때는 전부 db.py의 기존 함수를 그대로 호출한다 - 즉 관리자
+경로는 이 모듈을 거치더라도 동작이 한 치도 안 바뀐다(그냥 한 단계 위임만 추가됨).
+profile이 있을 때는 profile_progress.py(완전히 별도 테이블)로 위임한다.
+"""
+
+from fastapi import HTTPException, Request
+
+from . import db, profile_progress, profile_time_restrictions, profiles
+
+
+def get_profile(request: Request) -> dict | None:
+    return getattr(request.state, "profile", None)
+
+
+def get_profile_device_id(request: Request) -> str | None:
+    """미들웨어가 이번 요청에 대해 확인/발급한 기기 쿠키 값. 프로필 요청이 아니면 None."""
+    return getattr(request.state, "profile_device_id", None)
+
+
+def ensure_series_accessible(profile: dict | None, series_id: str) -> None:
+    """profile이 있는데(공유 링크) 그 시리즈가 허용 목록에 없으면 403.
+    profile이 None(관리자)이면 항상 통과 - 기존 동작 그대로.
+
+    회차 목록/페이지/진행률처럼 실제 콘텐츠에 접근하는 라우트에서만 쓴다 - 완전히
+    허용된 시리즈만 통과시키는 엄격한 검사다."""
+    if profile is None:
+        return
+    if series_id not in profiles.get_allowed_series_ids(profile["id"]):
+        raise HTTPException(403, "not allowed for this profile")
+
+
+def ensure_series_previewable(profile: dict | None, series: dict) -> None:
+    """표지/info.xml 미리보기처럼, "완전히 허용되지는 않았지만 미리 볼 수는 있어야
+    하는" 라우트에서 쓰는 완화된 검사. 완전히 허용된 시리즈 OR 그 프로필의 둘러보기
+    연령 필터에 걸리는 시리즈면 통과한다 - 둘러보기 화면에서 아직 요청 전인 시리즈의
+    표지/정보를 보여주려면 이 완화된 검사가 필요하다(엄격한 검사를 쓰면 둘러보기
+    항목 자체가 다 막혀버림)."""
+    if profile is None:
+        return
+    if series["id"] in profiles.get_allowed_series_ids(profile["id"]):
+        return
+    if profiles.series_matches_browse_filters(series, profile["id"]):
+        return
+    raise HTTPException(403, "not allowed for this profile")
+
+
+def ensure_reading_time_allowed(profile: dict | None, series_id: str, chapter_id: str) -> bool:
+    """
+    "리더만" 막는 접속 가능 시간대 검사. 관리자(profile=None)는 항상 통과.
+
+    지금이 허용 시간대여도, 아니어도 아닌지와 무관하게 딱 한 가지 예외가 있다: 그
+    허용 시간 내에 서버가 검증해서 저장한 회차(=지금 읽고 있던 바로 그 회차)는 시간이
+    끝난 뒤에도 계속 볼 수 있다 - 읽다가 갑자기 끊기지 않게. 다만 그 다음 화 등
+    "다른" 회차로 넘어가려는 시도는 시간이 지났으면 막힌다.
+    """
+    if profile is None:
+        return False
+    if profile_time_restrictions.is_within_allowed_time(profile["id"]):
+        return True
+    if db.get_profile_reading_chapter(profile["id"], series_id) == chapter_id:
+        return False
+    # 프론트엔드가 "무슨 요일/시간에 볼 수 있는지"를 직접 안내문에 넣을 수 있도록,
+    # 단순 문자열이 아니라 그 프로필에 설정된 창 목록까지 같이 내려준다.
+    windows = profile_time_restrictions.get_time_windows(profile["id"])
+    raise HTTPException(403, {"reason": "outside_allowed_reading_time", "windows": windows})
+
+
+def progress_actor_key(profile: dict | None) -> str:
+    return f"profile:{profile['id']}" if profile is not None else "admin"
+
+
+def get_progress(profile: dict | None, series_id: str) -> dict | None:
+    if profile is None:
+        return db.get_progress(series_id)
+    return profile_progress.get_progress(profile["id"], series_id)
+
+
+def set_progress(profile: dict | None, series_id: str, chapter_id: str, chapter_index: int, page_index: int, *, page_offset: float = 0.0) -> None:
+    if profile is None:
+        db.set_progress(series_id, chapter_id, chapter_index, page_index, page_offset=page_offset)
+    else:
+        profile_progress.set_progress(profile["id"], series_id, chapter_id, chapter_index, page_index, page_offset=page_offset)
+
+
+def delete_progress(profile: dict | None, series_id: str) -> None:
+    if profile is None:
+        db.delete_progress(series_id)
+    else:
+        profile_progress.delete_progress(profile["id"], series_id)
+
+
+def get_read_chapter_ids(profile: dict | None, series_id: str) -> set[str]:
+    if profile is None:
+        return db.get_read_chapter_ids(series_id)
+    return profile_progress.get_read_chapter_ids(profile["id"], series_id)
+
+
+def mark_chapters_read(profile: dict | None, series_id: str, chapter_ids: list[str]) -> None:
+    if profile is None:
+        db.mark_chapters_read(series_id, chapter_ids)
+    else:
+        profile_progress.mark_chapters_read(profile["id"], series_id, chapter_ids)
+
+
+def mark_chapters_unread(profile: dict | None, series_id: str, chapter_ids: list[str]) -> None:
+    if profile is None:
+        db.mark_chapters_unread(series_id, chapter_ids)
+    else:
+        profile_progress.mark_chapters_unread(profile["id"], series_id, chapter_ids)
+
+
+def clear_all_read_chapters(profile: dict | None, series_id: str) -> None:
+    if profile is None:
+        db.clear_all_read_chapters(series_id)
+    else:
+        profile_progress.clear_all_read_chapters(profile["id"], series_id)
+
+
+def profile_path_prefix(profile: dict | None) -> str:
+    """공개 BASE_PATH에 profile이 있으면 "/p/<토큰>"도 붙인다. <img src> 등 JS fetch를
+    안 거치는 링크(커버 URL 등)를 서버가 만들어줄 때, 그 프로필의 공유 경로 안에서
+    계속 열리도록 이 접두사를 붙여서 내려줘야 한다 - fetch는 프론트엔드에서 자체적으로
+    감싸서 처리하지만, <img src>는 그럴 수 없어 서버가 애초에 맞는 경로로 내려줘야 한다."""
+    from . import base_path
+
+    return base_path.BASE_PATH + (f"/p/{profile['token']}" if profile else "")
+
+
+def require_admin(request: Request) -> None:
+    """재스캔/폴더 관리처럼 관리자 전용인 라우터에 통째로 붙이는 의존성. 공유 프로필
+    경로("/p/<토큰>/...")로 들어온 요청이면 404 - 프로필 화면 자체에 이런 기능이
+    존재한다는 걸 알 수조차 없게 한다(단순히 "권한 없음"이 아니라 "그런 기능이
+    아예 없다"는 응답을 준다는 뜻)."""
+    if get_profile(request) is not None:
+        raise HTTPException(404, "not available for shared profiles")

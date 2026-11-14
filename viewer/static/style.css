@@ -1,0 +1,1655 @@
+:root {
+  --bg: #14161a;
+  --bg-elevated: #1d2026;
+  --text: #f2f3f5;
+  --text-dim: #9aa0a8;
+  --accent: #29d17f;
+  --border: #2a2d34;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html, body {
+  margin: 0;
+  padding: 0;
+  background: var(--bg);
+  color: var(--text);
+  font-family: -apple-system, "Apple SD Gothic Neo", "Malgun Gothic", "Segoe UI", sans-serif;
+  /* iOS 독립 실행(홈 화면 추가) 모드에서는 브라우저 자체의 고무줄 튕김/새로고침
+     제스처가 우리 당겨서 새로고침 JS보다 먼저 이 제스처를 가져가버리는 경우가
+     있다 - 이걸 꺼서 JS가 손가락 움직임을 온전히 넘겨받게 한다. */
+  overscroll-behavior-y: none;
+}
+
+a {
+  color: inherit;
+  text-decoration: none;
+}
+
+/* ---------- 공통 상단바 ---------- */
+
+.topbar {
+  position: sticky;
+  top: 0;
+  z-index: 10;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: calc(14px + env(safe-area-inset-top)) 16px 14px;
+  background: rgba(20, 22, 26, 0.92);
+  backdrop-filter: blur(6px);
+  border-bottom: 1px solid var(--border);
+}
+
+.topbar h1 {
+  font-size: 18px;
+  margin: 0;
+}
+
+/* ---------- 당겨서 새로고침(pull-to-refresh) 인디케이터 ---------- */
+
+.pull-refresh-indicator {
+  height: 0;
+  overflow: hidden;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: height 0.2s ease;
+  /* PWA(홈 화면 추가) 상태에서는 브라우저 기본 pull-to-refresh가 없어서, 이 값들을
+     JS가 실시간으로 손가락 위치에 맞춰 바꿔가며 직접 당겨지는 느낌을 만든다. */
+}
+
+.pull-refresh-indicator.pulling,
+.pull-refresh-indicator.refreshing {
+  overflow: visible;
+}
+
+.pull-refresh-spinner {
+  width: 20px;
+  height: 20px;
+  border: 2px solid var(--border);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  transition: transform 0.1s linear;
+}
+
+.pull-refresh-indicator.refreshing .pull-refresh-spinner {
+  animation: pull-refresh-spin 0.7s linear infinite;
+}
+
+@keyframes pull-refresh-spin {
+  to { transform: rotate(360deg); }
+}
+
+
+.topbar .back {
+  font-size: 20px;
+  padding: 4px 8px;
+  border-radius: 8px;
+  color: var(--text-dim);
+}
+.topbar .back:hover {
+  background: var(--bg-elevated);
+  color: var(--text);
+}
+
+.scan-status-text {
+  margin-left: auto;
+  flex-shrink: 0;
+  font-size: 11px;
+  color: var(--text-dim);
+  white-space: nowrap;
+}
+
+.rescan-btn {
+  flex-shrink: 0;
+  width: 32px;
+  height: 32px;
+  border: none;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.08);
+  color: var(--text);
+  font-size: 17px;
+  line-height: 1;
+  cursor: pointer;
+}
+.rescan-btn:hover {
+  background: rgba(255, 255, 255, 0.16);
+}
+.rescan-btn:disabled {
+  cursor: default;
+  opacity: 0.6;
+}
+.rescan-btn.spinning {
+  animation: rescan-spin 0.8s linear infinite;
+}
+@keyframes rescan-spin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+
+/* ---------- 검색/정렬 툴바 (index.html) ---------- */
+
+.toolbar {
+  position: sticky;
+  top: var(--toolbar-sticky-top, 61px); /* JS가 topbar 실측 높이로 채움 - PWA 등 환경별 안전영역 차이 대응 */
+  z-index: 9;
+  display: flex;
+  gap: 8px;
+  padding: 12px 16px;
+  max-width: 1100px;
+  margin: 0 auto;
+  background: rgba(20, 22, 26, 0.92);
+  backdrop-filter: blur(6px);
+  border-bottom: 1px solid var(--border);
+}
+
+/* ---------- 프로필 화면: 내 웹툰/둘러보기 탭 (index.html) ---------- */
+
+#profileViewTabs {
+  position: sticky;
+  top: var(--profile-tabs-sticky-top, 116px); /* JS가 topbar+toolbar 실측 높이로 채움 */
+  z-index: 8;
+}
+
+.search-input,
+.sort-select {
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  color: var(--text);
+  border-radius: 8px;
+  padding: 8px 12px;
+  font-size: 14px;
+}
+
+.search-input:focus,
+.sort-select:focus {
+  /* 기본 outline은 박스 바깥으로 그려져서, 바로 아래 딱 붙어있는 필터 탭 바에
+     가려 아랫부분이 안 보이는 문제가 있었다. box-shadow를 inset으로 주면 항상
+     박스 안쪽에만 그려져서 무엇이 바로 밑에 붙어있든 절대 가려지지 않는다. */
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px var(--accent) inset;
+}
+
+.search-field {
+  position: relative;
+  flex: 1;
+  min-width: 0;
+}
+
+.search-input {
+  width: 100%;
+  padding-right: 34px; /* ✕ 버튼이 입력한 글자를 가리지 않게 */
+}
+
+.search-clear {
+  position: absolute;
+  right: 6px;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 24px;
+  height: 24px;
+  border: none;
+  border-radius: 50%;
+  background: none;
+  color: var(--text-dim);
+  font-size: 18px;
+  line-height: 1;
+  cursor: pointer;
+}
+.search-clear:hover {
+  color: var(--text);
+}
+
+.search-input::placeholder {
+  color: var(--text-dim);
+}
+
+.sort-select {
+  flex-shrink: 0;
+}
+
+/* ---------- 상태 필터 탭 (index.html) ---------- */
+
+.filter-tabs {
+  position: sticky;
+  top: var(--filter-tabs-sticky-top, 122px); /* JS가 topbar+toolbar+프로필탭 실측 높이로 채움 */
+  z-index: 7;
+  display: flex;
+  gap: 6px;
+  padding: 10px 16px;
+  max-width: 1100px;
+  margin: 0 auto;
+  overflow-x: auto;
+  background: rgba(20, 22, 26, 0.92);
+  backdrop-filter: blur(6px);
+  border-bottom: 1px solid var(--border);
+}
+
+.filter-tab {
+  flex-shrink: 0;
+  padding: 7px 14px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: var(--bg-elevated);
+  color: var(--text-dim);
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.filter-tab:hover {
+  border-color: var(--accent);
+}
+
+.filter-tab.active {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #0a1a12;
+  font-weight: 600;
+}
+
+.filter-tab-divider {
+  flex-shrink: 0;
+  width: 1px;
+  margin: 4px 4px;
+  background: var(--border);
+}
+
+.platform-filter-tab {
+  font-size: 12px;
+  padding: 6px 12px;
+  color: var(--text-dim);
+  background: transparent;
+}
+.platform-filter-tab.active {
+  background: rgba(41, 209, 127, 0.15);
+  border-color: var(--accent);
+  color: var(--accent);
+  font-weight: 600;
+}
+
+/* ---------- 읽음/안읽음 처리 패널 (index.html) ---------- */
+
+.read-action-panel {
+  position: sticky;
+  top: var(--read-action-sticky-top, 177px); /* JS가 topbar+toolbar+프로필탭+filter-tabs 실측 높이로 채움 */
+  z-index: 6;
+  max-width: 1100px;
+  margin: 0 auto;
+  padding: 10px 16px 0;
+  background: var(--bg);
+}
+
+.read-action-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  border-bottom: none;
+  border-radius: 10px 10px 0 0;
+  padding: 10px 14px;
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.read-action-close {
+  border: none;
+  background: none;
+  color: var(--text-dim);
+  font-size: 18px;
+  cursor: pointer;
+  line-height: 1;
+}
+.read-action-close:hover {
+  color: var(--text);
+}
+
+#readActionBody {
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  border-radius: 0 0 10px 10px;
+  padding: 12px 14px;
+}
+
+.read-action-grid {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 8px;
+}
+
+.read-action-grid button,
+.read-action-picker-buttons button {
+  padding: 10px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--bg);
+  color: var(--text);
+  font-size: 13px;
+  cursor: pointer;
+}
+.read-action-grid button:hover,
+.read-action-picker-buttons button:hover {
+  border-color: var(--accent);
+}
+
+.read-action-picker {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.read-action-picker-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  max-height: 50vh;
+  overflow-y: auto;
+}
+
+.read-action-picker-row {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.picker-series-title {
+  font-size: 12px;
+  color: var(--text-dim);
+}
+
+.picker-loading {
+  color: var(--text-dim);
+  font-size: 13px;
+  padding: 8px 0;
+}
+
+.read-action-picker select {
+  width: 100%;
+  padding: 10px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--bg);
+  color: var(--text);
+  font-size: 14px;
+}
+
+.read-action-picker-buttons {
+  display: flex;
+  gap: 8px;
+}
+.read-action-picker-buttons button {
+  flex: 1;
+}
+.read-action-picker-buttons button.ghost {
+  background: transparent;
+  color: var(--text-dim);
+}
+
+/* ---------- 설정 패널: 라이브러리 관리 / 백업 (index.html, 사이드바 형태) ---------- */
+
+.settings-panel-body {
+  flex: 1;
+  overflow-y: auto;
+  padding: 16px;
+}
+
+.settings-section {
+  padding: 4px 0 14px;
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 14px;
+}
+.settings-section:last-child {
+  border-bottom: none;
+  margin-bottom: 0;
+  padding-bottom: 0;
+}
+
+.settings-section-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-dim);
+  margin-bottom: 8px;
+}
+
+.settings-hint {
+  font-size: 12px;
+  color: var(--text-dim);
+  margin: 6px 0;
+}
+
+.scope-toggle-buttons {
+  display: flex;
+  gap: 8px;
+  margin-top: 8px;
+}
+.scope-btn, .overlap-toggle-btn {
+  flex: 1;
+  padding: 8px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--bg);
+  color: var(--text-dim);
+  font-size: 13px;
+  cursor: pointer;
+}
+.scope-btn:hover, .overlap-toggle-btn:hover {
+  border-color: var(--accent);
+}
+.scope-btn.active, .overlap-toggle-btn.active {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #0a1a12;
+  font-weight: 600;
+}
+
+.lib-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-height: 30vh;
+  overflow-y: auto;
+}
+
+.lib-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px; /* 제목(또는 제목 + 버튼 여러 개)이 버튼에 붙어 보이지 않게 */
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+}
+
+.lib-name {
+  flex: 1; /* 남는 폭을 제목이 쓰고, 버튼은 오른쪽 끝에 모인다 */
+  min-width: 0;
+  font-size: 13px;
+  word-break: break-all;
+}
+
+.lib-action-btn {
+  flex-shrink: 0;
+  padding: 5px 10px;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--text-dim);
+  font-size: 12px;
+  cursor: pointer;
+}
+.lib-action-btn:hover {
+  border-color: var(--accent);
+  color: var(--text);
+}
+.lib-action-btn.add {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.mark-all-btn {
+  flex: 1;
+  padding: 10px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--bg);
+  color: var(--text);
+  font-size: 13px;
+  cursor: pointer;
+  text-align: center;
+  text-decoration: none;
+  display: inline-block;
+}
+.mark-all-btn:hover {
+  border-color: var(--accent);
+}
+.mark-all-btn.ghost {
+  background: transparent;
+  color: var(--text-dim);
+}
+/* 목록 바로 아래에 놓인 버튼(예: + 프로필 추가)이 마지막 행에 붙지 않게 */
+.lib-list + .mark-all-btn {
+  margin-top: 8px;
+}
+
+/* ---------- 시리즈 그리드 (index.html) ---------- */
+
+.grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+  gap: 18px 14px;
+  padding: 18px;
+  max-width: 1100px;
+  margin: 0 auto;
+}
+
+.card {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  cursor: pointer;
+  -webkit-touch-callout: none; /* 길게 눌러 이동 메뉴를 열 때 iOS의 이미지 저장 메뉴가 뜨지 않게 */
+  -webkit-user-select: none;
+  user-select: none;
+  min-width: 0; /* 그리드 아이템이 내부 이미지의 원본 크기에 맞춰 늘어나는 것 방지 */
+}
+
+.card .cover-wrap {
+  position: relative;
+  width: 100%;
+  aspect-ratio: 3 / 4;
+  border-radius: 10px;
+  overflow: hidden;
+  background: var(--bg-elevated);
+  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.4);
+  transition: transform 0.15s ease;
+}
+
+.card:hover .cover-wrap {
+  transform: translateY(-3px);
+}
+
+.card .cover-wrap img {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+  z-index: 0;
+}
+
+.card .platform-tag {
+  position: absolute;
+  top: 6px;
+  left: 6px;
+  z-index: 1;
+  font-size: 10px;
+  padding: 2px 6px;
+  border-radius: 999px;
+  background: rgba(0, 0, 0, 0.6);
+  color: var(--text);
+  letter-spacing: 0.02em;
+}
+
+.card .unread-badge {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  z-index: 1;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 5px;
+  border-radius: 999px;
+  background: var(--accent);
+  color: #0a1a12;
+  font-size: 11px;
+  font-weight: 700;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.card.selected .cover-wrap {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+/* 나중에 읽기: 안 읽은 회차 수가 초록색으로 쌓이면 "빨리 읽어야 한다"는 압박이 되니 회색으로 */
+.card.later .unread-badge {
+  background: #3a3e46;
+  color: #cfd3d9;
+}
+
+.card .select-toggle {
+  position: absolute;
+  bottom: 6px;
+  right: 6px;
+  z-index: 1;
+  width: 24px;
+  height: 24px;
+  border-radius: 999px;
+  border: none;
+  background: rgba(0, 0, 0, 0.55);
+  color: var(--text);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 12px;
+  cursor: pointer;
+}
+.card .select-toggle:hover {
+  background: rgba(0, 0, 0, 0.8);
+}
+.card.selected .select-toggle {
+  background: var(--accent);
+  color: #0a1a12;
+}
+
+.card .chapter-list-toggle {
+  position: absolute;
+  bottom: 6px;
+  left: 6px;
+  z-index: 1;
+  width: 24px;
+  height: 24px;
+  border-radius: 6px;
+  border: none;
+  background: rgba(0, 0, 0, 0.55);
+  color: var(--text);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 14px;
+  cursor: pointer;
+}
+.card .chapter-list-toggle:hover {
+  background: rgba(0, 0, 0, 0.8);
+}
+
+.card .title {
+  font-size: 13px;
+  line-height: 1.3;
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  height: 34px; /* 1줄/2줄 제목이 섞여도 항상 2줄 높이를 차지해서, 그 아래(버튼 등)의
+  위치가 카드마다 들쭉날쭉해지지 않게 고정한다. */
+}
+
+.card .chapter-count {
+  font-size: 12px;
+  color: var(--text-dim);
+}
+
+.empty-state {
+  grid-column: 1 / -1; /* 카드 격자 안에서도 한 칸에 갇히지 않고 전체 폭에 한 줄로 */
+  padding: 60px 20px;
+  text-align: center;
+  color: var(--text-dim);
+}
+
+/* ---------- 리더 (reader.html) ---------- */
+
+.reader-body {
+  background: #000;
+}
+
+.reader-topbar {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  z-index: 20;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: calc(12px + env(safe-area-inset-top)) 16px 12px;
+  background: linear-gradient(rgba(0,0,0,0.85), rgba(0,0,0,0.55) 70%, rgba(0,0,0,0));
+  transition: opacity 0.2s ease;
+}
+
+.reader-save-error {
+  position: fixed;
+  left: 12px;
+  right: 12px;
+  bottom: max(12px, env(safe-area-inset-bottom));
+  z-index: 120;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 10px;
+  padding: 14px;
+  border: 1px solid #d39b43;
+  border-radius: 8px;
+  background: #322719;
+  color: #fff2d8;
+}
+
+.reader-save-error[hidden] {
+  display: none;
+}
+
+.reader-save-error button {
+  color: #fff2d8;
+  border-color: #d39b43;
+}
+
+.reader-topbar-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.reader-topbar #chapterTitle {
+  flex: 1;
+  font-size: 14px;
+  color: var(--text-dim);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.reader-topbar.hidden {
+  opacity: 0;
+  pointer-events: none;
+}
+
+.reader-zoom-bar {
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 20;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  max-width: 480px;
+  margin: 0 auto;
+  padding: 12px 16px calc(12px + env(safe-area-inset-bottom));
+  background: linear-gradient(rgba(0,0,0,0), rgba(0,0,0,0.55) 30%, rgba(0,0,0,0.85));
+  transition: opacity 0.2s ease;
+}
+
+.reader-zoom-bar.hidden {
+  opacity: 0;
+  pointer-events: none;
+}
+
+.reader-zoom-icon {
+  flex-shrink: 0;
+  color: var(--text-dim);
+  font-size: 14px;
+  width: 16px;
+  text-align: center;
+  user-select: none;
+}
+
+.reader-zoom-slider {
+  flex: 1;
+  -webkit-appearance: none;
+  appearance: none;
+  height: 4px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.2);
+  outline: none;
+  touch-action: pan-x; /* 모바일에서 이 슬라이더를 끌 때 세로 스크롤 제스처로 오인되지 않게 */
+}
+.reader-zoom-slider::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: var(--accent);
+  cursor: pointer;
+}
+.reader-zoom-slider::-moz-range-thumb {
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  border: none;
+  background: var(--accent);
+  cursor: pointer;
+}
+
+.reader-zoom-value {
+  flex-shrink: 0;
+  width: 38px;
+  text-align: right;
+  font-size: 12px;
+  color: var(--text-dim);
+}
+
+.sidebar-toggle {
+  flex-shrink: 0;
+  width: 32px;
+  height: 32px;
+  border: none;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.08);
+  color: var(--text);
+  font-size: 16px;
+  cursor: pointer;
+}
+.sidebar-toggle:hover {
+  background: rgba(255, 255, 255, 0.16);
+}
+
+.reader-control {
+  flex-shrink: 0;
+  width: 32px;
+  height: 32px;
+  border: none;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.08);
+  color: var(--text);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1;
+  cursor: pointer;
+}
+.reader-control:hover {
+  background: rgba(255, 255, 255, 0.16);
+}
+
+.auto-scroll-control {
+  min-width: 64px;
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.auto-scroll-control[aria-pressed="true"] {
+  color: var(--accent);
+  box-shadow: inset 0 0 0 1px var(--accent);
+}
+
+.reader-control:focus-visible,
+.sidebar-toggle:focus-visible,
+.sidebar-row:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.reader-fullscreen .reader-topbar {
+  /* 브라우저 전체 화면이 지원되지 않는 환경에서도 리더 자체가
+     화면 전체를 사용하는 상태로 자동 복원되도록 함 */
+  position: fixed;
+}
+
+/* 전체 화면: 기본은 원본 확대 없이 화면보다 큰 이미지만 화면 폭에 맞춰 줄이는 것.
+   실제 폭 계산(원본 크기 × 확대/축소 배율)은 JS(sizeImageForFullscreen)가 이미지마다
+   인라인 width로 넣어준다 - 원본 크기가 이미지마다 달라서 CSS 변수 하나로는 표현할 수
+   없기 때문. max-width는 반드시 none으로 풀어줘야 한다 - 안 그러면 일반 모드에서 쓰던
+   --reader-image-width 기반 max-width가 그대로 남아있어서 JS가 넣은 인라인 width를
+   도로 눌러버린다. */
+.reader-fullscreen .pages img {
+  max-width: none;
+  height: auto;
+}
+
+.reader-fullscreen .pages .page-placeholder {
+  max-width: 100vw;
+}
+
+.pages {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  width: 100%;
+}
+
+.pages.positioning {
+  visibility: hidden;
+}
+
+.positioning-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 15;
+  background: #000;
+  color: var(--text-dim);
+  font-size: 14px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.pages img {
+  width: var(--reader-image-width, 100%);
+  max-width: var(--reader-image-width, 720px);
+  display: block;
+  background: #111;
+}
+
+.pages .page-placeholder {
+  width: var(--reader-image-width, 100%);
+  max-width: var(--reader-image-width, 720px);
+  aspect-ratio: 3 / 4;
+  background: #111;
+}
+
+.next-chapter {
+  max-width: 720px;
+  margin: 0 auto;
+  padding: 40px 20px 80px;
+  text-align: center;
+}
+
+.next-chapter .next-card {
+  display: inline-block;
+  padding: 16px 28px;
+  border-radius: 12px;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  cursor: pointer;
+}
+
+.next-chapter .next-card:hover {
+  border-color: var(--accent);
+}
+
+.next-chapter .eyebrow {
+  display: block;
+  font-size: 12px;
+  color: var(--text-dim);
+  margin-bottom: 4px;
+}
+
+.next-chapter .next-title {
+  font-size: 16px;
+  color: var(--accent);
+}
+
+.overlap-reveal-wrap {
+  /* 레이아웃 흐름에서 공간을 차지하지 않게(높이 0) 해서 이미지 사이에 틈이 안 생기게 함.
+     버튼은 이 지점 위에 절대위치로 살짝 겹쳐서 떠 있음 */
+  position: relative;
+  height: 0;
+  width: 100%;
+  max-width: 720px;
+}
+
+.overlap-reveal-btn {
+  position: absolute;
+  right: 10px;
+  bottom: 0;
+  transform: translateY(-50%);
+  width: 26px;
+  height: 26px;
+  border-radius: 999px;
+  border: 1.5px solid #ffb35c;
+  background: rgba(10, 11, 13, 0.75); /* 웹툰 배경이 흰색이든 검은색이든 항상 대비되도록 자체 배경 */
+  color: #ffb35c;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  opacity: 0.75;
+  z-index: 5;
+  transition: opacity 0.15s ease, transform 0.15s ease;
+}
+.overlap-reveal-btn:hover {
+  opacity: 1;
+  transform: translateY(-50%) scale(1.1);
+}
+.overlap-reveal-btn:disabled {
+  display: none;
+}
+
+/* ---------- 사이드 회차 패널 (reader.html) ---------- */
+
+.sidebar {
+  position: fixed;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  width: min(300px, 82vw);
+  background: var(--bg-elevated);
+  border-left: 1px solid var(--border);
+  z-index: 40;
+  display: flex;
+  flex-direction: column;
+  transform: translateX(100%);
+  transition: transform 0.22s ease;
+}
+
+.sidebar.open {
+  transform: translateX(0);
+}
+
+.sidebar-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px; /* 제목과 닫기 버튼 사이 */
+  padding: calc(16px + env(safe-area-inset-top)) 16px 16px;
+  border-bottom: 1px solid var(--border);
+  font-size: 15px;
+}
+
+.sidebar-header > span {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.sidebar-title {
+  flex: 1;
+  min-width: 0;
+  line-height: 1.4;
+  overflow: hidden;
+  overflow-wrap: anywhere;
+  /* 제목이 길어도 2줄까지만 - 이동 링크 등 다른 요소와 높이/정렬이 흔들리지 않게 한다 */
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+}
+
+.sidebar-close {
+  border: none;
+  background: none;
+  color: var(--text-dim);
+  font-size: 20px;
+  cursor: pointer;
+  line-height: 1;
+}
+.sidebar-close:hover {
+  color: var(--text);
+}
+
+.series-info-panel {
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--border);
+  font-size: 12px;
+  color: var(--text-dim);
+  max-height: 40vh;
+  overflow-y: auto;
+  overflow-x: hidden; /* overflow-y만 주면 가로도 auto가 돼서, 긴 URL 등이 있으면 좌우 스크롤이 생긴다 */
+  overflow-wrap: anywhere; /* 공백 없는 긴 문자열도 줄바꿈해서 가로로 넘치지 않게 한다 */
+}
+.series-info-row {
+  margin-bottom: 4px;
+}
+.series-info-row b {
+  color: var(--text);
+  font-weight: 600;
+  margin-right: 6px;
+}
+.series-info-summary {
+  margin-top: 8px;
+  line-height: 1.5;
+  color: var(--text-dim);
+}
+.series-info-link {
+  color: var(--accent);
+  font-size: 12px;
+}
+
+/* 원작 페이지 열기 / 목록 이동 링크 - 줄거리가 길어 메타 영역이 스크롤돼도 항상 보이는 고정 행 */
+.series-info-links {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  gap: 4px 12px;
+  padding: 10px 16px;
+  border-bottom: 1px solid var(--border);
+}
+.series-info-links:not(:has(> :not([hidden]))) {
+  display: none; /* 보여줄 링크가 하나도 없으면 빈 행(여백/테두리)도 없앤다 */
+}
+
+/* 동작은 버튼이지만 모양은 원작 링크와 똑같이 보이게 한다 */
+.link-button {
+  padding: 0;
+  border: none;
+  background: none;
+  font-family: inherit;
+  margin-left: auto; /* 원작 링크가 없어 혼자여도 항상 오른쪽 */
+  cursor: pointer;
+}
+
+.sidebar-list {
+  flex: 1;
+  overflow-y: auto;
+  padding: 6px 0;
+}
+
+.sidebar-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 12px 16px;
+  font-size: 14px;
+  color: var(--text-dim);
+  cursor: pointer;
+  border-left: 3px solid transparent;
+}
+
+.reader-body .sidebar-row {
+  width: 100%;
+  border-top: 0;
+  border-right: 0;
+  border-bottom: 0;
+  border-radius: 0;
+  background: transparent;
+  font-family: inherit;
+  text-align: left;
+}
+
+.sidebar-row:hover,
+.reader-body .sidebar-row:hover {
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.sidebar-row.active,
+.reader-body .sidebar-row.active {
+  color: var(--accent);
+  border-left-color: var(--accent);
+  background: rgba(41, 209, 127, 0.08);
+  font-weight: 600;
+}
+
+.sidebar-row-label {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sidebar-row-status {
+  flex-shrink: 0;
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.sidebar-row-status.read {
+  color: var(--text-dim);
+}
+
+.sidebar-row-status.reading {
+  color: var(--accent);
+}
+
+.sidebar-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.5);
+  z-index: 30;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.2s ease;
+}
+
+.sidebar-overlay.open {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+/* ---------- 웹툰 클릭 -> 리더 진입 로딩 표시 (index.html) ---------- */
+
+.open-loading-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 100; /* 다른 오버레이보다 위에서 항상 보여야 함 */
+  background: rgba(20, 22, 26, 0.55);
+  backdrop-filter: blur(2px);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 14px;
+}
+
+.open-loading-spinner {
+  width: 40px;
+  height: 40px;
+  border-radius: 50%;
+  border: 3px solid rgba(255, 255, 255, 0.25);
+  border-top-color: var(--accent);
+  animation: open-loading-spin 0.7s linear infinite;
+}
+
+@keyframes open-loading-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.open-loading-hint {
+  color: var(--text-dim);
+  font-size: 13px;
+}
+
+/* ---------- 공유 프로필: 둘러보기 요청 버튼 (index.html) ---------- */
+
+.browse-request-btn {
+  width: 100%;
+  margin-top: 6px;
+  background: none;
+  border: 1px solid var(--accent);
+  color: var(--accent);
+  font-size: 11px;
+  padding: 5px;
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.browse-request-btn:disabled {
+  border-color: var(--border);
+  color: var(--text-dim);
+  cursor: default;
+}
+
+.browse-card-actions {
+  display: flex;
+  gap: 6px;
+  margin-top: 6px;
+}
+
+.browse-info-btn {
+  flex-shrink: 0;
+  width: 28px;
+  background: none;
+  border: 1px solid var(--border);
+  color: var(--text-dim);
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 12px;
+}
+
+.browse-card-actions .browse-request-btn {
+  margin-top: 0;
+  flex: 1;
+}
+
+/* ---------- 공유 프로필 관리 화면 (관리자 전용, index.html) ---------- */
+
+.profile-pending-badge {
+  background: #412402;
+  color: #f0a030;
+  font-size: 10px;
+  padding: 1px 7px;
+  border-radius: 9px;
+  margin-left: 6px;
+}
+
+.profile-pending-badge.device {
+  background: #1a2a41;
+  color: #6ab0f0;
+}
+
+.profile-allowed-count {
+  color: var(--text-dim);
+  font-size: 12px;
+  margin-left: 6px;
+}
+
+.mark-all-btn.danger {
+  border-color: #a32d2d;
+  color: #e0a0a0;
+  background: transparent;
+}
+
+.profile-text-input {
+  width: 100%;
+  box-sizing: border-box;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  color: var(--text);
+  border-radius: 8px;
+  padding: 8px 10px;
+  font-size: 13px;
+}
+
+.profile-url-row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  margin-bottom: 8px;
+}
+
+.profile-url-display {
+  flex: 1;
+  font-size: 12px;
+  color: var(--accent);
+  word-break: break-all;
+  font-family: monospace;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 8px 10px;
+}
+
+.profile-filter-matrix {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.profile-filter-group {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 12px;
+  align-items: center;
+  font-size: 12px;
+}
+
+.profile-filter-group label {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--text-dim);
+}
+
+.profile-filter-platform {
+  font-weight: bold;
+  color: var(--text);
+  width: 100%;
+}
+
+.profile-series-filter-row {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.profile-series-filter-row select {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  color: var(--text);
+  border-radius: 6px;
+  padding: 5px 8px;
+  font-size: 12px;
+}
+
+.profile-series-checklist {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-height: 30vh;
+  overflow-y: auto;
+}
+
+.profile-series-checkbox-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--text);
+}
+
+.profile-series-sub {
+  color: var(--text-dim);
+  font-size: 11px;
+}
+
+.profile-edit-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.profile-time-windows {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.profile-time-window-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--text-dim);
+}
+
+.profile-time-window-row label {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  width: 40px;
+  flex-shrink: 0;
+}
+
+.profile-time-window-row input[type="time"] {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  color: var(--text);
+  border-radius: 6px;
+  padding: 3px 6px;
+  font-size: 12px;
+}
+
+
+/* ---------- 정주행 중 / 나중에 읽기 탭 (관리자 화면, index.html) ---------- */
+
+.list-tabs {
+  position: sticky;
+  top: var(--profile-tabs-sticky-top, 116px); /* 프로필 탭과 같은 자리(둘은 동시에 보이지 않음) */
+  z-index: 8;
+  display: flex;
+  max-width: 1100px;
+  margin: 0 auto;
+  padding: 0 16px;
+  background: rgba(20, 22, 26, 0.92);
+  backdrop-filter: blur(6px);
+  border-bottom: 1px solid var(--border);
+}
+
+.list-tab {
+  flex: 1 1 0;
+  max-width: 210px; /* PC에서 탭이 화면 전체 폭으로 늘어나지 않게(모바일에선 반반으로 꽉 참) */
+  height: 48px;
+  padding: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  background: none;
+  border: none;
+  border-bottom: 2px solid transparent;
+  color: var(--text-dim);
+  font-size: 15px;
+  font-weight: 500;
+  cursor: pointer;
+}
+.list-tab.active {
+  border-bottom-color: var(--accent);
+  color: var(--text);
+  font-weight: 700;
+}
+
+.list-tab-count {
+  min-width: 22px;
+  height: 20px;
+  box-sizing: border-box;
+  padding: 0 7px;
+  border-radius: 10px;
+  background: var(--bg-elevated);
+  color: var(--text-dim);
+  font-size: 12px;
+  font-weight: 600;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.list-tab.active .list-tab-count {
+  background: rgba(41, 209, 127, 0.16);
+  color: var(--accent);
+}
+/* 아직 숫자를 모르는 동안(첫 로딩)엔 "0"이 아니라 아무것도 보이지 않게 */
+.list-tab-count:empty {
+  visibility: hidden;
+}
+/* 검색했는데 지금 탭엔 없고 다른 탭에만 결과가 있을 때, 그쪽 탭 숫자를 눈에 띄게 */
+.list-tab-count.hit {
+  background: var(--accent);
+  color: #0a1a12;
+}
+
+/* ---------- 카드 길게 누르기(모바일) / 우클릭(PC) 이동 메뉴 ---------- */
+
+.card-menu {
+  position: fixed;
+  z-index: 45; /* .sidebar-overlay(30) 위, 다른 오버레이(100) 아래 */
+  box-sizing: border-box;
+  padding: 6px;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.5);
+  min-width: 220px;
+}
+.card-menu[hidden] {
+  display: none;
+}
+/* 좁은 화면에선 아래에서 올라오는 시트로 */
+.card-menu.sheet {
+  left: 0 !important;
+  right: 0;
+  bottom: 0;
+  top: auto !important;
+  border-radius: 18px 18px 0 0;
+  padding: 10px 16px calc(20px + env(safe-area-inset-bottom));
+}
+.card-menu-title {
+  padding: 8px 10px 6px;
+  font-size: 12px;
+  color: var(--text-dim);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.card-menu-item {
+  display: block;
+  width: 100%;
+  min-height: 44px;
+  padding: 0 10px;
+  border: none;
+  border-radius: 8px;
+  background: none;
+  color: var(--text);
+  font-size: 14px;
+  text-align: left;
+  cursor: pointer;
+}
+.card-menu-item:hover {
+  background: #262a31;
+}
+.card-menu.sheet .card-menu-item {
+  min-height: 52px;
+  font-size: 16px;
+  border-top: 1px solid var(--border);
+  border-radius: 0;
+}
+.card-menu-item.cancel {
+  display: none; /* PC에선 바깥을 누르거나 Esc로 닫으니 취소 버튼이 필요 없다 */
+}
+.card-menu.sheet .card-menu-item.cancel {
+  display: block;
+  margin-top: 8px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--bg);
+  color: var(--text-dim);
+  text-align: center;
+}
+
+/* ---------- 안내 토스트 ---------- */
+
+.toast {
+  position: fixed;
+  left: 50%;
+  bottom: calc(24px + env(safe-area-inset-bottom));
+  transform: translate(-50%, 12px);
+  z-index: 90;
+  max-width: 86vw;
+  padding: 12px 18px;
+  border-radius: 24px;
+  background: #262a31;
+  border: 1px solid var(--border);
+  color: var(--text);
+  font-size: 14px;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.2s ease, transform 0.2s ease;
+}
+.toast.show {
+  opacity: 1;
+  transform: translate(-50%, 0);
+}
+
+/* ---------- 선택 패널의 이동 버튼 ---------- */
+
+.read-action-grid button.move-act {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+/* 첫 로딩 중(서버에서 저장된 필터/정렬을 받기 전)엔 기본값이 잠깐 보이지 않게 가려둔다 */
+.state-pending #filterTabs,
+.state-pending #sortSelect {
+  visibility: hidden;
+}
+
+.reader-position-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--text-dim);
+}
+.reader-position-row #readerPosition { flex: 1; min-width: 0; }
+.reader-position-row button {
+  flex-shrink: 0;
+  padding: 6px 9px;
+  color: var(--text-dim);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: rgba(20, 22, 26, 0.85);
+  cursor: pointer;
+}
+.pages .reader-page { position: relative; display: flex; justify-content: center; width: 100%; }
+.pages img { height: auto; }
+.pages img[data-image-state="failed"] { opacity: 0; }
+.reader-image-error {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  color: #fff2d8;
+  background: #211d17;
+  font-size: 14px;
+  text-align: center;
+}
+.reader-image-error button {
+  padding: 10px 14px;
+  border: 1px solid #d39b43;
+  border-radius: 6px;
+  color: #fff2d8;
+  background: #322719;
+  cursor: pointer;
+}
+.reader-image-error button:disabled { opacity: 0.6; }
+
+.reader-chapter-error {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 14px;
+  padding: 32px 16px;
+  color: #fff2d8;
+  background: #211d17;
+  text-align: center;
+}
+.reader-chapter-error button {
+  padding: 10px 14px;
+  border: 1px solid #d39b43;
+  border-radius: 6px;
+  color: #fff2d8;
+  background: #322719;
+  cursor: pointer;
+}
+.reader-chapter-error button:disabled { opacity: 0.6; }
+
+@media (max-width: 480px) {
+  .reader-topbar-row { gap: 8px; }
+  .reader-topbar { padding-left: 12px; padding-right: 12px; }
+  .reader-topbar #chapterTitle { min-width: 0; }
+}

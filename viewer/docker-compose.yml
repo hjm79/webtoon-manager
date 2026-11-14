@@ -1,0 +1,53 @@
+# 이 파일을 그대로 복사해서 Portainer의 "Web editor"에 붙여넣거나, 같은 내용을
+# docker-compose.yml로 저장해서 CLI에서 `docker compose up -d`로 실행하세요.
+#
+# 아래에서 "# <-- 여기 수정" 표시가 붙은 줄만 실제 값으로 고치면 바로 씁니다.
+# 별도로 .env 파일이나 Portainer의 Environment variables를 채울 필요가 없습니다.
+#
+# 태그(화면에 표시되는 웹툰 사이트 이름) 규칙: volumes 한 줄이 폴더 하나이고, 콜론(:)
+# 오른쪽의 /library/<이름>이 그대로 화면에 표시되는 태그입니다. 원하는 이름으로
+# 자유롭게 지으면 됩니다. 필요한 만큼 줄을 추가/삭제하세요.
+#
+# 구글드라이브/원드라이브 등 클라우드 드라이브도 rclone의 Docker 볼륨 플러그인을 쓰면
+# 똑같이 volumes 한 줄로 추가할 수 있습니다 (아래 "클라우드 드라이브 예시" 참고, 자세한
+# 설정 방법은 README의 "구글드라이브 / 원드라이브 등 클라우드 드라이브 연결하기" 참고).
+#
+# 자동 업데이트: webtoon-server의 labels에 있는
+# com.centurylinklabs.watchtower.enable=true 는 Watchtower용 표시입니다. 이미
+# Watchtower를 쓰고 계시면 --label-enable 옵션이 켜져 있는 한 자동으로 인식되어 새
+# 이미지가 올라올 때마다 갱신됩니다. Watchtower가 없다면 이 라벨은 그냥 무시되니
+# 지우지 않아도 되고, 필요할 때 Watchtower(https://containrrr.dev/watchtower/)를
+# 따로 띄우기만 하면 됩니다.
+
+services:
+  webtoon-server:
+    image: ghcr.io/murianwind/webtoon-server:latest
+    container_name: webtoon-server
+    labels:
+      - "com.centurylinklabs.watchtower.enable=true"
+    ports:
+      - "8000:8000"                                     # <-- 여기 수정: 왼쪽 숫자만 원하는 포트로
+    environment:
+      - "TZ=Asia/Seoul"                                  # 로그/재스캔 시각을 한국 시간 기준으로
+      - "PUBLIC_BASE_URL="                               # <-- 여기 수정(선택): 외부 알림 링크가 필요할 때만 도메인 입력
+      - "RESCAN_INTERVAL_SECONDS=7200"                   # <-- 여기 수정(선택): 자동 재스캔 주기(초)
+      # - "RESCAN_SCHEDULE=0 3 * * *"                      # <-- 특정 시각에 재스캔하고 싶으면(선택): 크론 표현식 또는 숫자(초). 시각마다 분이 다르면 ;로 여러 개 이어 쓰기: "40 0,10,17 * * *;47 3,13,20 * * *"
+      # - "SLOW_PLATFORMS=gdrive"                        # <-- 클라우드 드라이브 예시(선택): 콤마로 구분한 플랫폼
+      #                                                   #     태그명(예: gdrive,onedrive). 이 목록에 있는 플랫폼은
+      #                                                   #     항상 로컬보다 나중에 스캔됩니다.
+      # - "PROFILES_ENABLED=true"                        # <-- 공유 프로필 기능(선택): 관리자 비밀번호 + 개인별 링크
+      # - "INTEGRATION_TOKEN=원하는-토큰"                  # <-- 외부 연동(webtoon-manager 등)이 다운로드 뒤에 스캔을 시킬 때 쓰는 토큰(선택, 영문/숫자/기호). 없으면 이 기능은 꺼져 있음
+      # - "DISCORD_WEBHOOK_URL="                          # <-- 공유 프로필 켰을 때만(선택): 관리자 비밀번호 최초 생성 시 알림
+    volumes:
+      - "/path/to/your/naver-webtoons:/library/naver"    # <-- 여기 수정: 실제 웹툰 폴더 경로, 오른쪽 이름이 태그
+      - "/path/to/your/kakao-webtoons:/library/kakao"    # <-- 여기 수정: 실제 웹툰 폴더 경로, 오른쪽 이름이 태그
+      # - "webtoon_gdrive:/library/gdrive:ro"            # <-- 클라우드 드라이브 예시(선택): rclone 볼륨 플러그인으로
+      #                                                   #     만든 볼륨을 연결할 때만 주석을 풀고 이름을 맞추세요.
+      #                                                   #     읽기 전용(:ro)으로 붙여서 원본을 이중으로 보호합니다.
+      - "webtoon_data:/data"
+    restart: unless-stopped
+
+volumes:
+  webtoon_data:
+  # webtoon_gdrive:                                      # <-- 클라우드 드라이브 예시(선택): 위 volumes에서 주석을
+  #   external: true                                      #     풀었다면 이 두 줄도 같이 풀고 이름을 맞추세요.

@@ -1,6 +1,8 @@
 .git
 .venv
 .env
+.env.integrated
+viewer
 data
 node_modules
 **/node_modules

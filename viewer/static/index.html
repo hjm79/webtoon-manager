@@ -1,0 +1,2130 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="webtoon-base-path" content="__WEBTOON_BASE_PATH__">
+<script src="__WEBTOON_BASE_PATH__/base-path.js"></script>
+<title>내 웹툰</title>
+<link rel="icon" href="__WEBTOON_BASE_PATH__/favicon.ico" sizes="any">
+<link rel="apple-touch-icon" href="__WEBTOON_BASE_PATH__/icons/apple-touch-icon.png">
+<link rel="manifest" href="__WEBTOON_BASE_PATH__/manifest.json">
+<meta name="theme-color" content="#14161a">
+<!-- iOS는 manifest.json의 "display": "standalone"만으로는 홈 화면 추가 시 완전한
+     독립 실행 취급을 안 해주는 경우가 있어서(구형 iOS일수록 더 그렇다), 애플 전용
+     메타 태그로 명시적으로 알려줘야 상단에서의 제스처 처리도 일반 웹페이지가 아닌
+     독립 앱처럼 동작한다. -->
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="웹툰">
+<link rel="stylesheet" href="__WEBTOON_BASE_PATH__/style.css">
+</head>
+<body>
+<div id="openLoadingOverlay" class="open-loading-overlay" style="display:none">
+  <div class="open-loading-spinner"></div>
+</div>
+<header class="topbar">
+  <h1>내 웹툰</h1>
+  <span id="scanStatusText" class="scan-status-text"></span>
+  <button id="settingsBtn" class="rescan-btn" title="라이브러리/백업 설정" aria-label="설정">⚙</button>
+  <button id="rescanBtn" class="rescan-btn" title="새로고침(재스캔)" aria-label="재스캔">⟳</button>
+</header>
+<div id="pullToRefreshIndicator" class="pull-refresh-indicator">
+  <div class="pull-refresh-spinner"></div>
+</div>
+<div class="toolbar">
+  <div class="search-field">
+    <input id="searchInput" class="search-input" type="text" placeholder="제목 검색">
+    <button id="searchClear" class="search-clear" type="button" aria-label="검색어 지우기" hidden>×</button>
+  </div>
+  <select id="sortSelect" class="sort-select">
+    <option value="latest">최근 업데이트순</option>
+    <option value="unread">안읽은 회차 많은순</option>
+    <option value="title">제목순</option>
+  </select>
+</div>
+<div id="listTabs" class="list-tabs" role="tablist" aria-label="목록 구분" style="display:none">
+  <button class="list-tab" role="tab" aria-selected="false" data-list="reading"><span>정주행 중</span><span class="list-tab-count"></span></button>
+  <button class="list-tab" role="tab" aria-selected="false" data-list="later"><span>나중에 읽기</span><span class="list-tab-count"></span></button>
+</div>
+<div id="profileViewTabs" class="filter-tabs" style="display:none">
+  <button class="filter-tab active" id="profileTabMine">내 웹툰</button>
+  <button class="filter-tab" id="profileTabBrowse">둘러보기</button>
+</div>
+<div id="filterTabs" class="filter-tabs"></div>
+
+<aside id="settingsPanel" class="sidebar">
+  <div class="sidebar-header">
+    <span>시리즈 폴더 / 백업</span>
+    <button id="settingsClose" class="sidebar-close" aria-label="닫기">×</button>
+  </div>
+  <div id="settingsBody" class="settings-panel-body">
+    <div class="settings-section">
+      <div class="settings-section-title">스캔 중인 시리즈 폴더</div>
+      <div id="includedFolderList" class="lib-list"></div>
+      <div class="settings-hint">웹툰이 아닌 폴더가 섞여 있으면 "제외"를 눌러 스캔에서 뺄 수 있습니다.
+      제외해도 실제 폴더나 zip 파일은 절대 지워지지 않습니다.</div>
+    </div>
+    <div class="settings-section">
+      <div class="settings-section-title">제외된 폴더</div>
+      <div id="excludedFolderList" class="lib-list"></div>
+    </div>
+    <div class="settings-section">
+      <div class="settings-section-title">리더 설정 범위</div>
+      <div class="settings-hint">전체화면 / 스크롤 속도 / 확대·축소 값을 어디서 바꾸든 모든 웹툰에
+      똑같이 적용할지, 웹툰마다 따로 기억할지 정합니다.</div>
+      <div class="scope-toggle-buttons">
+        <button id="scopeGlobalBtn" class="scope-btn" data-scope="global">전체 공통</button>
+        <button id="scopePerSeriesBtn" class="scope-btn" data-scope="per_series">웹툰별로 따로</button>
+      </div>
+    </div>
+    <div class="settings-section">
+      <div class="settings-section-title">회차 겹침 자동 감지</div>
+      <div class="settings-hint">이전 화 끝부분과 겹치는 다음화 앞부분을 자동으로 건너뛰는 기능입니다.
+      설정을 끄면 재스캔 직후 미리 계산해두는 작업만 안 하고, 실제로 웹툰을 감상할 때는 바로
+      계산되어 기능 자체는 계속 동작합니다. 라이브러리가 아주 크거나 계산이 오래 걸려 서버가
+      불안정하다면 설정을 꺼보시기 바랍니다.</div>
+      <div class="scope-toggle-buttons">
+        <button id="overlapPrecomputeOnBtn" class="overlap-toggle-btn" data-enabled="true">사전 계산 켜짐</button>
+        <button id="overlapPrecomputeOffBtn" class="overlap-toggle-btn" data-enabled="false">사전 계산 꺼짐</button>
+      </div>
+    </div>
+    <div class="settings-section">
+      <div class="settings-section-title">백업 / 복원</div>
+      <div class="settings-hint">읽음 진행률, 검색/정렬/필터 설정, 제외된 폴더 목록, 공유 프로필(허용
+      시리즈·접속 시간대·요청 내역 포함) 전부를 포함합니다.</div>
+      <div class="read-action-picker-buttons">
+        <a id="backupBtn" href="__WEBTOON_BASE_PATH__/api/backup" class="mark-all-btn" download>백업 다운로드</a>
+        <button id="restoreBtn" class="mark-all-btn ghost">복원</button>
+      </div>
+      <input id="restoreFileInput" type="file" accept="application/json" style="display:none">
+    </div>
+    <div class="settings-section" id="profilesSection" style="display:none">
+      <div class="settings-section-title">공유 프로필</div>
+      <div class="settings-hint">특정 사람에게 특정 웹툰만 공개하는 개인별 링크를 만듭니다.</div>
+      <div id="profilesList" class="lib-list"></div>
+      <button id="addProfileBtn" class="mark-all-btn ghost">+ 프로필 추가</button>
+    </div>
+    <div class="settings-section" id="devicesSection" style="display:none">
+      <div class="settings-section-title">등록된 기기</div>
+      <div class="settings-hint">관리자 비밀번호를 한 번 통과해서 계속 기억되고 있는 기기 목록입니다. 삭제하면
+      그 기기는 다음 접속 때 비밀번호를 다시 물어봅니다.</div>
+      <div id="devicesList" class="lib-list"></div>
+    </div>
+  </div>
+</aside>
+<div id="settingsOverlay" class="sidebar-overlay"></div>
+
+<aside id="profileEditPanel" class="sidebar">
+  <div class="sidebar-header">
+    <span id="profileEditTitle">프로필 편집</span>
+    <button id="profileEditClose" class="sidebar-close" aria-label="닫기">×</button>
+  </div>
+  <div class="settings-panel-body">
+    <div class="settings-section">
+      <div class="settings-section-title">이름</div>
+      <input id="profileNameInput" class="profile-text-input" placeholder="예: 딸">
+    </div>
+    <div class="settings-section">
+      <div class="settings-section-title">전용 URL</div>
+      <div class="profile-url-row">
+        <div id="profileUrlDisplay" class="profile-url-display"></div>
+        <button id="profileCopyUrlBtn" class="mark-all-btn ghost">복사</button>
+      </div>
+      <button id="profileReissueBtn" class="mark-all-btn danger">URL 재발급</button>
+      <div class="settings-hint">재발급하면 기존 링크는 즉시 무효화됩니다. 이름/허용목록/읽은 기록은 그대로 유지됩니다.</div>
+    </div>
+    <div class="settings-section">
+      <div class="settings-section-title">둘러보기에 보여줄 연령 등급</div>
+      <div id="profileBrowseFiltersList" class="profile-filter-matrix"></div>
+    </div>
+    <div class="settings-section">
+      <div class="settings-section-title">리더 접속 가능 시간</div>
+      <div class="settings-hint">체크 안 한 요일은 제한 없음(항상 접속 가능). 목록 화면은 시간과 무관하게 항상 볼 수 있고, 실제로 회차를 읽는 것만 막힙니다. 지금 읽던 회차는 시간이 지나도 끝까지 볼 수 있어요.</div>
+      <div id="profileTimeWindowsList" class="profile-time-windows"></div>
+    </div>
+    <div class="settings-section">
+      <div class="settings-section-title">대기중인 요청</div>
+      <div id="profileRequestsList" class="lib-list"></div>
+    </div>
+    <div class="settings-section">
+      <div class="settings-section-title">기기 승인 요청 (최대 2대)</div>
+      <div id="profileDeviceRequestsList" class="lib-list"></div>
+    </div>
+    <div class="settings-section">
+      <div class="settings-section-title">허용 시리즈</div>
+      <div class="profile-series-filter-row">
+        <select id="profileSeriesPlatformFilter"></select>
+        <select id="profileSeriesAgeFilter"></select>
+      </div>
+      <div id="profileAllowedSeriesList" class="profile-series-checklist"></div>
+    </div>
+    <div class="settings-section profile-edit-actions">
+      <button id="profileSaveBtn" class="mark-all-btn">저장</button>
+      <button id="profileDeleteBtn" class="mark-all-btn danger">프로필 삭제</button>
+    </div>
+  </div>
+</aside>
+<div id="profileEditOverlay" class="sidebar-overlay"></div>
+
+<aside id="chapterSidebar" class="sidebar">
+  <div class="sidebar-header">
+    <span id="chapterSidebarTitle" class="sidebar-title">회차 목록</span>
+    <button id="chapterSidebarClose" class="sidebar-close" aria-label="닫기">×</button>
+  </div>
+  <div id="chapterSidebarInfo" class="series-info-panel" style="display:none"></div>
+  <div id="chapterSidebarLinks" class="series-info-links">
+    <a id="chapterSidebarOrigin" class="series-info-link" target="_blank" rel="noopener" hidden>원작 페이지 열기 ↗</a>
+    <button id="chapterSidebarMove" class="series-info-link link-button" type="button" hidden></button>
+  </div>
+  <div id="chapterSidebarList" class="sidebar-list"></div>
+</aside>
+<div id="chapterSidebarOverlay" class="sidebar-overlay"></div>
+
+<div id="readActionPanel" class="read-action-panel" style="display:none">
+  <div class="read-action-header">
+    <span id="readActionTitle"></span>
+    <button id="readActionClose" class="read-action-close" aria-label="닫기">×</button>
+  </div>
+  <div id="readActionBody"></div>
+</div>
+
+<div id="cardMenuOverlay" class="sidebar-overlay"></div>
+<div id="cardMenu" class="card-menu" role="menu" hidden>
+  <div id="cardMenuTitle" class="card-menu-title"></div>
+  <button id="cardMenuMove" class="card-menu-item" role="menuitem"></button>
+  <button id="cardMenuSelect" class="card-menu-item" role="menuitem">여러 개 선택해서 이동</button>
+  <button id="cardMenuCancel" class="card-menu-item cancel">취소</button>
+</div>
+<div id="toast" class="toast" role="status" aria-live="polite"></div>
+
+<main id="grid" class="grid"></main>
+<main id="browseGrid" class="grid" style="display:none"></main>
+
+<script>
+// 공유 프로필 링크("/p/<토큰>/...")로 접속했는지 감지. 있으면 이 화면에서 나가는 모든
+// /api/* 요청에 자동으로 그 토큰 경로를 붙인다 - fetch()를 감싸는 방식이라, 이 파일
+// 안의 수십 개 fetch("/api/...") 호출을 하나하나 고칠 필요 없이 여기 한 곳에서 처리된다.
+// (단, <img src="cover_url">처럼 fetch를 안 거치는 링크는 서버가 애초에 토큰이 붙은
+// 경로로 내려주므로 - series.py의 profile_path_prefix 참고 - 여기서 손댈 필요 없음.)
+const PROFILE_TOKEN = WebtoonPaths.profileToken;
+const IS_PROFILE_VIEW = PROFILE_TOKEN !== null;
+window.fetch = WebtoonPaths.fetch;
+
+function withProfilePrefix(path) {
+  return WebtoonPaths.path(path);
+}
+document.querySelector('link[rel="manifest"]').href = withProfilePrefix("/manifest.json");
+document.getElementById("backupBtn").href = withProfilePrefix("/api/backup");
+
+const LS_QUERY = `webtoon:index:query:${PROFILE_TOKEN || "admin"}`; // 검색어는 관리자/프로필별로 완전히 분리 저장
+const FILTER_KEY = "status_filter"; // 서버(app_settings)에 저장 -> 모든 기기에서 동일하게 적용
+const PLATFORM_FILTER_KEY = "platform_filter"; // 위와 같은 이유로 서버에 저장
+const SORT_KEY = "sort_mode"; // 위와 같은 이유로 서버에 저장(검색어는 입력마다 바뀌어서 과하니 localStorage 유지)
+const SORT_KEY_LATER = "sort_mode_later"; // 나중에 읽기 탭의 정렬(탭별로 따로 기억)
+const ACTIVE_LIST_SESSION_KEY = "webtoon:index:activeList"; // 보던 탭(새로고침/뒤로가기에도 유지)
+const SORT_VALUES = ["latest", "unread", "title"];
+const LIST_READING = "reading"; // 정주행 중 - 기본값이라 아무것도 안 한 시리즈는 전부 여기
+const LIST_LATER = "later"; // 나중에 읽기
+const LIST_MOVE_PHRASE = { [LIST_READING]: "정주행 중으로", [LIST_LATER]: "나중에 읽기로" };
+const LONG_PRESS_MS = 500;
+const ACTIVE_TAB_KEY = "active_tab"; // 프로필 화면의 "내 웹툰"/"둘러보기" 중 마지막으로 보던 탭
+const STATUS_OPTIONS = [
+  { value: "unread", label: "읽지 않음" },
+  { value: "reading", label: "읽는 중" },
+  { value: "done", label: "완독" },
+];
+const STATUS_VALUES = STATUS_OPTIONS.map((o) => o.value);
+
+let allSeries = [];
+let query = localStorage.getItem(LS_QUERY) || "";
+// 보던 탭은 새로고침/뒤로가기에도 유지된다(sessionStorage). 다만 앱을 완전히 새로 열면(새
+// 세션) 항상 정주행 중에서 시작한다 - 나중에 읽기는 의식적으로 열어야 보이는 "서랍"이라서.
+function restoreActiveList() {
+  try {
+    return sessionStorage.getItem(ACTIVE_LIST_SESSION_KEY) === LIST_LATER ? LIST_LATER : LIST_READING;
+  } catch (e) {
+    return LIST_READING; // 저장소를 못 쓰는 환경이면 기본값
+  }
+}
+function rememberActiveList(list) {
+  try {
+    sessionStorage.setItem(ACTIVE_LIST_SESSION_KEY, list);
+  } catch (e) {
+    // 저장 못 해도 화면 동작에는 지장 없음
+  }
+}
+let activeList = IS_PROFILE_VIEW ? LIST_READING : restoreActiveList();
+// 탭별 정렬(서버에서 로드). 나중에 읽기는 최근 업데이트순이면 새 회차가 올라온 웹툰이
+// 계속 맨 위로 올라와 유혹이 되므로 제목순이 기본이다.
+let sortModes = { [LIST_READING]: "latest", [LIST_LATER]: "title" };
+let visibleSeriesIds = []; // 지금 화면에 보이는 웹툰 ID들(보이는 웹툰 전체 선택용)
+// 필터는 탭(정주행 중 / 나중에 읽기)마다 따로 가진다. statuses가 비어있으면 "전체", platforms가
+// 비어있으면 "전체 플랫폼"(여러 개 동시 선택 가능). 서버에서 로드되기 전까지의 기본값은 전체.
+const filtersByList = {
+  [LIST_READING]: { statuses: new Set(), platforms: new Set() },
+  [LIST_LATER]: { statuses: new Set(), platforms: new Set() },
+};
+function currentFilters() {
+  return filtersByList[activeList]; // 지금 보고 있는 탭의 필터
+}
+
+// ---------------------------------------------------------------------
+// 직전 화면 저장/복원 (새로고침 직후 첫 화면용)
+//
+// 목록, 필터, 정렬, 플랫폼 칩, 마지막 스캔 시각은 전부 서버에서 받아와야 알 수 있는 값이라, 새로고침하면
+// 응답이 올 때까지 기본값(전체 선택)이 보이거나 아예 비어 있다가 바뀌는 깜빡임이 생긴다. 그래서
+// 마지막으로 본 화면 상태를 브라우저에 저장해 두고, 새로고침하면 그걸로 첫 화면을 바로 그린 뒤
+// 서버 값이 오면 조용히 갱신한다(서버 값이 항상 우선). 관리자/프로필별로 따로 저장한다.
+// ---------------------------------------------------------------------
+
+const BOOT_CACHE_VERSION = 1;
+const BOOT_CACHE_KEY = `webtoon:index:boot:${PROFILE_TOKEN || "admin"}`;
+let bootCacheSaveEnabled = false; // 서버 값을 한 번 받은 뒤에만 켠다(덜 불러온 상태를 저장하지 않도록)
+let bootCacheSaveTimer = null;
+
+function saveBootCache() {
+  try {
+    const filters = {};
+    for (const [list, f] of Object.entries(filtersByList)) {
+      filters[list] = { statuses: [...f.statuses], platforms: [...f.platforms] };
+    }
+    localStorage.setItem(BOOT_CACHE_KEY, JSON.stringify({
+      v: BOOT_CACHE_VERSION,
+      series: allSeries,
+      filters,
+      sortModes,
+      knownPlatforms,
+      lastScanText: document.getElementById("scanStatusText").textContent,
+    }));
+  } catch (e) {
+    // 용량 초과/저장소 사용 불가 환경이면 이 기능만 포기한다(화면 동작에는 지장 없음)
+  }
+}
+
+// 화면이 다시 그려질 때마다 부르되, 짧은 간격의 연속 호출은 한 번으로 모아서 저장한다
+function scheduleBootCacheSave() {
+  if (!bootCacheSaveEnabled) return;
+  clearTimeout(bootCacheSaveTimer);
+  bootCacheSaveTimer = setTimeout(saveBootCache, 400);
+}
+
+// 저장된 직전 화면을 상태 변수에 되살린다. 성공하면 true(저장된 게 없거나 형식이 다르면 false)
+function applyBootCache() {
+  try {
+    const cache = JSON.parse(localStorage.getItem(BOOT_CACHE_KEY) || "null");
+    if (!cache || cache.v !== BOOT_CACHE_VERSION || !Array.isArray(cache.series)) return false;
+    allSeries = cache.series;
+    for (const list of [LIST_READING, LIST_LATER]) {
+      const saved = (cache.filters || {})[list];
+      if (saved) {
+        filtersByList[list].statuses = new Set((saved.statuses || []).filter((v) => STATUS_VALUES.includes(v)));
+        filtersByList[list].platforms = new Set(saved.platforms || []);
+      }
+      const mode = (cache.sortModes || {})[list];
+      if (SORT_VALUES.includes(mode)) sortModes[list] = mode;
+    }
+    knownPlatforms = cache.knownPlatforms || [];
+    document.getElementById("scanStatusText").textContent = cache.lastScanText || "";
+    sortSelect.value = sortModes[activeList];
+    return true;
+  } catch (e) {
+    return false;
+  }
+}
+
+// 이 페이지를 떠나는 순간(새로고침 포함) 마지막 상태를 바로 저장해서, 방금 바꾼 필터도 놓치지 않는다
+window.addEventListener("pagehide", () => {
+  if (bootCacheSaveEnabled) saveBootCache();
+});
+let knownPlatforms = []; // /library 바로 아래 폴더 이름 전체 (아직 스캔 안 끝난 것도 포함)
+
+let selectedIds = new Set(); // 다중 선택
+
+const searchInput = document.getElementById("searchInput");
+const sortSelect = document.getElementById("sortSelect");
+const searchClear = document.getElementById("searchClear");
+searchInput.value = query;
+searchClear.hidden = query === "";
+sortSelect.value = sortModes[activeList];
+
+function sortSeries(list) {
+  const arr = [...list];
+  const mode = sortModes[activeList];
+  if (mode === "latest") arr.sort((a, b) => b.latest_update - a.latest_update);
+  else if (mode === "unread") arr.sort((a, b) => b.unread_count - a.unread_count);
+  else if (mode === "title") arr.sort((a, b) => a.title.localeCompare(b.title, "ko"));
+  return arr;
+}
+
+function seriesStatus(s) {
+  // 지금 읽고 있는 회차가 있으면(회차 목록에 "읽는 중"으로 표시되는 회차) 읽음 기록이 얼마나 있든 읽는 중이다:
+  // 새 웹툰의 1화를 읽는 중이면 읽은 회차가 0개여도, 다 읽은 웹툰의 회차를 다시 열어 읽는 중이면 안 읽은
+  // 회차가 0개여도 읽는 중이다. 이 판단은 서버가 회차 목록과 같은 기준으로 내려준다(reading_now).
+  if (s.reading_now) return "reading";
+  if (s.unread_count >= s.chapter_count) return "unread"; // 아직 한 번도 안 읽음
+  if (s.unread_count === 0) return "done"; // 전부 읽음
+  return "reading"; // 일부만 읽음
+}
+
+// 필터는 탭마다 서버에 따로 저장한다. 정주행 중은 예전 키 그대로라서, 업데이트해도 이미
+// 선택해 둔 필터가 그대로 정주행 중 탭의 필터가 된다.
+function filterKeyOf(list) {
+  return list === LIST_LATER ? `${FILTER_KEY}_later` : FILTER_KEY;
+}
+function platformFilterKeyOf(list) {
+  return list === LIST_LATER ? `${PLATFORM_FILTER_KEY}_later` : PLATFORM_FILTER_KEY;
+}
+
+function saveFilterSetting() {
+  const { statuses } = currentFilters();
+  const value = statuses.size === 0 ? "all" : [...statuses].join(",");
+  fetch(`/api/settings/${filterKeyOf(activeList)}`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ value }),
+  }).catch(() => {});
+}
+
+function savePlatformFilterSetting() {
+  const { platforms } = currentFilters();
+  const value = platforms.size === 0 ? "" : [...platforms].join(",");
+  fetch(`/api/settings/${platformFilterKeyOf(activeList)}`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ value }),
+  }).catch(() => {});
+}
+
+function renderFilterTabs() {
+  scheduleBootCacheSave();
+  const container = document.getElementById("filterTabs");
+  const filters = currentFilters(); // 탭을 바꾸면 이 함수를 다시 불러서 그 탭의 필터로 그린다
+  container.innerHTML = "";
+
+  const allBtn = document.createElement("button");
+  allBtn.className = "filter-tab" + (filters.statuses.size === 0 ? " active" : "");
+  allBtn.textContent = "전체";
+  allBtn.addEventListener("click", () => {
+    if (filters.statuses.size === 0) return;
+    filters.statuses = new Set();
+    renderFilterTabs();
+    render();
+    saveFilterSetting();
+  });
+  container.appendChild(allBtn);
+
+  for (const opt of STATUS_OPTIONS) {
+    const btn = document.createElement("button");
+    btn.className = "filter-tab" + (filters.statuses.has(opt.value) ? " active" : "");
+    btn.textContent = opt.label;
+    btn.addEventListener("click", () => {
+      if (filters.statuses.has(opt.value)) filters.statuses.delete(opt.value);
+      else filters.statuses.add(opt.value);
+      // 세 상태를 전부 선택한 상태는 "전체"와 같으므로 자연스럽게 합쳐줌
+      if (filters.statuses.size === STATUS_OPTIONS.length) filters.statuses = new Set();
+      renderFilterTabs();
+      render();
+      saveFilterSetting();
+    });
+    container.appendChild(btn);
+  }
+
+  // docker-compose volumes에서 정한 플랫폼 태그(네이버/카카오 등) - 실제로 시리즈가
+  // 뜬 플랫폼뿐 아니라, 아직 스캔 중이라 시리즈가 하나도 없는 플랫폼도 knownPlatforms로
+  // 미리 알고 있으면 같이 보여준다 (네트워크 드라이브가 늦게 끝나도 탭 자체는 먼저 보이게)
+  const platformSet = new Set();
+  for (const s of allSeries) platformSet.add(s.platform);
+  for (const p of knownPlatforms) platformSet.add(p);
+  if (platformSet.size > 1) {
+    const divider = document.createElement("span");
+    divider.className = "filter-tab-divider";
+    container.appendChild(divider);
+
+    for (const platform of [...platformSet].sort((a, b) => a.localeCompare(b, "ko"))) {
+      const btn = document.createElement("button");
+      btn.className = "filter-tab platform-filter-tab" + (filters.platforms.has(platform) ? " active" : "");
+      btn.textContent = platform;
+      btn.addEventListener("click", () => {
+        if (filters.platforms.has(platform)) filters.platforms.delete(platform);
+        else filters.platforms.add(platform);
+        // 전체 플랫폼을 다 선택한 상태는 "전체"와 같으므로 자연스럽게 합쳐줌
+        if (filters.platforms.size === platformSet.size) filters.platforms = new Set();
+        renderFilterTabs();
+        render();
+        savePlatformFilterSetting();
+      });
+      container.appendChild(btn);
+    }
+  }
+  updateStickyOffsets(); // 플랫폼 탭 개수가 바뀌면 필터탭 높이도 바뀔 수 있어 매번 재계산
+}
+
+function listOf(s) {
+  return s.list || LIST_READING; // 서버가 list를 안 내려주는 프로필 화면에서도 전부 "정주행 중"으로 취급
+}
+
+// 한 웹툰이 검색어와 주어진 필터(상태/플랫폼)를 모두 통과하는지
+function matchesFilters(s, q, filters) {
+  if (q && !s.title.toLowerCase().includes(q)) return false;
+  if (filters.statuses.size > 0 && !filters.statuses.has(seriesStatus(s))) return false;
+  if (filters.platforms.size > 0 && !filters.platforms.has(s.platform)) return false;
+  return true;
+}
+
+// 탭 옆 숫자는 각 탭이 "자기 필터"로 센다 - 그래야 그 탭을 눌렀을 때 보이는 개수와 항상 같다.
+// (지금 보는 탭의 필터로 양쪽을 세면, 다른 탭 숫자가 실제와 달라진다. 검색어는 양쪽 공통.)
+function countByList(q) {
+  const counts = { [LIST_READING]: 0, [LIST_LATER]: 0 };
+  for (const s of allSeries) {
+    const list = listOf(s);
+    if (matchesFilters(s, q, filtersByList[list])) counts[list] += 1;
+  }
+  return counts;
+}
+
+function otherList(list) {
+  return list === LIST_LATER ? LIST_READING : LIST_LATER;
+}
+
+function markActiveListTab() {
+  for (const btn of document.querySelectorAll(".list-tab")) {
+    const isActive = btn.dataset.list === activeList;
+    btn.classList.toggle("active", isActive);
+    btn.setAttribute("aria-selected", String(isActive));
+  }
+}
+
+function renderListTabs(counts, hasQuery) {
+  markActiveListTab();
+  const activeIsEmpty = counts[activeList] === 0;
+  for (const btn of document.querySelectorAll(".list-tab")) {
+    const list = btn.dataset.list;
+    const badge = btn.querySelector(".list-tab-count");
+    badge.textContent = counts[list];
+    // 검색했는데 지금 탭엔 결과가 없고 다른 탭에만 있으면, 그쪽 탭 숫자를 눈에 띄게 한다
+    badge.classList.toggle("hit", list !== activeList && hasQuery && activeIsEmpty && counts[list] > 0);
+  }
+}
+
+function emptyMessage(q) {
+  if (!allSeries.length) return "스캔된 웹툰이 없습니다.<br>라이브러리 폴더를 확인해주세요.";
+  if (q) return "검색 결과가 없습니다.";
+  const { statuses, platforms } = currentFilters();
+  if (statuses.size > 0 || platforms.size > 0) return "해당하는 웹툰이 없습니다.";
+  return activeList === LIST_LATER ? "나중에 읽기에 둔 웹툰이 없습니다." : "정주행 중인 웹툰이 없습니다.";
+}
+
+function render() {
+  scheduleBootCacheSave();
+  const grid = document.getElementById("grid");
+  const q = query.trim().toLowerCase();
+  const useLists = !IS_PROFILE_VIEW; // 목록 구분은 관리자 개인 정리용 - 프로필 화면엔 없다
+  if (useLists) renderListTabs(countByList(q), q !== "");
+
+  const filters = currentFilters();
+  const list = sortSeries(
+    allSeries.filter((s) => (!useLists || listOf(s) === activeList) && matchesFilters(s, q, filters))
+  );
+  visibleSeriesIds = list.map((s) => s.id);
+
+  if (!list.length) {
+    grid.innerHTML = `<div class="empty-state">${emptyMessage(q)}</div>`;
+    return;
+  }
+
+  grid.innerHTML = "";
+  for (const s of list) {
+    const isSelected = selectedIds.has(s.id);
+    const isLater = useLists && listOf(s) === LIST_LATER;
+    const card = document.createElement("div");
+    card.className = "card" + (isSelected ? " selected" : "") + (isLater ? " later" : "");
+    card.innerHTML = `
+      <div class="cover-wrap">
+        <span class="platform-tag">${s.platform}</span>
+        ${s.unread_count > 0 ? `<span class="unread-badge">${s.unread_count}</span>` : ""}
+        <img src="${s.cover_url}" alt="${s.title}" loading="lazy">
+        <button class="chapter-list-toggle" title="회차 목록" aria-label="회차 목록">≡</button>
+        <button class="select-toggle" title="선택(읽음 상태 관리·목록 이동)" aria-label="선택(읽음 상태 관리·목록 이동)">${isSelected ? "●" : "○"}</button>
+      </div>
+      <div class="title">${s.title}</div>
+      <div class="chapter-count">${s.progress_display}</div>
+    `;
+    card.querySelector(".select-toggle").addEventListener("click", (e) => {
+      e.stopPropagation();
+      if (selectedIds.has(s.id)) selectedIds.delete(s.id);
+      else selectedIds.add(s.id);
+      renderActionPanel();
+      render();
+    });
+    card.querySelector(".chapter-list-toggle").addEventListener("click", (e) => {
+      e.stopPropagation();
+      openChapterSidebar(s);
+    });
+    card.addEventListener("click", () => {
+      if (Date.now() < ignoreCardClickUntil || menuTapIsAccidental()) return; // 길게 눌러 메뉴를 연 직후의 클릭은 열기로 보지 않음
+      goContinue(s.id);
+    });
+    if (useLists) attachCardMenu(card, s);
+    grid.appendChild(card);
+  }
+}
+
+let openLoadingActive = false;
+let openLoadingHintTimer = null;
+
+function showOpenLoading() {
+  if (openLoadingActive) return; // 이미 다른 클릭으로 로딩 중이면 중복 시작 안 함
+  openLoadingActive = true;
+  const overlay = document.getElementById("openLoadingOverlay");
+  overlay.querySelector(".open-loading-spinner").textContent = "";
+  overlay.style.display = "flex";
+  // 오래 걸리면(네트워크 드라이브 등) 그냥 멈춘 것처럼 보이지 않도록 안내 문구를 띄움
+  openLoadingHintTimer = setTimeout(() => {
+    const spinner = overlay.querySelector(".open-loading-spinner");
+    const hint = document.createElement("div");
+    hint.className = "open-loading-hint";
+    hint.textContent = "불러오는 중...";
+    spinner.after(hint);
+  }, 1500);
+}
+
+function hideOpenLoading() {
+  openLoadingActive = false;
+  if (openLoadingHintTimer) {
+    clearTimeout(openLoadingHintTimer);
+    openLoadingHintTimer = null;
+  }
+  const overlay = document.getElementById("openLoadingOverlay");
+  overlay.style.display = "none";
+  const hint = overlay.querySelector(".open-loading-hint");
+  if (hint) hint.remove();
+}
+
+async function goContinue(seriesId) {
+  if (openLoadingActive) return; // 이미 다른 항목이 로딩 중이면 새 클릭은 무시(중복 이동 방지)
+  // 클릭하자마자 즉시 로딩 표시부터 띄운다 - 이어보기 위치 조회 자체가 네트워크
+  // 드라이브에서는 오래 걸릴 수 있는데, 그동안 화면에 아무 반응이 없으면 클릭이
+  // 안 된 줄 알고 다시 누르게 되는 문제가 있었다.
+  showOpenLoading();
+  try {
+    const res = await fetch(`/api/series/${encodeURIComponent(seriesId)}/continue`);
+    if (!res.ok) throw new Error("continue lookup failed");
+    const data = await res.json();
+    const offset = Number.isFinite(data.page_offset) && data.page_offset > 0 && data.page_offset <= 1
+      ? `&page_offset=${data.page_offset}` : "";
+    location.href = withProfilePrefix(`/reader.html?series=${encodeURIComponent(seriesId)}&chapter=${encodeURIComponent(data.chapter_id)}&page=${data.page_index}${offset}`);
+  } catch (e) {
+    // 이동 실패 시 아무것도 하지 않음 (콘솔에만 남김)
+    console.error(e);
+    hideOpenLoading();
+  }
+}
+
+// ---------------------------------------------------------------------
+// 정주행 중 / 나중에 읽기 (관리자 개인 정리용 - 이어보기 위치와 읽음 기록은 건드리지 않음)
+// ---------------------------------------------------------------------
+
+let toastTimer = null;
+function showToast(message) {
+  const toast = document.getElementById("toast");
+  toast.textContent = message;
+  toast.classList.add("show");
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => toast.classList.remove("show"), 2600);
+}
+
+function moveToastMessage(count, target) {
+  return count > 1
+    ? `${count}개를 ${LIST_MOVE_PHRASE[target]} 옮겼어요`
+    : `${LIST_MOVE_PHRASE[target]} 옮겼어요`;
+}
+
+function initListTabs() {
+  const tabs = document.getElementById("listTabs");
+  tabs.style.display = "flex";
+  markActiveListTab(); // 서버 응답을 기다리지 않고 보던 탭부터 바로 표시(기본 탭이 잠깐 보이지 않게)
+  for (const btn of tabs.querySelectorAll(".list-tab")) {
+    btn.addEventListener("click", () => setActiveList(btn.dataset.list));
+  }
+}
+
+function setActiveList(list) {
+  if (list === activeList) return;
+  // 새 탭에도 검색 결과가 있으면 검색을 이어가고, 없으면 이전 탭에서 하던 검색은 지운다
+  const q = query.trim().toLowerCase();
+  if (q === "" || countByList(q)[list] === 0) storeQuery("");
+  activeList = list;
+  rememberActiveList(list);
+  sortSelect.value = sortModes[activeList];
+  renderFilterTabs(); // 필터도 탭마다 따로라서, 칩 표시를 이 탭의 선택 상태로 바꾼다
+  window.scrollTo(0, 0);
+  clearSelection(); // 다른 탭 웹툰이 선택된 채 남지 않게 정리하고, 목록도 다시 그린다
+}
+
+// 서버에 저장하고 성공하면 화면의 데이터에도 반영한다(다시 그리는 건 호출한 쪽이 한다)
+async function requestMove(seriesIds, target) {
+  try {
+    const res = await fetch("/api/series-lists", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ series_ids: seriesIds, list: target }),
+    });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  } catch (e) {
+    console.error(e);
+    showToast("이동하지 못했어요. 잠시 후 다시 시도해 주세요.");
+    return false;
+  }
+  const moved = new Set(seriesIds);
+  for (const s of allSeries) if (moved.has(s.id)) s.list = target;
+  return true;
+}
+
+// ----- 카드 길게 누르기(모바일) / 우클릭(PC) 이동 메뉴 -----
+
+const cardMenu = document.getElementById("cardMenu");
+const cardMenuOverlay = document.getElementById("cardMenuOverlay");
+let cardMenuSeries = null;
+let ignoreCardClickUntil = 0;
+
+// 길게 눌러서 메뉴가 뜬 뒤 손가락을 떼는 순간, 그 손떼기가 방금 뜬 메뉴/바깥 영역을 누른 것으로
+// 처리되어 메뉴가 바로 닫히거나 엉뚱한 항목이 실행되는 걸 막는다. 오래 누르고 있다가 떼도
+// 막히도록, "메뉴가 뜰 때 손가락이 아직 닿아 있었는지"와 "그 손가락이 떨어진 직후"를 본다.
+let touchesDown = 0;
+let releaseGuardPending = false;
+let releaseGuardUntil = 0;
+document.addEventListener("touchstart", () => { touchesDown += 1; }, { passive: true, capture: true });
+for (const type of ["touchend", "touchcancel"]) {
+  document.addEventListener(type, () => {
+    touchesDown = Math.max(0, touchesDown - 1);
+    if (releaseGuardPending) {
+      releaseGuardPending = false;
+      releaseGuardUntil = Date.now() + 400;
+    }
+  }, { capture: true });
+}
+function menuTapIsAccidental() {
+  return releaseGuardPending || Date.now() < releaseGuardUntil;
+}
+
+function positionCardMenu(x, y) {
+  const margin = 8;
+  const left = Math.min(x, window.innerWidth - cardMenu.offsetWidth - margin);
+  const top = Math.min(y, window.innerHeight - cardMenu.offsetHeight - margin);
+  cardMenu.style.left = `${Math.max(margin, left)}px`;
+  cardMenu.style.top = `${Math.max(margin, top)}px`;
+}
+
+function openCardMenu(series, x, y) {
+  if (cardMenuSeries && cardMenuSeries.id === series.id) return; // 길게 누르기와 contextmenu가 같이 오는 환경 대비
+  cardMenuSeries = series;
+  releaseGuardPending = touchesDown > 0; // 마우스 우클릭이면 해당 없음(바로 눌러도 되도록)
+  ignoreCardClickUntil = Date.now() + 700;
+  document.getElementById("cardMenuTitle").textContent = series.title;
+  document.getElementById("cardMenuMove").textContent = `${LIST_MOVE_PHRASE[otherList(listOf(series))]} 이동`;
+  const asSheet = window.matchMedia("(max-width: 600px)").matches;
+  cardMenu.classList.toggle("sheet", asSheet);
+  cardMenu.hidden = false;
+  cardMenuOverlay.classList.add("open");
+  if (!asSheet) positionCardMenu(x, y);
+}
+
+function closeCardMenu() {
+  cardMenuSeries = null;
+  cardMenu.hidden = true;
+  cardMenuOverlay.classList.remove("open");
+}
+
+function attachCardMenu(card, series) {
+  let timer = null;
+  let startX = 0;
+  let startY = 0;
+  const cancel = () => {
+    if (timer) clearTimeout(timer);
+    timer = null;
+  };
+  // PC 우클릭, 그리고 안드로이드 크롬의 길게 누르기
+  card.addEventListener("contextmenu", (e) => {
+    e.preventDefault();
+    cancel();
+    openCardMenu(series, e.clientX, e.clientY);
+  });
+  // iOS 사파리는 길게 눌러도 contextmenu가 안 오므로 터치로 직접 감지한다
+  card.addEventListener("touchstart", (e) => {
+    cancel();
+    if (e.touches.length !== 1) return;
+    startX = e.touches[0].clientX;
+    startY = e.touches[0].clientY;
+    timer = setTimeout(() => {
+      timer = null;
+      openCardMenu(series, startX, startY);
+    }, LONG_PRESS_MS);
+  }, { passive: true });
+  card.addEventListener("touchmove", (e) => {
+    const t = e.touches[0];
+    if (Math.abs(t.clientX - startX) > 10 || Math.abs(t.clientY - startY) > 10) cancel(); // 스크롤 중이면 취소
+  }, { passive: true });
+  card.addEventListener("touchend", cancel);
+  card.addEventListener("touchcancel", cancel);
+}
+
+cardMenuOverlay.addEventListener("click", () => {
+  if (!menuTapIsAccidental()) closeCardMenu();
+});
+document.getElementById("cardMenuCancel").addEventListener("click", () => {
+  if (!menuTapIsAccidental()) closeCardMenu();
+});
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape" && cardMenuSeries) closeCardMenu();
+});
+document.getElementById("cardMenuMove").addEventListener("click", async () => {
+  if (menuTapIsAccidental() || !cardMenuSeries) return;
+  const series = cardMenuSeries;
+  const target = otherList(listOf(series));
+  closeCardMenu();
+  if (await requestMove([series.id], target)) {
+    showToast(moveToastMessage(1, target));
+    render();
+  }
+});
+document.getElementById("cardMenuSelect").addEventListener("click", () => {
+  if (menuTapIsAccidental() || !cardMenuSeries) return;
+  selectedIds.add(cardMenuSeries.id);
+  closeCardMenu();
+  renderActionPanel(); // 선택 패널이 뜨고, 다른 웹툰은 ○로 더 고를 수 있다
+  render();
+});
+
+// ----- 회차 사이드바 상단의 이동 버튼 -----
+
+function updateSidebarMoveButton(series) {
+  const btn = document.getElementById("chapterSidebarMove");
+  if (IS_PROFILE_VIEW) {
+    btn.hidden = true;
+    return;
+  }
+  const current = allSeries.find((s) => s.id === series.id) || series; // 다시 불러온 뒤의 최신 객체
+  const target = otherList(listOf(current));
+  btn.textContent = `${LIST_MOVE_PHRASE[target]} 이동`;
+  btn.hidden = false;
+  btn.onclick = async () => {
+    if (await requestMove([series.id], target)) {
+      showToast(moveToastMessage(1, target));
+      render();
+      updateSidebarMoveButton(series);
+    }
+  };
+}
+
+// ---------------------------------------------------------------------
+// 읽음/안읽음 처리 패널 (여러 웹툰 동시 선택 지원)
+// ---------------------------------------------------------------------
+
+function clearSelection() {
+  selectedIds = new Set();
+  renderActionPanel();
+  render(); // 카드의 선택 표시(●)도 즉시 지워야 함
+}
+
+function renderActionPanel() {
+  const panel = document.getElementById("readActionPanel");
+  if (selectedIds.size === 0) {
+    panel.style.display = "none";
+    return;
+  }
+  panel.style.display = "block";
+
+  const titles = [...selectedIds]
+    .map((id) => (allSeries.find((s) => s.id === id) || {}).title)
+    .filter(Boolean);
+  document.getElementById("readActionTitle").textContent =
+    titles.length <= 2 ? titles.join(", ") : `${titles.length}개 웹툰 선택됨`;
+
+  const body = document.getElementById("readActionBody");
+
+  // 목록 이동/전체 선택은 관리자 개인 정리용이라 프로필 화면에는 없다
+  const listButtons = IS_PROFILE_VIEW
+    ? ""
+    : `
+      <button data-act="move" class="move-act">${LIST_MOVE_PHRASE[otherList(activeList)]} 이동 (${selectedIds.size})</button>
+      <button data-act="select-all">보이는 웹툰 전체 선택</button>`;
+  body.innerHTML = `
+    <div class="read-action-grid">
+      <button data-act="all-read">전체 읽음으로 표시</button>
+      <button data-act="all-unread">전체 읽지 않음으로 표시</button>${listButtons}
+    </div>
+  `;
+  for (const btn of body.querySelectorAll("button[data-act]")) {
+    btn.addEventListener("click", () => onActionButton(btn.dataset.act));
+  }
+}
+
+async function putReadState(seriesId, body) {
+  await fetch(`/api/series/${encodeURIComponent(seriesId)}/read-state`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+}
+
+function selectAllVisible() {
+  selectedIds = new Set(visibleSeriesIds);
+  renderActionPanel();
+  render();
+}
+
+async function moveSelected() {
+  const target = otherList(activeList);
+  const ids = [...selectedIds];
+  if (await requestMove(ids, target)) {
+    showToast(moveToastMessage(ids.length, target));
+    clearSelection(); // 선택 해제 + 목록 다시 그리기
+  }
+}
+
+async function onActionButton(act) {
+  if (act === "select-all") return selectAllVisible();
+  if (act === "move") return moveSelected();
+  const read = act === "all-read";
+  await Promise.all(
+    [...selectedIds].map((id) => putReadState(id, { scope: "all", read }))
+  );
+  clearSelection();
+  await load();
+}
+
+document.getElementById("readActionClose").addEventListener("click", clearSelection);
+
+// ---------------------------------------------------------------------
+// 로딩 & 검색/정렬 (localStorage에 유지)
+// ---------------------------------------------------------------------
+
+async function loadFilterSettingFor(list) {
+  try {
+    const res = await fetch(`/api/settings/${filterKeyOf(list)}`);
+    const data = await res.json();
+    if (data.value && data.value !== "all") {
+      const parts = data.value.split(",").filter((v) => STATUS_VALUES.includes(v));
+      filtersByList[list].statuses = new Set(parts);
+    }
+  } catch (e) {
+    // 실패 시 기본값(전체) 유지
+  }
+}
+
+async function loadPlatformFilterSettingFor(list) {
+  try {
+    const res = await fetch(`/api/settings/${platformFilterKeyOf(list)}`);
+    const data = await res.json();
+    filtersByList[list].platforms = new Set((data.value || "").split(",").filter(Boolean));
+  } catch (e) {
+    // 못 받아와도 기본값(전체)으로 계속 진행
+  }
+}
+
+async function loadFilterSettings() {
+  // 나중에 읽기 필터는 목록 구분이 있는 관리자 화면에서만 의미가 있다
+  const lists = IS_PROFILE_VIEW ? [LIST_READING] : [LIST_READING, LIST_LATER];
+  await Promise.all(lists.flatMap((list) => [loadFilterSettingFor(list), loadPlatformFilterSettingFor(list)]));
+}
+
+function sortKeyOf(list) {
+  return list === LIST_LATER ? SORT_KEY_LATER : SORT_KEY;
+}
+
+async function loadSortSettingFor(list) {
+  try {
+    const res = await fetch(`/api/settings/${sortKeyOf(list)}`);
+    const data = await res.json();
+    if (data.value && SORT_VALUES.includes(data.value)) sortModes[list] = data.value;
+  } catch (e) {
+    // 실패 시 그 탭의 기본값 유지
+  }
+}
+
+async function loadSortSettings() {
+  // 나중에 읽기 정렬은 목록 구분이 있는 관리자 화면에서만 의미가 있다
+  await Promise.all([loadSortSettingFor(LIST_READING), IS_PROFILE_VIEW ? null : loadSortSettingFor(LIST_LATER)]);
+  sortSelect.value = sortModes[activeList];
+}
+
+async function fetchSeries() {
+  const grid = document.getElementById("grid");
+  try {
+    const res = await fetch("/api/series");
+    allSeries = await res.json();
+    return true;
+  } catch (e) {
+    grid.innerHTML = `<div class="empty-state">목록을 불러오지 못했습니다.</div>`;
+    return false;
+  }
+}
+
+async function fetchScanStatus() {
+  try {
+    const res = await fetch("/api/scan-status");
+    const data = await res.json();
+    document.getElementById("scanStatusText").textContent = data.last_scan_at
+      ? `마지막 스캔 ${data.last_scan_at}`
+      : "";
+    knownPlatforms = data.platforms || [];
+  } catch (e) {
+    // 실패해도 조용히 무시 (표시만 안 될 뿐 기능엔 영향 없음)
+  }
+}
+
+// 알고 있는 플랫폼(knownPlatforms) 중에 아직 시리즈가 하나도 안 뜬 게 있으면, 스캔이
+// 마저 끝나는 대로 화면에 자동으로 채워지도록 몇 초마다 다시 불러온다. 전부 채워지거나
+// 시도 횟수를 다 쓰면(네트워크 드라이브가 아예 비어있거나 실패한 경우 등, 무한정 돌지
+// 않도록) 스스로 멈춘다.
+let scanPollTimer = null;
+let scanPollAttempts = 0;
+const SCAN_POLL_MAX_ATTEMPTS = 40; // 3초 간격 * 40 = 최대 2분
+
+function hasUnscannedKnownPlatform() {
+  const scanned = new Set(allSeries.map((s) => s.platform));
+  return knownPlatforms.some((p) => !scanned.has(p));
+}
+
+function stopScanPolling() {
+  if (scanPollTimer) {
+    clearInterval(scanPollTimer);
+    scanPollTimer = null;
+  }
+}
+
+function maybeStartScanPolling() {
+  if (scanPollTimer || !hasUnscannedKnownPlatform()) return;
+  scanPollAttempts = 0;
+  scanPollTimer = setInterval(async () => {
+    scanPollAttempts += 1;
+    const ok = await fetchSeries();
+    await fetchScanStatus();
+    if (ok) {
+      renderFilterTabs();
+      render();
+    }
+    if (!hasUnscannedKnownPlatform() || scanPollAttempts >= SCAN_POLL_MAX_ATTEMPTS) {
+      stopScanPolling();
+    }
+  }, 3000);
+}
+
+async function load() {
+  const ok = await fetchSeries();
+  if (ok) {
+    renderFilterTabs(); // 재스캔으로 새 장르가 생겼을 수도 있으니 같이 갱신
+    render();
+  }
+  await fetchScanStatus();
+  renderFilterTabs(); // knownPlatforms가 갱신됐을 수 있으니 다시 그림
+  maybeStartScanPolling();
+}
+
+// topbar/toolbar/filterTabs의 실제 렌더링 높이를 재서, 뒤이은 sticky 요소들이 정확히
+// 그 아래에 이어붙도록 CSS 변수를 채운다. 하드코딩된 픽셀값 대신 실측을 쓰는 이유는,
+// PWA(홈 화면에 추가)처럼 상단 안전영역(노치 등)이 있는 환경에서는 topbar 실제 높이가
+// 브라우저 탭과 달라질 수 있어서, 고정값으로는 환경에 따라 어긋날 수 있기 때문이다.
+function updateStickyOffsets() {
+  const topbar = document.querySelector(".topbar");
+  const toolbar = document.querySelector(".toolbar");
+  const profileViewTabs = document.getElementById("profileViewTabs");
+  const filterTabs = document.getElementById("filterTabs");
+  if (!topbar || !toolbar || !filterTabs) return;
+
+  const topbarHeight = topbar.offsetHeight;
+  const toolbarHeight = toolbar.offsetHeight;
+  // 프로필 화면(내 웹툰/둘러보기 탭)이 안 보이면 높이가 0이라, 관리자 화면에서는
+  // 이 값이 그냥 0으로 계산되어 예전과 동일한 결과가 나온다.
+  const profileTabsHeight = profileViewTabs ? profileViewTabs.offsetHeight : 0;
+  const filterTabsHeight = filterTabs.offsetHeight;
+  // 정주행 중/나중에 읽기 탭도 프로필 탭과 같은 자리에 쌓인다(관리자 화면에서만 보임)
+  const listTabs = document.getElementById("listTabs");
+  const listTabsHeight = listTabs ? listTabs.offsetHeight : 0;
+
+  const root = document.documentElement.style;
+  root.setProperty("--toolbar-sticky-top", `${topbarHeight}px`);
+  root.setProperty("--profile-tabs-sticky-top", `${topbarHeight + toolbarHeight}px`);
+  root.setProperty("--filter-tabs-sticky-top", `${topbarHeight + toolbarHeight + profileTabsHeight + listTabsHeight}px`);
+  root.setProperty("--read-action-sticky-top", `${topbarHeight + toolbarHeight + profileTabsHeight + listTabsHeight + filterTabsHeight}px`);
+}
+
+window.addEventListener("resize", updateStickyOffsets);
+
+// 처음 방문처럼 저장된 직전 화면이 없을 때만, 서버 값이 오기 전의 기본값(전체 필터, 기본 정렬)이
+// 잠깐 보였다가 바뀌지 않게 가려둔다. 실패해도 영구히 가려지지 않게 finally에서 푼다.
+async function init() {
+  try {
+    await initState();
+  } finally {
+    document.body.classList.remove("state-pending");
+  }
+}
+
+async function initState() {
+  if (IS_PROFILE_VIEW) {
+    document.getElementById("settingsBtn").style.display = "none"; // 관리자 전용 기능이므로 프로필 화면엔 안 보임
+    document.getElementById("rescanBtn").style.display = "none"; // 재스캔도 관리자 전용(서버 API 자체도 막혀있음)
+    document.getElementById("profileViewTabs").style.display = "flex";
+    document.getElementById("profileTabMine").addEventListener("click", () => showProfileTab("mine"));
+    document.getElementById("profileTabBrowse").addEventListener("click", () => showProfileTab("browse"));
+  } else {
+    initProfilesAdminUI(); // 관리자 화면에서만 - PROFILES_ENABLED 켜져 있으면 섹션을 보여줌
+    initListTabs(); // 정주행 중 / 나중에 읽기 탭도 관리자 화면에서만
+  }
+  if (applyBootCache()) {
+    // 새로고침 직후에도 직전 화면 그대로 바로 그린다(서버 값이 오면 아래에서 조용히 갱신)
+    renderFilterTabs();
+    render();
+  } else {
+    document.body.classList.add("state-pending");
+    renderFilterTabs();
+  }
+  const [ok] = await Promise.all([fetchSeries(), loadFilterSettings(), loadSortSettings(), fetchScanStatus()]);
+  renderFilterTabs(); // 서버 값(및 knownPlatforms) 반영해서 다시 그림
+  if (IS_PROFILE_VIEW) {
+    try {
+      const res = await fetch(`/api/settings/${ACTIVE_TAB_KEY}`);
+      const data = await res.json();
+      if (data.value === "browse") showProfileTab("browse", /* skipSave */ true);
+    } catch (e) {
+      // 실패 시 기본값("내 웹툰") 유지
+    }
+  }
+  if (ok) {
+    render();
+    bootCacheSaveEnabled = true; // 서버 값을 제대로 받았으니 이제부터 현재 화면 상태를 저장한다
+    saveBootCache();
+  }
+  updateStickyOffsets();
+  maybeStartScanPolling();
+}
+
+// ---------- 공유 프로필: "내 웹툰" / "둘러보기" 탭 ----------
+
+function showProfileTab(name, skipSave) {
+  const mineBtn = document.getElementById("profileTabMine");
+  const browseBtn = document.getElementById("profileTabBrowse");
+  mineBtn.classList.toggle("active", name === "mine");
+  browseBtn.classList.toggle("active", name === "browse");
+  document.getElementById("grid").style.display = name === "mine" ? "" : "none";
+  document.getElementById("filterTabs").style.display = name === "mine" ? "" : "none";
+  document.getElementById("browseGrid").style.display = name === "browse" ? "" : "none";
+  if (name === "browse") fetchAndRenderBrowse();
+  if (!skipSave) {
+    fetch(`/api/settings/${ACTIVE_TAB_KEY}`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ value: name }),
+    });
+  }
+}
+
+let lastBrowseItems = []; // 검색어가 바뀔 때마다 API를 다시 부르지 않고 이 목록을 재필터링
+
+async function fetchAndRenderBrowse() {
+  const grid = document.getElementById("browseGrid");
+  grid.innerHTML = `<div class="empty-state">불러오는 중...</div>`;
+  try {
+    const res = await fetch("/api/browse");
+    if (!res.ok) throw new Error("browse fetch failed");
+    lastBrowseItems = await res.json();
+    renderBrowseGrid(filterBrowseItems(lastBrowseItems));
+  } catch (e) {
+    grid.innerHTML = `<div class="empty-state">불러오지 못했습니다.</div>`;
+  }
+}
+
+function filterBrowseItems(items) {
+  if (!query) return items;
+  const q = query.toLowerCase();
+  return items.filter((item) => item.title.toLowerCase().includes(q));
+}
+
+function renderBrowseGrid(items) {
+  const grid = document.getElementById("browseGrid");
+  if (!items.length) {
+    grid.innerHTML = query
+      ? `<div class="empty-state">검색 결과가 없습니다.</div>`
+      : `<div class="empty-state">둘러볼 수 있는 웹툰이 없습니다.</div>`;
+    return;
+  }
+  grid.innerHTML = "";
+  for (const item of items) {
+    const card = document.createElement("div");
+    card.className = "card";
+    const buttonLabel = item.request_status === "pending" ? "요청됨" : item.request_status === "rejected" ? "거부됨" : "보여주세요";
+    const buttonDisabled = item.request_status !== null;
+    card.innerHTML = `
+      <div class="cover-wrap">
+        <span class="platform-tag">${item.platform}</span>
+        <img src="${item.cover_url}" alt="${item.title}" loading="lazy">
+      </div>
+      <div class="title">${item.title}</div>
+      <div class="browse-card-actions">
+        <button class="browse-info-btn" title="정보 보기">ℹ</button>
+        <button class="browse-request-btn" ${buttonDisabled ? "disabled" : ""}>${buttonLabel}</button>
+      </div>
+    `;
+    card.querySelector(".browse-info-btn").addEventListener("click", (e) => {
+      e.stopPropagation();
+      openBrowseInfoSidebar(item);
+    });
+    card.querySelector(".browse-request-btn").addEventListener("click", async (e) => {
+      e.stopPropagation();
+      const btn = e.target;
+      btn.disabled = true;
+      btn.textContent = "요청 중...";
+      try {
+        const res = await fetch(`/api/browse/${item.id}/request`, { method: "POST" });
+        if (res.ok) {
+          btn.textContent = "요청됨";
+        } else {
+          btn.textContent = "보여주세요";
+          btn.disabled = false;
+        }
+      } catch (e2) {
+        btn.textContent = "보여주세요";
+        btn.disabled = false;
+      }
+    });
+    grid.appendChild(card);
+  }
+}
+
+// 검색어 상태(저장값/입력창/✕ 표시)만 바꾼다 - 화면은 호출한 쪽이 다시 그린다
+function storeQuery(value) {
+  query = value;
+  localStorage.setItem(LS_QUERY, query);
+  if (searchInput.value !== query) searchInput.value = query;
+  searchClear.hidden = query === "";
+}
+
+function setQuery(value) {
+  storeQuery(value);
+  render();
+  const browseGrid = document.getElementById("browseGrid");
+  if (browseGrid.style.display !== "none") {
+    renderBrowseGrid(filterBrowseItems(lastBrowseItems));
+  }
+}
+
+searchInput.addEventListener("input", (e) => setQuery(e.target.value));
+searchClear.addEventListener("click", () => {
+  setQuery("");
+  searchInput.focus();
+});
+sortSelect.addEventListener("change", (e) => {
+  sortModes[activeList] = e.target.value; // 지금 보고 있는 탭의 정렬만 바뀐다
+  fetch(`/api/settings/${sortKeyOf(activeList)}`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ value: sortModes[activeList] }),
+  });
+  render();
+});
+
+const rescanBtn = document.getElementById("rescanBtn");
+rescanBtn.addEventListener("click", async () => {
+  if (rescanBtn.disabled) return;
+  rescanBtn.disabled = true;
+  rescanBtn.classList.add("spinning");
+  try {
+    await fetch("/api/rescan", { method: "POST" });
+    await load();
+  } catch (e) {
+    // 실패해도 조용히 무시 (다음에 다시 시도 가능)
+  } finally {
+    rescanBtn.disabled = false;
+    rescanBtn.classList.remove("spinning");
+  }
+});
+
+// ---------------------------------------------------------------------
+// 당겨서 새로고침(pull-to-refresh) - 맨 위로 스크롤된 상태에서 아래로 당기면 페이지를
+// 그대로 새로고침한다(재스캔 아님, 그냥 location.reload()). PWA(홈 화면에 추가)로
+// 열었을 때는 브라우저 기본 pull-to-refresh가 없어서, 터치 이벤트로 직접 구현한다.
+(function setupPullToRefresh() {
+  const indicator = document.getElementById("pullToRefreshIndicator");
+  const PULL_THRESHOLD = 70; // 이 정도 당겨야 "놓으면 새로고침"으로 인정
+  const MAX_PULL = 100; // 아무리 더 당겨도 인디케이터 높이는 여기까지만
+  let startY = null;
+  let pulling = false;
+  let refreshing = false;
+
+  function anyOverlayOpen() {
+    return document.querySelectorAll(".sidebar-overlay.open").length > 0;
+  }
+
+  function atTop() {
+    return (document.scrollingElement || document.documentElement).scrollTop <= 0;
+  }
+
+  document.addEventListener(
+    "touchstart",
+    (e) => {
+      if (refreshing || anyOverlayOpen() || !atTop() || e.touches.length !== 1) {
+        startY = null;
+        return;
+      }
+      startY = e.touches[0].clientY;
+      pulling = false;
+    },
+    { passive: true }
+  );
+
+  document.addEventListener(
+    "touchmove",
+    (e) => {
+      if (startY === null || refreshing) return;
+      const delta = e.touches[0].clientY - startY;
+      if (delta <= 0) {
+        // 위로 스크롤하는 정상적인 동작이면 당기기를 취소하고 원래 스크롤에 맡긴다.
+        if (pulling) {
+          pulling = false;
+          indicator.classList.remove("pulling");
+          indicator.style.height = "0px";
+        }
+        return;
+      }
+      if (!atTop()) return; // 스크롤이 이미 내려간 상태면 당기기로 취급하지 않음
+      // PWA(홈 화면에 추가) 독립 실행 모드에서는 브라우저가 이 제스처를 자체적인
+      // 고무줄 튕김/새로고침 동작으로 먼저 가져가버려서 우리 핸들러까지 손가락 움직임이
+      // 제대로 전달 안 되는 경우가 있다 - 그래서 당기는 중임이 확인되면 브라우저 기본
+      // 동작을 명시적으로 막아서(preventDefault) 이 제스처를 완전히 가로챈다.
+      e.preventDefault();
+      pulling = true;
+      indicator.classList.add("pulling");
+      const pulled = Math.min(delta * 0.5, MAX_PULL); // 실제 손가락 이동보다 절반만 반영(고무줄 느낌)
+      indicator.style.height = `${pulled}px`;
+      indicator.querySelector(".pull-refresh-spinner").style.transform =
+        `rotate(${Math.min(pulled / PULL_THRESHOLD, 1) * 360}deg)`;
+    },
+    { passive: false }
+  );
+
+  document.addEventListener("touchend", async () => {
+    if (!pulling) {
+      startY = null;
+      return;
+    }
+    const pulledHeight = parseFloat(indicator.style.height) || 0;
+    pulling = false;
+    startY = null;
+
+    if (pulledHeight < PULL_THRESHOLD * 0.5) {
+      indicator.classList.remove("pulling");
+      indicator.style.height = "0px";
+      return;
+    }
+
+    refreshing = true;
+    indicator.classList.remove("pulling");
+    indicator.classList.add("refreshing");
+    indicator.style.height = `${PULL_THRESHOLD}px`;
+    location.reload(); // 말 그대로 페이지 새로고침(재스캔 아님)
+  });
+})();
+
+// ---------------------------------------------------------------------
+// 설정 패널: 시리즈 폴더 제외/포함 + 백업/복원
+// ---------------------------------------------------------------------
+
+const settingsPanel = document.getElementById("settingsPanel");
+
+function folderLabel(f) {
+  return `${f.platform} / ${f.series}`;
+}
+
+function clearPlaceholder(container) {
+  const placeholder = container.querySelector(".picker-loading, .empty-state");
+  if (placeholder) placeholder.remove();
+}
+
+function maybeShowEmptyPlaceholder(container, message) {
+  if (container.children.length === 0) {
+    container.innerHTML = `<div class="picker-loading">${message}</div>`;
+  }
+}
+
+function createFolderRow(f, included) {
+  const row = document.createElement("div");
+  row.className = "lib-row";
+  const action = included ? "exclude" : "include";
+  const label = included ? "제외" : "다시 추가";
+  row.innerHTML = `
+    <span class="lib-name">${folderLabel(f)}</span>
+    <button class="lib-action-btn${included ? "" : " add"}" data-action="${action}">${label}</button>
+  `;
+  const btn = row.querySelector("button");
+  btn.addEventListener("click", () => handleFolderToggle(f, included, row, btn));
+  return row;
+}
+
+async function handleFolderToggle(f, wasIncluded, row, btn) {
+  const action = wasIncluded ? "exclude" : "include";
+  btn.disabled = true;
+  try {
+    const res = await fetch(`/api/series-folders/${action}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ platform: f.platform, series: f.series }),
+    });
+    if (!res.ok) throw new Error("요청 실패");
+
+    // 목록 전체를 다시 그리지 않고, 이 항목만 반대쪽 목록으로 옮김
+    // (전체 재렌더링을 하면 스크롤 위치가 맨 위로 초기화되어 버림)
+    const includedEl = document.getElementById("includedFolderList");
+    const excludedEl = document.getElementById("excludedFolderList");
+    const fromEl = wasIncluded ? includedEl : excludedEl;
+    const toEl = wasIncluded ? excludedEl : includedEl;
+
+    row.remove();
+    maybeShowEmptyPlaceholder(fromEl, wasIncluded ? "스캔 중인 폴더가 없습니다." : "제외된 폴더가 없습니다.");
+
+    clearPlaceholder(toEl);
+    // 방금 옮겨진 항목이 눈에 잘 띄도록 맨 아래가 아니라 맨 위에 넣음
+    toEl.prepend(createFolderRow(f, !wasIncluded));
+
+    await load(); // 메인 시리즈 목록(그리드) 갱신
+  } catch (e) {
+    // 실패하면 그대로 둠 (버튼만 다시 활성화)
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+async function renderFolderLists() {
+  const includedEl = document.getElementById("includedFolderList");
+  const excludedEl = document.getElementById("excludedFolderList");
+  includedEl.innerHTML = `<div class="picker-loading">불러오는 중...</div>`;
+  excludedEl.innerHTML = "";
+
+  let data;
+  try {
+    const res = await fetch("/api/series-folders");
+    data = await res.json();
+  } catch (e) {
+    includedEl.innerHTML = `<div class="empty-state">불러오지 못했습니다.</div>`;
+    return;
+  }
+
+  includedEl.innerHTML = "";
+  if (data.included.length === 0) {
+    includedEl.innerHTML = `<div class="picker-loading">스캔 중인 폴더가 없습니다.</div>`;
+  }
+  for (const f of data.included) {
+    includedEl.appendChild(createFolderRow(f, true));
+  }
+
+  excludedEl.innerHTML = "";
+  if (data.excluded.length === 0) {
+    excludedEl.innerHTML = `<div class="picker-loading">제외된 폴더가 없습니다.</div>`;
+  }
+  for (const f of data.excluded) {
+    excludedEl.appendChild(createFolderRow(f, false));
+  }
+}
+
+const READER_SCOPE_SETTING_KEY = "reader_settings_scope";
+
+async function renderReaderScopeButtons() {
+  let scope = "global";
+  try {
+    const res = await fetch(`/api/settings/${READER_SCOPE_SETTING_KEY}`);
+    const data = await res.json();
+    if (data.value === "per_series") scope = "per_series";
+  } catch (e) {
+    // 못 받아와도 기본값(전체 공통)으로 표시
+  }
+  for (const btn of document.querySelectorAll(".scope-btn")) {
+    btn.classList.toggle("active", btn.dataset.scope === scope);
+  }
+}
+
+for (const btn of document.querySelectorAll(".scope-btn")) {
+  btn.addEventListener("click", async () => {
+    await fetch(`/api/settings/${READER_SCOPE_SETTING_KEY}`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ value: btn.dataset.scope }),
+    });
+    renderReaderScopeButtons();
+  });
+}
+
+const OVERLAP_PRECOMPUTE_SETTING_KEY = "overlap_precompute_enabled";
+
+async function renderOverlapPrecomputeButtons() {
+  let enabled = "true";
+  try {
+    const res = await fetch(`/api/settings/${OVERLAP_PRECOMPUTE_SETTING_KEY}`);
+    const data = await res.json();
+    if (data.value === "false") enabled = "false";
+  } catch (e) {
+    // 못 받아와도 기본값(켜짐)으로 표시
+  }
+  for (const btn of document.querySelectorAll(".overlap-toggle-btn")) {
+    btn.classList.toggle("active", btn.dataset.enabled === enabled);
+  }
+}
+
+for (const btn of document.querySelectorAll(".overlap-toggle-btn")) {
+  btn.addEventListener("click", async () => {
+    await fetch(`/api/settings/${OVERLAP_PRECOMPUTE_SETTING_KEY}`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ value: btn.dataset.enabled }),
+    });
+    renderOverlapPrecomputeButtons();
+  });
+}
+
+function openSettingsPanel() {
+  settingsPanel.classList.add("open");
+  settingsOverlay.classList.add("open");
+  renderFolderLists();
+  renderReaderScopeButtons();
+  renderOverlapPrecomputeButtons();
+}
+function closeSettingsPanel() {
+  settingsPanel.classList.remove("open");
+  settingsOverlay.classList.remove("open");
+}
+
+const settingsOverlay = document.getElementById("settingsOverlay");
+document.getElementById("settingsBtn").addEventListener("click", () => {
+  if (settingsPanel.classList.contains("open")) closeSettingsPanel();
+  else openSettingsPanel();
+});
+document.getElementById("settingsClose").addEventListener("click", closeSettingsPanel);
+settingsOverlay.addEventListener("click", closeSettingsPanel);
+
+const restoreFileInput = document.getElementById("restoreFileInput");
+document.getElementById("restoreBtn").addEventListener("click", () => {
+  restoreFileInput.click();
+});
+restoreFileInput.addEventListener("change", async () => {
+  const file = restoreFileInput.files[0];
+  if (!file) return;
+  if (!confirm("현재 저장된 읽음 진행률/설정을 백업 파일 내용으로 덮어씁니다. 계속할까요?")) {
+    restoreFileInput.value = "";
+    return;
+  }
+  try {
+    const text = await file.text();
+    const data = JSON.parse(text);
+    const res = await fetch("/api/restore", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(data),
+    });
+    if (!res.ok) throw new Error("restore failed");
+    alert("복원이 완료되었습니다.");
+    await load();
+    await renderFolderLists();
+  } catch (e) {
+    alert("복원에 실패했습니다. 올바른 백업 파일인지 확인해주세요.");
+  } finally {
+    restoreFileInput.value = "";
+  }
+});
+
+// ---------------------------------------------------------------------
+// 회차 목록 사이드바 (페이지 이동 없이 목록 화면에서 바로 펼침)
+// ---------------------------------------------------------------------
+
+const chapterSidebar = document.getElementById("chapterSidebar");
+const chapterSidebarOverlay = document.getElementById("chapterSidebarOverlay");
+const chapterSidebarList = document.getElementById("chapterSidebarList");
+const chapterSidebarTitle = document.getElementById("chapterSidebarTitle");
+
+function positionChapterSidebarList(chapters) {
+  if (!Array.isArray(chapters) || chapters.length === 0) return;
+
+  // DOM 렌더링이 끝난 다음 실제 높이를 계산해야 정확한 스크롤 위치를 잡을 수 있음.
+  requestAnimationFrame(() => {
+    const container = chapterSidebarList;
+    const rows = [...container.querySelectorAll(".sidebar-row")];
+    if (!rows.length || container.scrollHeight <= container.clientHeight) return;
+
+    const isCompleted = chapters.every((ch) => ch.read);
+    if (isCompleted) {
+      // 완독한 웹툰은 목록의 마지막 회차가 화면에 보이도록 끝으로 이동.
+      rows[rows.length - 1].scrollIntoView({ block: "end", behavior: "auto" });
+      return;
+    }
+
+    // 읽는 중 또는 읽지 않음 중 목록에서 가장 먼저 나오는 회차를 기준으로 중앙 정렬.
+    // reading 상태가 없는 경우에도 첫 번째 미읽음 회차를 대상으로 한다.
+    const firstUnfinishedChapter = chapters.find((ch) => !ch.read);
+    if (!firstUnfinishedChapter) return;
+
+    const target = rows.find((row) => row.dataset.chapterId === firstUnfinishedChapter.id);
+    if (target) target.scrollIntoView({ block: "center", behavior: "auto" });
+  });
+}
+
+function setChapterSidebarTitle(title) {
+  chapterSidebarTitle.textContent = title;
+  chapterSidebarTitle.title = title; // 2줄을 넘어 말줄임된 제목도 길게 누르면/올려두면 전체가 보이게
+}
+
+async function openChapterSidebar(series) {
+  setChapterSidebarTitle(series.title);
+  updateSidebarMoveButton(series);
+  chapterSidebarList.style.display = ""; // 둘러보기 정보 화면에서 숨겨뒀을 수 있으니 복원
+  chapterSidebarList.innerHTML = `<div class="picker-loading">불러오는 중...</div>`;
+  chapterSidebar.classList.add("open");
+  chapterSidebarOverlay.classList.add("open");
+
+  renderSeriesInfoPanel(series.id); // info.xml이 없으면(대부분의 네이버 등) 조용히 숨겨짐
+
+  let data;
+  try {
+    const res = await fetch(`/api/series/${encodeURIComponent(series.id)}/chapters`);
+    data = await res.json();
+  } catch (e) {
+    chapterSidebarList.innerHTML = `<div class="empty-state">회차 목록을 불러오지 못했습니다.</div>`;
+    return;
+  }
+
+  chapterSidebarList.innerHTML = "";
+  // 오름차순 그대로 (최신화가 맨 아래로) - 리더 화면 사이드바와 동일한 순서
+  for (const ch of data.chapters) {
+    const row = document.createElement("div");
+    row.className = "sidebar-row";
+    row.dataset.chapterId = ch.id;
+    row.title = "클릭하면 읽음/안읽음이 바뀝니다";
+    renderChapterRowStatus(row, ch);
+    row.addEventListener("click", () => toggleChapterReadState(series, ch));
+    chapterSidebarList.appendChild(row);
+  }
+
+  positionChapterSidebarList(data.chapters);
+}
+
+function renderChapterRowStatus(row, ch) {
+  const statusText = ch.read ? "읽음" : ch.reading ? "읽는 중" : "";
+  const statusClass = ch.read ? "read" : ch.reading ? "reading" : "";
+  row.innerHTML = `
+    <span class="sidebar-row-label">${ch.label}</span>
+    <span class="sidebar-row-status${statusClass ? " " + statusClass : ""}">${statusText}</span>
+  `;
+}
+
+async function toggleChapterReadState(series, ch) {
+  if (chapterSidebarList.dataset.busy === "1") return; // 응답 오기 전 중복 클릭 방지
+  chapterSidebarList.dataset.busy = "1";
+  try {
+    // 리더에서 자연스럽게 스크롤해서 읽어나가는 것과 똑같이 "이 회차까지(포함) 이전
+    // 전부"를 읽음/안읽음으로 처리한다(그 회차 하나만 콕 집어 바꾸는 게 아니라) -
+    // 이미 읽은 회차를 다시 누르면 그 회차부터 이후 전부가 안읽음으로 되돌아간다.
+    const res = await fetch(`/api/series/${encodeURIComponent(series.id)}/read-state`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ scope: "chapter", read: !ch.read, chapter_id: ch.id }),
+    });
+    if (!res.ok) throw new Error("toggle failed");
+    // 이 회차 하나만이 아니라 앞뒤 여러 회차의 상태가 같이 바뀌었을 수 있으니,
+    // 사이드바 전체를 다시 불러와서 정확하게 다시 그린다.
+    await openChapterSidebar(series);
+    load(); // 메인 화면의 안읽음 배지/진행률도 갱신 (기다리지 않고 백그라운드로)
+  } catch (e) {
+    // 실패해도 조용히 무시 - 표시는 그대로 두고 다시 시도할 수 있게 함
+  } finally {
+    chapterSidebarList.dataset.busy = "0";
+  }
+}
+
+const chapterSidebarInfo = document.getElementById("chapterSidebarInfo");
+const chapterSidebarOrigin = document.getElementById("chapterSidebarOrigin");
+
+function formatNotesRow(notes) {
+  // "원작: 이우혁"처럼 "라벨: 값" 형태면 다른 항목들과 똑같이 라벨만 볼드로 표시.
+  // 콜론이 없는 자유 텍스트면 그냥 원문 그대로 보여준다.
+  const match = notes.match(/^([^:：]{1,10})[:：]\s*(.+)$/s);
+  if (match) {
+    return `<div class="series-info-row"><b>${match[1].trim()}</b> ${match[2].trim()}</div>`;
+  }
+  return `<div class="series-info-row">${notes}</div>`;
+}
+
+async function renderSeriesInfoPanel(seriesId) {
+  chapterSidebarInfo.style.display = "none";
+  chapterSidebarInfo.innerHTML = "";
+  chapterSidebarOrigin.hidden = true;
+  let info;
+  try {
+    const res = await fetch(`/api/series/${encodeURIComponent(seriesId)}/info`);
+    if (!res.ok) return; // info.xml 없는 시리즈(네이버 등) - 그냥 아무것도 안 보여줌
+    info = await res.json();
+  } catch (e) {
+    return;
+  }
+
+  const rows = [];
+  if (info.writer) rows.push(`<div class="series-info-row"><b>작가</b> ${info.writer}</div>`);
+  if (info.cover_artist) rows.push(`<div class="series-info-row"><b>그림</b> ${info.cover_artist}</div>`);
+  if (info.notes) rows.push(formatNotesRow(info.notes));
+  if (info.genre) rows.push(`<div class="series-info-row"><b>장르</b> ${info.genre}</div>`);
+  if (info.age_rating) rows.push(`<div class="series-info-row"><b>연령등급</b> ${info.age_rating}</div>`);
+  if (info.summary) rows.push(`<div class="series-info-summary">${info.summary.replace(/\s*\n\s*/g, " ").trim()}</div>`);
+  if (info.web_url) {
+    chapterSidebarOrigin.href = info.web_url;
+    chapterSidebarOrigin.hidden = false;
+  }
+
+  if (rows.length === 0) return;
+  chapterSidebarInfo.innerHTML = rows.join("");
+  chapterSidebarInfo.style.display = "block";
+}
+
+function closeChapterSidebar() {
+  chapterSidebar.classList.remove("open");
+  chapterSidebarOverlay.classList.remove("open");
+}
+
+document.getElementById("chapterSidebarClose").addEventListener("click", closeChapterSidebar);
+chapterSidebarOverlay.addEventListener("click", closeChapterSidebar);
+
+// 브라우저 자체 뒤로가기(bfcache)로 이 페이지에 돌아오면, 페이지가 새로 실행되지 않고
+// 리더에서 나가기 전의 예전 화면을 메모리에서 그대로 복원해버려서 안읽음 개수 등이
+// 갱신 안 된 채로 보인다. event.persisted가 true면 정확히 이 경우이므로, 그때만
+// 최신 데이터를 다시 불러온다.
+window.addEventListener("pageshow", (event) => {
+  if (event.persisted) {
+    hideOpenLoading();
+    load();
+  }
+});
+
+// =====================================================================
+// 공유 프로필 관리 (관리자 화면 전용). PROFILES_ENABLED가 꺼져있으면
+// /api/admin/profiles 자체가 404라서, 그걸로 기능 켜짐 여부를 판단하고
+// 꺼져있으면 섹션 자체를 숨긴 채로 조용히 끝난다.
+// =====================================================================
+
+const NO_AGE_RATING = "__no_rating__"; // profiles.py의 같은 이름 상수와 반드시 일치해야 함
+let profileAgeRatingsCache = null;
+let profileSeriesCatalogCache = null;
+let editingProfileId = null;
+
+function openBrowseInfoSidebar(item) {
+  // 회차 목록은 시도하지 않는다 - 둘러보기 항목은 아직 허용 전이라 403이 날 것이므로,
+  // 회차 목록 영역 자체를 숨겨서 info.xml 내용만 사이드바 전체에 길게 나오게 한다.
+  setChapterSidebarTitle(item.title);
+  document.getElementById("chapterSidebarMove").hidden = true; // 둘러보기 항목은 아직 내 목록에 없어서 옮길 수 없다
+  chapterSidebarList.innerHTML = "";
+  chapterSidebarList.style.display = "none";
+  chapterSidebar.classList.add("open");
+  chapterSidebarOverlay.classList.add("open");
+  renderSeriesInfoPanel(item.id);
+}
+
+function simplifyDeviceLabel(userAgent) {
+  // User-Agent 원문은 길고 안 읽히므로, 흔한 브라우저/OS 이름만 뽑아서 "브라우저 · OS"
+  // 형태로 보여준다. 못 알아보는 값이면 원문을 그대로 보여준다(잘라내서 정보를 숨기지 않음).
+  const browser =
+    /Edg\//.test(userAgent) ? "Edge" :
+    /Chrome\//.test(userAgent) ? "Chrome" :
+    /Firefox\//.test(userAgent) ? "Firefox" :
+    /Safari\//.test(userAgent) && !/Chrome/.test(userAgent) ? "Safari" :
+    null;
+  const os =
+    /Windows/.test(userAgent) ? "Windows" :
+    /Android/.test(userAgent) ? "Android" :
+    /iPhone|iPad/.test(userAgent) ? "iOS" :
+    /Mac OS X/.test(userAgent) ? "macOS" :
+    /Linux/.test(userAgent) ? "Linux" :
+    null;
+  if (browser && os) return `${browser} · ${os}`;
+  if (browser) return browser;
+  return userAgent.slice(0, 40);
+}
+
+async function initProfilesAdminUI() {
+  try {
+    const res = await fetch("/api/admin/profiles");
+    if (!res.ok) return;
+  } catch (e) {
+    return;
+  }
+  document.getElementById("profilesSection").style.display = "";
+  document.getElementById("addProfileBtn").addEventListener("click", createNewProfile);
+  document.getElementById("profileEditClose").addEventListener("click", closeProfileEditor);
+  document.getElementById("profileEditOverlay").addEventListener("click", closeProfileEditor);
+  document.getElementById("profileCopyUrlBtn").addEventListener("click", copyProfileUrl);
+  document.getElementById("profileReissueBtn").addEventListener("click", reissueProfileToken);
+  document.getElementById("profileSaveBtn").addEventListener("click", saveProfileEditor);
+  document.getElementById("profileDeleteBtn").addEventListener("click", deleteCurrentProfile);
+  document.getElementById("profileSeriesPlatformFilter").addEventListener("change", () => renderProfileSeriesChecklist());
+  document.getElementById("profileSeriesAgeFilter").addEventListener("change", () => renderProfileSeriesChecklist());
+  document.getElementById("devicesSection").style.display = "";
+  await Promise.all([refreshProfilesList(), refreshDevicesList()]);
+}
+
+async function refreshDevicesList() {
+  const res = await fetch("/api/auth/devices");
+  if (!res.ok) return;
+  const devices = await res.json();
+  const container = document.getElementById("devicesList");
+  container.innerHTML = "";
+  if (!devices.length) {
+    container.innerHTML = `<div class="settings-hint">등록된 기기가 없습니다.</div>`;
+    return;
+  }
+  for (const device of devices) {
+    const row = document.createElement("div");
+    row.className = "lib-row";
+    const lastSeen = new Date(device.last_seen_at).toLocaleString("ko-KR");
+    row.innerHTML = `
+      <span class="lib-name">${simplifyDeviceLabel(device.label)} <span class="profile-allowed-count">마지막 접속: ${lastSeen}</span></span>
+      <button class="lib-action-btn">삭제</button>
+    `;
+    row.querySelector(".lib-action-btn").addEventListener("click", async () => {
+      if (!confirm("이 기기를 삭제하시겠습니까? 다음 접속 때 비밀번호를 다시 물어봅니다.")) return;
+      await fetch(`/api/auth/devices/${device.device_id}`, { method: "DELETE" });
+      refreshDevicesList();
+    });
+    container.appendChild(row);
+  }
+}
+
+async function refreshProfilesList() {
+  const res = await fetch("/api/admin/profiles");
+  const list = await res.json();
+  const container = document.getElementById("profilesList");
+  container.innerHTML = "";
+  for (const profile of list) {
+    const row = document.createElement("div");
+    row.className = "lib-row";
+    const badge = profile.pending_request_count > 0
+      ? `<span class="profile-pending-badge">요청 ${profile.pending_request_count}</span>`
+      : "";
+    const deviceBadge = profile.pending_device_request_count > 0
+      ? `<span class="profile-pending-badge device">기기 ${profile.pending_device_request_count}</span>`
+      : "";
+    row.innerHTML = `
+      <span class="lib-name">${profile.name}${badge}${deviceBadge} <span class="profile-allowed-count">허용 ${profile.allowed_count}개</span></span>
+      <button class="lib-action-btn">편집</button>
+    `;
+    row.querySelector(".lib-action-btn").addEventListener("click", () => openProfileEditor(profile.id));
+    container.appendChild(row);
+  }
+}
+
+async function createNewProfile() {
+  const name = prompt("프로필 이름을 입력하세요 (예: 딸)");
+  if (!name || !name.trim()) return;
+  const res = await fetch("/api/admin/profiles", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ name: name.trim() }),
+  });
+  if (!res.ok) return;
+  const created = await res.json();
+  await refreshProfilesList();
+  openProfileEditor(created.id);
+}
+
+async function openProfileEditor(profileId) {
+  editingProfileId = profileId;
+  const [profilesRes, filtersRes, allowedRes, requestsRes, timeWindowsRes, deviceRequestsRes] = await Promise.all([
+    fetch("/api/admin/profiles"),
+    fetch(`/api/admin/profiles/${profileId}/browse-filters`),
+    fetch(`/api/admin/profiles/${profileId}/allowed-series`),
+    fetch(`/api/admin/profiles/${profileId}/requests`),
+    fetch(`/api/admin/profiles/${profileId}/time-windows`),
+    fetch(`/api/admin/profiles/${profileId}/device-requests`),
+  ]);
+  const profilesList = await profilesRes.json();
+  const profile = profilesList.find((p) => p.id === profileId);
+  const browseFilters = await filtersRes.json();
+  const allowedIds = new Set(await allowedRes.json());
+  const requests = await requestsRes.json();
+  const timeWindows = await timeWindowsRes.json();
+  const deviceRequests = await deviceRequestsRes.json();
+
+  // 매번 새로 불러온다(캐시 안 함) - 원드라이브처럼 느린 플랫폼은 스캔이 늦게 끝나니,
+  // 관리자가 이 화면을 스캔 완료 전에 한 번이라도 열면 그 시점의 불완전한 목록이
+  // 캐시되어 새로고침 전까지 계속 남아있는 문제가 있었다.
+  profileAgeRatingsCache = await (await fetch("/api/admin/age-ratings")).json();
+  profileSeriesCatalogCache = await (await fetch("/api/admin/series-catalog")).json();
+
+  document.getElementById("profileEditTitle").textContent = `"${profile.name}" 프로필 편집`;
+  document.getElementById("profileNameInput").value = profile.name;
+  document.getElementById("profileUrlDisplay").textContent = `${location.origin}${WebtoonPaths.appPath(`/p/${profile.token}`)}`;
+
+  renderProfileBrowseFilters(browseFilters);
+  renderProfileTimeWindows(timeWindows);
+  renderProfileRequests(requests, profileId);
+  renderProfileDeviceRequests(deviceRequests, profileId);
+  populateProfileSeriesFilterOptions();
+  const allowedListContainer = document.getElementById("profileAllowedSeriesList");
+  // renderProfileSeriesChecklist()는 "필터를 바꿔도 체크 상태를 잃지 않도록" 화면에
+  // 남아있는 체크박스를 읽어서 dataset.allowed에 병합하는데, 다른 프로필의 편집
+  // 화면을 열 때 이전 프로필의 체크박스가 아직 DOM에 남아있으면 그 상태가 이번
+  // 프로필로 섞여 들어가 버린다(실제로 이 버그로 프로필 간 허용목록이 서로 새는
+  // 문제가 있었다). 그래서 새로 여는 시점에는 반드시 먼저 비워서, 아래
+  // renderProfileSeriesChecklist()가 병합할 대상이 하나도 없게 한다.
+  allowedListContainer.innerHTML = "";
+  allowedListContainer.dataset.allowed = JSON.stringify([...allowedIds]);
+  renderProfileSeriesChecklist();
+
+  document.getElementById("profileEditPanel").classList.add("open");
+  document.getElementById("profileEditOverlay").classList.add("open");
+}
+
+function closeProfileEditor() {
+  document.getElementById("profileEditPanel").classList.remove("open");
+  document.getElementById("profileEditOverlay").classList.remove("open");
+  editingProfileId = null;
+}
+
+function renderProfileBrowseFilters(currentFilters) {
+  const currentSet = new Set(currentFilters.map((f) => `${f.platform}::${f.age_rating}`));
+  const container = document.getElementById("profileBrowseFiltersList");
+  container.innerHTML = "";
+  for (const [platform, info] of Object.entries(profileAgeRatingsCache)) {
+    const group = document.createElement("div");
+    group.className = "profile-filter-group";
+    const labels = [...info.ratings, ...(info.has_unrated ? ["정보없음"] : [])];
+    const values = [...info.ratings, ...(info.has_unrated ? [NO_AGE_RATING] : [])];
+    const checkboxes = values
+      .map((value, i) => {
+        const checked = currentSet.has(`${platform}::${value}`) ? "checked" : "";
+        return `<label><input type="checkbox" data-platform="${platform}" data-age="${value}" ${checked}> ${labels[i]}</label>`;
+      })
+      .join("");
+    group.innerHTML = `<div class="profile-filter-platform">${platform}</div>${checkboxes}`;
+    container.appendChild(group);
+  }
+}
+
+function collectProfileBrowseFilters() {
+  const filters = [];
+  document.querySelectorAll("#profileBrowseFiltersList input[type=checkbox]:checked").forEach((el) => {
+    filters.push({ platform: el.dataset.platform, age_rating: el.dataset.age });
+  });
+  return filters;
+}
+
+const TIME_WINDOW_DAY_LABELS = ["월", "화", "수", "목", "금", "토", "일"];
+
+function renderProfileTimeWindows(currentWindows) {
+  const byDay = {};
+  for (const w of currentWindows) byDay[w.day_of_week] = w;
+
+  const container = document.getElementById("profileTimeWindowsList");
+  container.innerHTML = "";
+  for (let day = 0; day < 7; day++) {
+    const existing = byDay[day];
+    const row = document.createElement("div");
+    row.className = "profile-time-window-row";
+    const startStr = existing ? minutesToTimeStr(existing.start_minute) : "18:00";
+    const endStr = existing ? minutesToTimeStr(existing.end_minute) : "21:00";
+    row.innerHTML = `
+      <label><input type="checkbox" data-day="${day}" ${existing ? "checked" : ""}> ${TIME_WINDOW_DAY_LABELS[day]}</label>
+      <input type="time" class="time-window-start" value="${startStr}">
+      <span>~</span>
+      <input type="time" class="time-window-end" value="${endStr}">
+    `;
+    container.appendChild(row);
+  }
+}
+
+function minutesToTimeStr(minutes) {
+  const h = String(Math.floor(minutes / 60)).padStart(2, "0");
+  const m = String(minutes % 60).padStart(2, "0");
+  return `${h}:${m}`;
+}
+
+function timeStrToMinutes(str) {
+  const [h, m] = str.split(":").map(Number);
+  return h * 60 + m;
+}
+
+function collectProfileTimeWindows() {
+  const windows = [];
+  document.querySelectorAll("#profileTimeWindowsList .profile-time-window-row").forEach((row) => {
+    const checkbox = row.querySelector("input[type=checkbox]");
+    if (!checkbox.checked) return;
+    const start = timeStrToMinutes(row.querySelector(".time-window-start").value);
+    const end = timeStrToMinutes(row.querySelector(".time-window-end").value);
+    windows.push({ day_of_week: Number(checkbox.dataset.day), start_minute: start, end_minute: end });
+  });
+  return windows;
+}
+
+function renderProfileRequests(requests, profileId) {
+  const container = document.getElementById("profileRequestsList");
+  const pending = requests.filter((r) => r.status === "pending");
+  if (!pending.length) {
+    container.innerHTML = `<div class="settings-hint">대기중인 요청이 없습니다.</div>`;
+    return;
+  }
+  container.innerHTML = "";
+  for (const req of pending) {
+    const series = profileSeriesCatalogCache.find((s) => s.id === req.series_id);
+    const row = document.createElement("div");
+    row.className = "lib-row";
+    row.innerHTML = `
+      <span class="lib-name">${series ? series.title : req.series_id}</span>
+      <button class="lib-action-btn add" data-action="approve">허용</button>
+      <button class="lib-action-btn" data-action="reject">거부</button>
+    `;
+    row.querySelector('[data-action="approve"]').addEventListener("click", async () => {
+      const allowedIds = new Set(JSON.parse(document.getElementById("profileAllowedSeriesList").dataset.allowed || "[]"));
+      allowedIds.add(req.series_id);
+      await fetch(`/api/admin/profiles/${profileId}/allowed-series`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ series_ids: [...allowedIds] }),
+      });
+      openProfileEditor(profileId);
+    });
+    row.querySelector('[data-action="reject"]').addEventListener("click", async () => {
+      await fetch(`/api/admin/profiles/${profileId}/requests/${req.series_id}/reject`, { method: "POST" });
+      openProfileEditor(profileId);
+    });
+    container.appendChild(row);
+  }
+}
+
+function renderProfileDeviceRequests(deviceRequests, profileId) {
+  const container = document.getElementById("profileDeviceRequestsList");
+  if (!deviceRequests.length) {
+    container.innerHTML = `<div class="settings-hint">대기중인 기기 승인 요청이 없습니다.</div>`;
+    return;
+  }
+  container.innerHTML = "";
+  for (const req of deviceRequests) {
+    const row = document.createElement("div");
+    row.className = "lib-row";
+    const requestedAt = new Date(req.requested_at).toLocaleString("ko-KR");
+    row.innerHTML = `
+      <span class="lib-name">${simplifyDeviceLabel(req.label)} <span class="profile-allowed-count">요청: ${requestedAt}</span></span>
+      <button class="lib-action-btn add" data-action="approve">승인</button>
+      <button class="lib-action-btn" data-action="reject">거부</button>
+    `;
+    row.querySelector('[data-action="approve"]').addEventListener("click", async () => {
+      await fetch(`/api/admin/profiles/${profileId}/device-requests/${req.device_id}/approve`, { method: "POST" });
+      openProfileEditor(profileId);
+    });
+    row.querySelector('[data-action="reject"]').addEventListener("click", async () => {
+      await fetch(`/api/admin/profiles/${profileId}/device-requests/${req.device_id}/reject`, { method: "POST" });
+      openProfileEditor(profileId);
+    });
+    container.appendChild(row);
+  }
+}
+
+function populateProfileSeriesFilterOptions() {
+  const platformSelect = document.getElementById("profileSeriesPlatformFilter");
+  const ageSelect = document.getElementById("profileSeriesAgeFilter");
+  const platforms = [...new Set(profileSeriesCatalogCache.map((s) => s.platform))].sort();
+  platformSelect.innerHTML = `<option value="">플랫폼 전체</option>` + platforms.map((p) => `<option value="${p}">${p}</option>`).join("");
+  const ages = [...new Set(profileSeriesCatalogCache.map((s) => s.age_rating).filter(Boolean))].sort();
+  ageSelect.innerHTML = `<option value="">연령 전체</option>` + ages.map((a) => `<option value="${a}">${a}</option>`).join("");
+}
+
+function renderProfileSeriesChecklist() {
+  const container = document.getElementById("profileAllowedSeriesList");
+  // 지금 필터로 안 보이게 된 항목의 체크 상태도 잃지 않도록, 화면을 새로 그리기 전에
+  // "지금 보이는 것들"의 현재 체크 상태를 먼저 dataset(전체 허용목록)에 반영해둔다.
+  const allowedIds = new Set(JSON.parse(container.dataset.allowed || "[]"));
+  container.querySelectorAll("input[type=checkbox]").forEach((el) => {
+    if (el.checked) allowedIds.add(el.value);
+    else allowedIds.delete(el.value);
+  });
+  container.dataset.allowed = JSON.stringify([...allowedIds]);
+
+  const platformFilter = document.getElementById("profileSeriesPlatformFilter").value;
+  const ageFilter = document.getElementById("profileSeriesAgeFilter").value;
+  let list = profileSeriesCatalogCache;
+  if (platformFilter) list = list.filter((s) => s.platform === platformFilter);
+  if (ageFilter) list = list.filter((s) => s.age_rating === ageFilter);
+  // 이미 허용된 시리즈를 목록 맨 위로 - 카탈로그가 크면 지금 허용 상태가 어떤지
+  // 스크롤해서 찾아야 해서 불편했다. Array.sort는 안정 정렬이라 같은 그룹
+  // 안에서는(허용/비허용 각각) 원래(플랫폼·제목) 순서가 그대로 유지된다.
+  list = [...list].sort((a, b) => (allowedIds.has(b.id) ? 1 : 0) - (allowedIds.has(a.id) ? 1 : 0));
+
+  container.innerHTML = "";
+  for (const series of list) {
+    const label = document.createElement("label");
+    label.className = "profile-series-checkbox-row";
+    const checked = allowedIds.has(series.id) ? "checked" : "";
+    const sub = [series.platform, series.age_rating || "정보없음"].join(" · ");
+    label.innerHTML = `<input type="checkbox" value="${series.id}" ${checked}> ${series.title} <span class="profile-series-sub">${sub}</span>`;
+    container.appendChild(label);
+  }
+}
+
+function collectProfileAllowedSeriesIds() {
+  const container = document.getElementById("profileAllowedSeriesList");
+  const allowedIds = new Set(JSON.parse(container.dataset.allowed || "[]"));
+  container.querySelectorAll("input[type=checkbox]").forEach((el) => {
+    if (el.checked) allowedIds.add(el.value);
+    else allowedIds.delete(el.value);
+  });
+  return [...allowedIds];
+}
+
+async function saveProfileEditor() {
+  if (!editingProfileId) return;
+  const name = document.getElementById("profileNameInput").value.trim();
+  if (!name) return;
+
+  await fetch(`/api/admin/profiles/${editingProfileId}`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ name }),
+  });
+  await fetch(`/api/admin/profiles/${editingProfileId}/browse-filters`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ filters: collectProfileBrowseFilters() }),
+  });
+  await fetch(`/api/admin/profiles/${editingProfileId}/time-windows`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ windows: collectProfileTimeWindows() }),
+  });
+  await fetch(`/api/admin/profiles/${editingProfileId}/allowed-series`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ series_ids: collectProfileAllowedSeriesIds() }),
+  });
+
+  closeProfileEditor();
+  refreshProfilesList();
+}
+
+async function deleteCurrentProfile() {
+  if (!editingProfileId) return;
+  if (!confirm("이 프로필을 삭제하시겠습니까? 그 프로필의 진행률/읽음기록도 함께 사라지고, 되돌릴 수 없습니다.")) return;
+  await fetch(`/api/admin/profiles/${editingProfileId}`, { method: "DELETE" });
+  closeProfileEditor();
+  refreshProfilesList();
+}
+
+async function reissueProfileToken() {
+  if (!editingProfileId) return;
+  if (!confirm("URL을 재발급하면 기존 링크는 즉시 무효화됩니다. 계속하시겠습니까?")) return;
+  const res = await fetch(`/api/admin/profiles/${editingProfileId}/reissue-token`, { method: "POST" });
+  const { token } = await res.json();
+  document.getElementById("profileUrlDisplay").textContent = `${location.origin}${WebtoonPaths.appPath(`/p/${token}`)}`;
+}
+
+function copyProfileUrl() {
+  const text = document.getElementById("profileUrlDisplay").textContent;
+  navigator.clipboard.writeText(text).catch(() => {});
+}
+
+init();
+</script>
+</body>
+</html>
+

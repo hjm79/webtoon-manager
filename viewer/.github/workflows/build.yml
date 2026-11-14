@@ -1,0 +1,49 @@
+name: Build and publish image
+
+on:
+  push:
+    branches: ["main"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+# main에 연속으로 여러 커밋/파일 변경이 올라오면, 이미 돌고 있던 이전 빌드는 취소하고
+# 마지막 커밋 기준으로만 끝까지 돌린다 - 중간 커밋들의 이미지를 굳이 다 만들 필요는 없다.
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    uses: ./.github/workflows/test.yml
+
+  build-and-push:
+    needs: test # 테스트가 통과해야만 이미지를 빌드/푸시함 (실패하면 여기서 멈춤)
+    # ubuntu-latest가 2026-10-19부터 26.04로 바뀌는 중이라 버전을 고정한다(이미지 빌드 자체는 Docker
+    # 안에서 일어나서 호스트 OS 영향이 작지만, 날마다 다른 환경에서 도는 것을 피한다). 테스트(test.yml)와
+    # 같은 버전을 쓴다. 문제가 생기면 두 파일 모두 ubuntu-24.04로 되돌리면 된다.
+    runs-on: ubuntu-26.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Compute lowercase image name
+        id: image
+        run: echo "name=$(echo 'ghcr.io/${{ github.repository }}' | tr '[:upper:]' '[:lower:]')" >> "$GITHUB_OUTPUT"
+
+      - name: Build and push
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: Dockerfile.fork
+          push: true
+          tags: ${{ steps.image.outputs.name }}:latest

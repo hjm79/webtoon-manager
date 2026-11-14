@@ -1,6 +1,5 @@
 """Interest baselines, scoped admission, in-flight opt-out, and metadata-only resync."""
 import asyncio
-import json
 from types import SimpleNamespace as NS
 from unittest.mock import AsyncMock, patch
 import httpx
