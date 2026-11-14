@@ -92,3 +92,7 @@ jobs:
         run: pip install -r requirements-dev.txt
       - name: 뷰어 백엔드 테스트
         run: python -m pytest tests/ -q
+      - name: 뷰어 브라우저 테스트 준비
+        run: python -m playwright install --with-deps chromium
+      - name: 뷰어 브라우저 회귀 테스트
+        run: python -m pytest tests/e2e -q
