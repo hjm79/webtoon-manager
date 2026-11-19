@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Callable
 
 from app import kakao_cover, rclone_client, repository
-from app.archiver import cancel
+from app.archiver import cancel, origin as archive_origin
 from app import kakao_records
 
 from app.archiver.folder_archive import (
@@ -51,6 +51,7 @@ class WebtoonSource:
     title: str
     writer_names: list[str]
     kakao: bool  # True면 카카오페이지 다운로드 폴더/카카오 폴더 이름 규칙을 쓴다
+    status: str
 
 
 def resolve_webtoon_source(title_id: str) -> "WebtoonSource | None":
@@ -65,9 +66,9 @@ def resolve_webtoon_source(title_id: str) -> "WebtoonSource | None":
         # {author}는 네이버처럼 "글" 작가 — 작품 정보에서 저장해 둔 글 작가를 쓰고, 아직 저장 전이면(예전에 구독만 하고 받은 적이
         # 없는 작품) 목록이 주는 작가 이름(역할 구분 없음)으로 대신한다
         names = record["writer_names"] or [n.strip() for n in (record["author_summary"] or "").split(",") if n.strip()]
-        return WebtoonSource(title=record["title"], writer_names=names, kakao=True)
+        return WebtoonSource(title=record["title"], writer_names=names, kakao=True, status=record["status"])
     wt = repository.get(title_id)
-    return None if wt is None else WebtoonSource(title=wt.title, writer_names=wt.writer_names, kakao=False)
+    return None if wt is None else WebtoonSource(title=wt.title, writer_names=wt.writer_names, kakao=False, status=wt.status)
 
 
 def queue_finish_archive_if_applicable(title_id: str, is_finished: bool) -> bool:
@@ -77,6 +78,11 @@ def queue_finish_archive_if_applicable(title_id: str, is_finished: bool) -> bool
         repository.add_pending_finish_archive(title_id)
         return True
     return False
+
+
+def _finish_archive_still_requested(title_id: str) -> bool:
+    source = resolve_webtoon_source(title_id)
+    return source is not None and source.status == repository.STATUS_UNSUBSCRIBED
 
 
 def _dest_settings_missing(dest_type: str, archive_root: str, rclone_config_path: str, title_id: str) -> bool:
@@ -134,12 +140,20 @@ def _move_title_files(files: list, dest: TitleDestination, report: ProgressRepor
         if cancel.is_requested():  # 사용자가 중단을 눌렀다 — 지금까지 옮긴 것은 그대로 두고 남은 파일은 옮기지 않는다
             report.progress(f"[{dest.title_name}] 중단 요청으로 남은 {len(files) - index}개 파일은 옮기지 않았습니다")
             break
+        if dest.only_if_unsubscribed and not _finish_archive_still_requested(dest.title_id):
+            report.progress(f"[{dest.title_name}] 구독 상태가 변경되어 남은 파일을 보존합니다")
+            break
         try:
             dest_filename = (
                 render_archive_filename(dest.template, src.name, dest.title_name, dest.writer_names, zip_path_for_page_count=src) if dest.template else None
             )
+            origin = archive_origin.chapter_origin(src, dest.local_dest_dir, dest.title_id) if (
+                dest.dest_type == "local" and dest.local_dest_dir is not None
+            ) else None
+            move_options = {"origin": origin} if origin is not None else {}
             saved_name, had_conflict = _move_episode_file(
-                dest.dest_type, src, dest_filename, dest.policy, dest.rclone_config_path, dest.remote, dest.rclone_dest_path, dest.local_dest_dir
+                dest.dest_type, src, dest_filename, dest.policy, dest.rclone_config_path, dest.remote, dest.rclone_dest_path, dest.local_dest_dir,
+                **move_options,
             )
             if had_conflict:
                 report.conflict(dest.title_name, src.name, dest.policy)
@@ -179,6 +193,8 @@ def _archive_title(job: TitleArchiveJob, report: ProgressReport | None = None) -
     report = report or ProgressReport()
     if _dest_settings_missing(job.dest_type, job.archive_root, job.rclone_config_path, job.title_id):
         return 0
+    if job.only_if_unsubscribed and not _finish_archive_still_requested(job.title_id):
+        return 0
 
     title_dir = _title_folder(job.download_root, job.title_name, job.kakao)
     files = _list_episode_files_sorted(title_dir)
@@ -208,11 +224,15 @@ def _archive_title(job: TitleArchiveJob, report: ProgressReport | None = None) -
         title_id=job.title_id, title_name=job.title_name, dest_type=job.dest_type, policy=job.policy, trigger_type=job.trigger_type,
         template=template, writer_names=job.writer_names or [], rclone_config_path=job.rclone_config_path,
         remote=remote, rclone_dest_path=rclone_dest_path, local_dest_dir=local_dest_dir,
+        only_if_unsubscribed=job.only_if_unsubscribed,
     )
     _purge_failed_leftovers(job, remote, rclone_dest_path, local_dest_dir, report)
     moved = _move_title_files(files, dest, report)
-    if cancel.is_requested():
+    if (cancel.is_requested() or
+            (job.only_if_unsubscribed and not _finish_archive_still_requested(job.title_id))):
         return moved  # 중단했으면 정보 파일(info.xml 등)도 옮기지/복사하지 않는다
+    if not job.keep_last and any(path.exists() for _number, path in files):
+        return moved  # 회차 일부가 원본에 남아 있으면 그 작품의 표지와 정보도 함께 남긴다.
 
     if metadata_files:
         if job.dest_type == "rclone":
@@ -356,7 +376,8 @@ def process_pending_finish_archives(
         if cancel.is_requested():
             break  # 중단 요청 — 남은 대기열은 건드리지 않고 다음 실행에서 이어서 처리한다
         source = resolve_webtoon_source(title_id)
-        if source is None:
+        if source is None or source.status != repository.STATUS_UNSUBSCRIBED:
+            # A later status change supersedes the old unsubscribe request.
             repository.remove_pending_finish_archive(title_id)
             continue
         root = (kakao_download_root or download_root) if source.kakao else download_root
@@ -375,14 +396,19 @@ def process_pending_finish_archives(
         policy = get_conflict_policy()
         own_failures: list = []  # 이번 작품의 이동 실패만 따로 모아서, 문제없이 끝났는지 판단하고 호출부 목록에도 그대로 전달한다
         report = ProgressReport(progress_callback, conflict_log, own_failures)
-        total += _archive_title(
-            TitleArchiveJob(
-                archive_root=archive_root, download_root=root, title_id=title_id, title_name=source.title, base_path=base_path, policy=policy,
-                trigger_type="finish_unsubscribe", keep_last=False, dest_type=dest_type, rclone_config_path=rclone_config_path,
-                writer_names=source.writer_names, filename_template_preset_id=target.filename_template_preset_id if target else None, kakao=source.kakao,
-            ),
-            report,
-        )
+        try:
+            total += _archive_title(
+                TitleArchiveJob(
+                    archive_root=archive_root, download_root=root, title_id=title_id, title_name=source.title, base_path=base_path, policy=policy,
+                    trigger_type="finish_unsubscribe", keep_last=False, dest_type=dest_type, rclone_config_path=rclone_config_path,
+                    writer_names=source.writer_names, filename_template_preset_id=target.filename_template_preset_id if target else None, kakao=source.kakao,
+                    only_if_unsubscribed=True,
+                ),
+                report,
+            )
+        except (OSError, ValueError, rclone_client.RcloneError) as exc:
+            log.exception("완결 자동보관 이동 실패 (%s)", title_id)
+            report.failure(source.title, "", str(exc))
         # 완결 전체이동은 마지막 파일도 예외 없이 옮기므로, 다 옮기고 나면 다운로드
         # 쪽 웹툰 폴더엔 아무 것도 안 남는 게 정상이다 — 파일이 하나라도 남아있으면
         # (예: 이동 중 일부 실패) 안전하게 그대로 두고, 완전히 비었을 때만 지운다.
@@ -390,6 +416,11 @@ def process_pending_finish_archives(
         _cleanup_empty_dirs(title_dir)
         if failure_log is not None:
             failure_log.extend(own_failures)
-        _delete_target_after_full_move(title_id, source.title, not own_failures and not title_dir.exists(), report)
-        repository.remove_pending_finish_archive(title_id)
+        if not _finish_archive_still_requested(title_id):
+            repository.remove_pending_finish_archive(title_id)
+            continue
+        completed = not cancel.is_requested() and not own_failures and not title_dir.exists()
+        _delete_target_after_full_move(title_id, source.title, completed, report)
+        if completed:
+            repository.remove_pending_finish_archive(title_id)
     return total

@@ -60,7 +60,9 @@ try: process(prog, fail)
 finally: archiver.title_archive._move_episode_file = real
 assert src.exists() and (src / "0002 2화.zip").exists() and repository.get_archive_target("902") is not None, "실패했는데 설정이 삭제됨"
 assert fail == [("완결작2", "0002 2화.zip", "디스크 오류")] and not any("아카이빙 대상에서 삭제" in line for line in prog)
-print("2) 일부 실패 → 설정 유지 OK")
+assert (src / "info.xml").exists() and "902" in repository.list_pending_finish_archive()
+assert process([]) == 1 and not src.exists() and "902" not in repository.list_pending_finish_archive()
+print("2) 일부 실패 → 설정, 대기열 유지, 다음 실행 재시도 OK")
 
 # Scenario 3: 다운로드 폴더에 남의 파일이 남아 폴더가 정리되지 않으면 설정을 남긴다
 src = make(D, "완결작3", extra=["메모.txt"]); webtoon("903", "완결작3", "보관903"); pending("903")
@@ -72,6 +74,8 @@ print("3) 폴더가 남음 → 설정 유지 OK")
 src = make(D, "완결작4"); webtoon("904", "완결작4", "보관904"); pending("904")
 moved = archiver.process_pending_finish_archives("", st.download_root, "", None, None, None)       # ARCHIVE_ROOT 없음
 assert moved == 0 and len(list(src.iterdir())) == 5 and repository.get_archive_target("904") is not None
+assert "904" in repository.list_pending_finish_archive()
+repository.set_status("904", repository.STATUS_ACTIVE)
 print("4) 보관 위치 없음 → 설정 유지 OK")
 
 # Scenario 5: 대상 설정이 없는 웹툰은 기본 보관 폴더로 옮기고, 지울 설정이 없어도 문제없이 끝난다
@@ -79,14 +83,16 @@ src = make(D, "완결작5"); repository.upsert_new("905", "완결작5"); reposit
 repository.set_setting(archiver.settings._DEFAULT_BASE_PATH_SETTING_KEY, "기본보관"); repository.set_setting(archiver.settings._DEFAULT_DEST_TYPE_SETTING_KEY, "local"); pending("905")
 moved = process([])
 assert moved == 3 and not src.exists() and (A / "기본보관" / "완결작5" / "0003 3화.zip").exists() and repository.get_archive_target("905") is None   # 기본 그릇 폴더 밑에 작품 폴더로
+assert "904" not in repository.list_pending_finish_archive() and (D / "완결작4" / "0001 1화.zip").exists()
 print("5) 대상 없음(기본 폴더) OK")
 
 # Scenario 6: 수동 "완결 처리로 이동"(full_move) — 끝나면 삭제, 마지막 파일을 남기는 일반 수동 이동은 설정을 그대로 둔다
 src = make(D, "완결작6"); webtoon("906", "완결작6", "보관906")
 moved = archiver.manual_archive_now(st.archive_root, st.download_root, ["906"], "", None, False)
 assert moved == 2 and src.exists() and repository.get_archive_target("906") is not None                      # 일반 수동: 마지막 파일 보존, 설정 유지
+repository.set_status("906", repository.STATUS_ACTIVE)
 prog = []; moved = archiver.manual_archive_now(st.archive_root, st.download_root, ["906"], "", prog.append, True)
-assert not src.exists() and repository.get_archive_target("906") is None and "906" not in target_ids() and any("아카이빙 대상에서 삭제" in line for line in prog), prog
+assert moved == 1 and not src.exists() and repository.get_archive_target("906") is None and "906" not in target_ids() and any("아카이빙 대상에서 삭제" in line for line in prog), prog
 print("6) 수동 완결 처리 → 삭제 OK")
 # 수동 완결 처리 중 일부 실패 → 설정 유지
 src = make(D, "완결작7"); webtoon("907", "완결작7", "보관907")

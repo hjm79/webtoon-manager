@@ -15,6 +15,7 @@ from app.file_utils import remove_forbidden_str, remove_forbidden_str_kakao
 router = APIRouter()
 log = logging.getLogger(__name__)
 _ID = re.compile(r"[A-Za-z0-9_-]{1,128}\Z")
+_PROVIDER_ID = re.compile(r"[0-9]{1,32}\Z")
 
 
 def _result(status: str, message: str, url: str | None = None) -> dict:
@@ -53,11 +54,13 @@ async def _lookup(session, base: str, params: dict) -> tuple[int, dict | None]:
 
 
 @router.get("/reader/status")
-async def reader_status(title: str = Query(min_length=1, max_length=300), platform: str = "naver"):
+async def reader_status(title: str = Query(min_length=1, max_length=300), platform: str = "naver", title_id: str | None = None):
     if platform not in ("naver", "kakao"):
         raise HTTPException(422, "지원하지 않는 플랫폼입니다.")
     if not title.strip():
         raise HTTPException(422, "작품 제목을 입력해주세요.")
+    if title_id is not None and not _PROVIDER_ID.fullmatch(title_id):
+        raise HTTPException(422, "작품 번호 형식이 올바르지 않습니다.")
     configured = await asyncio.to_thread(repository.get_setting, "webtoon_server_url")
     if not configured and not viewer_connection.integrated():
         return _result("not_configured", "설정에서 웹툰 뷰어 주소를 연결해주세요.")
@@ -73,8 +76,13 @@ async def reader_status(title: str = Query(min_length=1, max_length=300), platfo
     try:
         async with aiohttp.ClientSession(timeout=timeout) as session:
             status, data = await _lookup(session, base, {"series": safe_title, "platform": platform})
-            if status == 404:
-                status, data = await _lookup(session, base, {"series": safe_title})
+            if status == 404 and title_id is not None:
+                status, data = await _lookup(session, base, {
+                    "series": safe_title, "platform": "archive", "origin_platform": platform, "origin_title_id": title_id,
+                })
+                if status == 200 and (not data or data.get("origin_platform") != platform or data.get("origin_title_id") != title_id):
+                    # Older viewers can ignore unknown query keys. Require proof of the match.
+                    status, data = 404, None
             if status == 404:
                 count = await asyncio.to_thread(reader_files.completed_count, get_settings(), title, platform)
                 if count is None:

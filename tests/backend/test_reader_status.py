@@ -83,13 +83,22 @@ async def run():
             assert Session.calls[-1][1]["allow_redirects"] is False
             assert Session.calls[-1][1]["params"]["series"] == "제목 ： 부제"
             assert Session.calls[-1][1]["params"]["platform"] == "naver"
-            Session.responses = [Response(404), Response(200, {"series_id": "archive", "chapter_id": "a"})]
-            result = (await client.get("/api/reader/status", params={"title": "작품", "platform": "kakao"})).json()
+            params = {"title": "작품", "platform": "kakao", "title_id": "12345"}
+            Session.responses = [Response(404), Response(200, {"series_id": "archive", "chapter_id": "a", "origin_platform": "kakao", "origin_title_id": "12345"})]
+            result = (await client.get("/api/reader/status", params=params)).json()
             assert result["status"] == "ready" and "series=archive" in result["url"]
             assert Session.calls[-2][1]["params"]["platform"] == "kakao"
-            assert Session.calls[-1][1]["params"] == {"series": "작품"}
-            Session.responses = [Response(404), Response(409)]
+            assert Session.calls[-1][1]["params"] == {"series": "작품", "platform": "archive", "origin_platform": "kakao", "origin_title_id": "12345"}
+            for proof in ({}, {"origin_platform": "naver", "origin_title_id": "12345"}, {"origin_platform": "kakao", "origin_title_id": "54321"}):
+                Session.responses = [Response(404), Response(200, {"series_id": "unrelated", **proof})]
+                result = (await client.get("/api/reader/status", params=params)).json()
+                assert result["status"] == "not_downloaded" and result["url"] is None
+            count = len(Session.calls)
+            Session.responses = [Response(404)]
             result = (await client.get("/api/reader/status", params={"title": "작품"})).json()
+            assert result["status"] == "not_downloaded" and len(Session.calls) == count + 1
+            Session.responses = [Response(404), Response(409)]
+            result = (await client.get("/api/reader/status", params=params)).json()
             assert result["status"] == "error" and "여러 라이브러리" in result["message"]
             Session.response = Response(200, {"series_id": "chunked", "chapter_id": "a"}, chunk_size=3)
             assert (await client.get("/api/reader/status", params={"title": "작품"})).json()["status"] == "ready"

@@ -98,20 +98,22 @@ function applyWorkflowReaderAvailability(button, data) {
   button.title = status === "ready" ? "다운로드한 회차를 관리기 안에서 읽기" : workflowReaderMessage(status, data?.message);
 }
 
-function refreshWorkflowReadButtons(title, platform, data) {
+function refreshWorkflowReadButtons(title, platform, titleId, data) {
   for (const button of document.querySelectorAll("[data-viewer-check-title]")) {
-    if (button.dataset.viewerCheckTitle === title && (button.dataset.viewerCheckPlatform || "naver") === (platform || "naver")) {
+    if (button.dataset.viewerCheckTitle === title && (button.dataset.viewerCheckPlatform || "naver") === (platform || "naver")
+        && (button.dataset.viewerCheckTitleId || "") === String(titleId || "")) {
       applyWorkflowReaderAvailability(button, data);
     }
   }
   syncCardActionRows(document.getElementById("naver-list-grid"));
 }
 
-function makeWorkflowReadButton(title, platform) {
-  const button = makeButton("읽기", () => openEmbeddedReader(title, platform));
+function makeWorkflowReadButton(title, platform, titleId) {
+  const button = makeButton("읽기", () => openEmbeddedReader(title, platform, titleId));
   button.classList.add("workflow-read-button");
   button.dataset.viewerCheckTitle = title;
   button.dataset.viewerCheckPlatform = platform || "naver";
+  if (titleId) button.dataset.viewerCheckTitleId = titleId;
   button.title = "다운로드한 회차를 관리기 안에서 읽기";
   return button;
 }
@@ -139,15 +141,16 @@ function workflowScopeRestriction(item, data = workflowStatusData) {
 }
 
 function makeWorkflowQueueButton(item) {
-  const button = makeButton("다운로드 추가", async () => {
+  const retry = ["retry_download", "failed"].includes(item.state || item.status);
+  const button = makeButton(retry ? "지금 다시 시도" : "다운로드 추가", async () => {
     button.disabled = true;
     try {
       await apiCall("/api/workflow/queue", { method: "POST", body: JSON.stringify({ platform: item.platform || "naver", title_id: String(item.title_id) }) });
-      refreshWorkflowStatus();
+      await refreshWorkflowStatus();
     } catch (e) { alert(e.message); }
     finally { button.disabled = false; }
   });
-  button.title = "저장된 다운로드 범위를 유지하고 대기열에 추가";
+  button.title = retry ? "다운로드 범위와 받은 회차를 유지하고 다시 시도" : "저장된 다운로드 범위를 유지하고 대기열에 추가";
   button.disabled = ["queued", "running", "resting"].includes(item.status);
   return button;
 }
@@ -199,13 +202,19 @@ function showEmbeddedReaderUrl(raw, generation) {
   }, 12000);
 }
 
-async function openEmbeddedReader(title, platform) {
+function readerStatusEndpoint(title, platform, titleId) {
+  const params = new URLSearchParams({ title, platform: platform || "naver" });
+  if (titleId) params.set("title_id", titleId);
+  return `/api/reader/status?${params}`;
+}
+
+async function openEmbeddedReader(title, platform, titleId) {
   const generation = beginEmbeddedReader(title);
   const dialog = document.getElementById("workflow-reader-dialog");
   const status = document.getElementById("workflow-reader-status");
   try {
-    const data = await apiCall(`/api/reader/status?title=${encodeURIComponent(title)}&platform=${encodeURIComponent(platform || "naver")}`);
-    refreshWorkflowReadButtons(title, platform, data);
+    const data = await apiCall(readerStatusEndpoint(title, platform, titleId));
+    refreshWorkflowReadButtons(title, platform, titleId, data);
     if (generation !== workflowReaderGeneration || !dialog.open) return;
     const readerStatus = normalizeWorkflowReaderStatus(data);
     if (readerStatus !== "ready" || !workflowReaderUrl(data.url)) {
@@ -348,7 +357,7 @@ async function searchWorkflow(event) {
       });
       subscribe.disabled = item.subscription === "active";
       subscribe.dataset.workflowSubscribe = "1";
-      actions.append(subscribe, editScope, makeWorkflowReadButton(item.title, item.platform), makeButton("회차 미리보기", () => openWorkflowPreview(item)));
+      actions.append(subscribe, editScope, makeWorkflowReadButton(item.title, item.platform, item.title_id), makeButton("회차 미리보기", () => openWorkflowPreview(item)));
       card.append(cover, info, actions);
       results.appendChild(card);
     }
@@ -556,17 +565,22 @@ document.getElementById("workflow-subscribe-form").addEventListener("submit", as
   }
 });
 
+const workflowQueueLabels = {
+  queued: "다운로드 대기", blocked_auth: "카카오 재인증 대기", retry_wait: "연결 확인 후 재시도 대기",
+  retry_download: "다운로드 재시도 대기", failed: "다운로드 실패 · 수동 재시도 가능"
+};
+
 function renderWorkflowStatus(data) {
   workflowStatusData = data;
   if (typeof renderKakaoAuthBanner === "function") renderKakaoAuthBanner(data.kakao_auth, data.queue || []);
   const running = (data.queue || []).find((item) => item.state === "running");
-  const waiting = (data.queue || []).filter((item) => ["queued", "blocked_auth", "retry_wait"].includes(item.state));
+  const waiting = (data.queue || []).filter((item) => Object.hasOwn(workflowQueueLabels, item.state));
   const progress = running && !["running", "resting"].includes(data.progress?.state)
     ? { state: running.rest_until ? "resting" : "running", title: running.title, rest_until: running.rest_until }
     : data.progress || {};
   document.getElementById("workflow-progress-heading").textContent = ["running", "resting"].includes(progress.state)
-    ? "실행 중인 작업" : ["success", "error", "deferred"].includes(progress.state) ? "최근 실행 결과" : "현재 작업";
-  const labels = { idle: "실행 중인 다운로드가 없습니다.", queued: "다운로드 대기", blocked_auth: "카카오 재인증 대기", retry_wait: "연결 확인 후 재시도 대기", running: "다운로드 중", resting: "묶음 다운로드 사이 휴식", success: "다운로드 완료", deferred: "구독 해제로 중단", error: "다운로드 실패" };
+    ? "실행 중인 작업" : ["success", "error", "failed", "deferred"].includes(progress.state) ? "최근 실행 결과" : "현재 작업";
+  const labels = { ...workflowQueueLabels, idle: "실행 중인 다운로드가 없습니다.", running: "다운로드 중", resting: "묶음 다운로드 사이 휴식", success: "다운로드 완료", deferred: "구독 해제로 중단", error: "다운로드 실패" };
   document.getElementById("workflow-state").textContent = labels[progress.state] || "실행 중인 다운로드가 없습니다.";
   document.getElementById("workflow-next-run").textContent = data.next_run_at ? `다음 다운로드 예약: ${formatKoreanTime(data.next_run_at)} (한국 시간)` : "등록된 다운로드 예약이 없습니다.";
   const details = [];
@@ -586,8 +600,11 @@ function renderWorkflowStatus(data) {
     const row = document.createElement("li");
     const content = document.createElement("div");
     const text = document.createElement("span");
-    const label = item.state === "blocked_auth" ? "카카오 재인증 대기" : item.state === "retry_wait" ? "연결 확인 후 재시도 대기" : "다운로드 대기";
-    text.textContent = `${item.title} · ${label}${item.reason ? ` · ${item.reason}` : ""}`;
+    const queueDetails = [item.title, workflowQueueLabels[item.state], item.reason];
+    if (item.state === "retry_download" && Number.isFinite(item.retry_at) && item.retry_at > 0) {
+      queueDetails.push(`${formatKoreanTime(new Date(item.retry_at * 1000).toISOString())} 재시도 예정`);
+    }
+    text.textContent = queueDetails.filter(Boolean).join(" · ");
     const cancel = makeButton("대기 취소", async () => {
       cancel.disabled = true;
       try {
@@ -597,7 +614,9 @@ function renderWorkflowStatus(data) {
     });
     cancel.disabled = item.state === "running";
     cancel.title = item.state !== "running" ? "구독과 받은 파일을 유지하고 이번 대기 작업만 취소" : "실행 중인 작업은 대기 취소할 수 없습니다.";
-    content.append(text, cancel); row.appendChild(content); queue.appendChild(row);
+    content.append(text);
+    if (["retry_download", "failed"].includes(item.state)) content.appendChild(makeWorkflowQueueButton(item));
+    content.appendChild(cancel); row.appendChild(content); queue.appendChild(row);
   }
   if (!queue.children.length) queue.textContent = "다운로드 대기 작업이 없습니다.";
   document.getElementById("workflow-scope-edit-hint").textContent = data.download_busy
@@ -617,7 +636,7 @@ function renderWorkflowStatus(data) {
     const row = document.createElement("div");
     const text = document.createElement("span");
     const modeLabel = { all: "전체 공개 회차", latest: `최근 ${item.scope?.latest_count || 0}회차부터`, selected: "선택한 회차만", future: "새 회차만" }[item.scope?.mode] || "기존 구독 범위";
-    const stateLabel = { available: "받은 회차 있음", idle: "대기 중", scheduled: "예약 대기", queued: "다운로드 대기", blocked_auth: "카카오 재인증 대기", retry_wait: "연결 확인 후 재시도 대기", running: "다운로드 중", resting: "휴식 중", success: "완료", deferred: "구독 해제로 중단", error: "실패" }[item.status] || "구독 중";
+    const stateLabel = { ...workflowQueueLabels, available: "받은 회차 있음", idle: "대기 중", scheduled: "예약 대기", running: "다운로드 중", resting: "휴식 중", success: "완료", deferred: "구독 해제로 중단", error: "실패" }[item.status] || "구독 중";
     const waitingPosition = waiting.findIndex((row) => row.platform === item.platform && String(row.title_id) === String(item.title_id)) + 1;
     text.textContent = `${item.title} · ${stateLabel}${waitingPosition ? ` · 대기열 ${waitingPosition}번째` : ""} · 받은 회차 ${item.downloaded_count || 0}개 · ${modeLabel}`;
     const sourceLabel = item.added_source === "artist" ? "작가 자동 구독" : item.added_source === "tag" ? "태그 자동 구독" : null;
@@ -630,7 +649,7 @@ function renderWorkflowStatus(data) {
     }
     const actions = document.createElement("div");
     actions.className = "workflow-subscription-actions";
-    actions.append(makeWorkflowScopeButton(item), makeWorkflowQueueButton(item), makeWorkflowReadButton(item.title, item.platform));
+    actions.append(makeWorkflowScopeButton(item), makeWorkflowQueueButton(item), makeWorkflowReadButton(item.title, item.platform, item.title_id));
     row.append(text, actions); list.appendChild(row);
   }
   if (!list.children.length) list.textContent = "구독한 작품이 없습니다. 통합 검색에서 받을 범위를 선택해 등록해주세요.";

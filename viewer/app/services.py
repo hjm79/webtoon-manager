@@ -12,7 +12,9 @@ import concurrent.futures
 import logging
 import os
 import re
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from uuid import uuid4
 
 from croniter import croniter
 
@@ -124,7 +126,7 @@ def migrate_legacy_progress_if_needed(series_id: str, chapters: list, prog: dict
     사용자의 데이터가 갑자기 전부 안읽음으로 보이면 안 되니, 최초 1회만 예전 커서를 기준으로
     read_chapters를 채워 넣어 자연스럽게 이어지게 한다.
     """
-    if not prog or db.get_read_chapter_ids(series_id):
+    if not prog or db.get_read_chapter_ids(series_id) or db.archive_progress_imported(series_id):
         return  # 진행률이 없거나 이미 새 방식으로 기록된 적 있으면 할 필요 없음
     idx = resolve_read_index(chapters, prog)
     if idx < 0:
@@ -151,7 +153,14 @@ def _advance_generator(gen):
     return next(gen, None)
 
 
-async def _scan_all_platforms_impl() -> tuple[dict, dict]:
+@dataclass(frozen=True)
+class _ScanResult:
+    series: dict
+    chapters: dict
+    failed_platforms: tuple[str, ...] = ()
+
+
+async def _scan_all_platforms_impl() -> _ScanResult:
     """
     플랫폼을 하나씩(로컬 먼저, 네트워크 드라이브는 나중에) 스캔한다. 플랫폼 안에서도
     "폴더 구조를 전부 훑고 나서 하나씩 스캔"이 아니라 "폴더 하나를 발견하는 즉시 그
@@ -171,6 +180,7 @@ async def _scan_all_platforms_impl() -> tuple[dict, dict]:
     # 프론트엔드가 "이런 플랫폼이 있다"를 미리 보여줄 수 있게 한다(플랫폼 필터 탭 등).
     catalog.set_known_platforms(platforms)
 
+    failed_platforms = []
     for platform in platforms:
         gen = scan.iter_platform_series_streaming(platform)
         seen_ids = set()
@@ -211,8 +221,10 @@ async def _scan_all_platforms_impl() -> tuple[dict, dict]:
         if completed:
             catalog.prune_platform_series(platform, seen_ids)
             catalog.prune_platform_folder_refs(platform, seen_refs)
-        log.info(f"  - '{platform}' 스캔 완료 (시리즈 {len(seen_ids)}개, 폴더 발견 즉시 반영됨)")
-    return catalog.get_series_map(), catalog.get_chapters_map()
+        else:
+            failed_platforms.append(platform)
+        log.info("  - '%s' 스캔 %s (시리즈 %d개)", platform, "완료" if completed else "부분 반영", len(seen_ids))
+    return _ScanResult(catalog.get_series_map(), catalog.get_chapters_map(), tuple(failed_platforms))
 
 
 # ── 스캔은 한 번에 하나만: 진행 중에 또 요청되면(수동/자동 재스캔, 외부 연동) 그 스캔에 합류한다 ──
@@ -220,6 +232,8 @@ async def _scan_all_platforms_impl() -> tuple[dict, dict]:
 # 스캔은 별도 작업(task)으로 돌리고 요청은 그 결과를 기다리기만 한다(shield) — 요청이 끊겨도(연결 끊김 등) 스캔은 계속된다.
 _scan_task: asyncio.Task | None = None
 _scan_finished_at: str | None = None
+_scan_runs: dict[str, dict] = {}
+_SCAN_HISTORY_LIMIT = 32
 
 
 def is_scan_running() -> bool:
@@ -231,24 +245,38 @@ def last_scan_finished_at() -> str | None:
     return _scan_finished_at
 
 
-def _on_scan_done(task: asyncio.Task) -> None:
+def _on_scan_done(task: asyncio.Task, scan_id: str) -> None:
     global _scan_finished_at
     _scan_finished_at = datetime.now(timezone.utc).isoformat()
-    if not task.cancelled() and task.exception() is not None:  # 아무도 결과를 기다리지 않는 백그라운드 스캔의 오류도 흔적을 남긴다(확인하지 않은 예외 경고 방지)
-        log.error("재스캔 중 오류 발생", exc_info=task.exception())
+    result = {"finished_at": _scan_finished_at, "failed_platforms": []}
+    if task.cancelled():
+        result["outcome"] = "cancelled"
+    elif (error := task.exception()) is not None:
+        result["outcome"] = "failed"
+        log.error("재스캔 중 오류 발생", exc_info=error)
+    else:
+        failed = task.result().failed_platforms
+        result["failed_platforms"] = list(failed)
+        result["outcome"] = "partial" if failed else "success"
+    _scan_runs[scan_id] = result
 
 
-def _start_scan_task() -> asyncio.Task:
+def _start_scan_task(scan_id: str | None = None) -> asyncio.Task:
     global _scan_task
     if not is_scan_running():
-        _scan_task = asyncio.ensure_future(_scan_all_platforms_impl())
-        _scan_task.add_done_callback(_on_scan_done)
+        scan_id = scan_id or uuid4().hex
+        _scan_runs[scan_id] = {"outcome": "running", "finished_at": None, "failed_platforms": []}
+        if len(_scan_runs) > _SCAN_HISTORY_LIMIT:
+            del _scan_runs[next(iter(_scan_runs))]
+        _scan_task = asyncio.create_task(_scan_all_platforms_impl())
+        _scan_task.add_done_callback(lambda task: _on_scan_done(task, scan_id))
     return _scan_task
 
 
 async def scan_all_platforms_incrementally() -> tuple[dict, dict]:
     """라이브러리를 스캔한다(_scan_all_platforms_impl). 이미 스캔 중이면 새로 시작하지 않고 그 스캔이 끝나기를 기다려 같은 결과를 받는다."""
-    return await asyncio.shield(_start_scan_task())
+    result = await asyncio.shield(_start_scan_task())
+    return result.series, result.chapters
 
 
 def start_background_scan() -> bool:
@@ -257,6 +285,23 @@ def start_background_scan() -> bool:
         return False
     _start_scan_task()
     return True
+
+
+def start_integration_scan(scan_id: str) -> bool:
+    """An acknowledgement can be retried with the same ID without repeating a scan."""
+    if scan_id in _scan_runs:
+        return True
+    if is_scan_running():
+        return False
+    _start_scan_task(scan_id)
+    return True
+
+
+def integration_scan_result(scan_id: str) -> dict:
+    return {
+        "scan_id": scan_id,
+        **_scan_runs.get(scan_id, {"outcome": "unknown", "finished_at": None, "failed_platforms": []}),
+    }
 
 
 _global_precompute_lock = asyncio.Lock()

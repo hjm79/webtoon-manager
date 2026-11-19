@@ -1,14 +1,16 @@
 """백업/복원 — 카카오 데이터까지 빠짐없이, 같은 컨테이너와 완전히 새로운 컨테이너 양쪽에서.
 같은 컨테이너: 지금 쓰는 비밀값(웹훅/봇 토큰/카카오 쿠키)을 지우지 않는다. 새 컨테이너: 환경이 다른 경로/폴더/rclone 설정/다시 입력할 항목을 알려 준다."""
-import asyncio, json, tempfile, time
+import asyncio, json, tempfile, threading, time
 from pathlib import Path
+from unittest.mock import AsyncMock, patch
 
 import httpx
 
 from app import (backup_restore, db, discord_config, download_roots, kakao_catalog, kakao_page_auth as auth, kakao_page_download as kp,
-                 repository, schedule_config, scheduler as scheduler_mod)
+                 rclone_updater, repository, schedule_config, scheduler as scheduler_mod)
 from app.config import get_settings
 from app.file_utils import remove_forbidden_str, remove_forbidden_str_kakao
+from app.scheduler import download_job
 db.get_connection()
 import app.main as m
 
@@ -110,7 +112,13 @@ print("6) 같은 컨테이너 복원 OK (비밀값 유지, 조작된 값 무시,
 
 # ═══ 7. 안전장치: 백업 파일이 아니거나 더 새로운 버전이면 거부하고 데이터는 그대로 ═══
 snap = snapshot()
-for bad, why in (({}, "빈 JSON"), ({"foo": 1}, "엉뚱한 JSON"), ([], "객체 아님"), ({"webtoons": [], "_meta": {"format_version": repository.BACKUP_FORMAT_VERSION + 1}}, "더 새로운 버전")):
+truncated = {"_meta": backup["_meta"], "settings": []}
+malformed = {**backup, "webtoons": [{"title_id": "bad"}]}
+damaged_queue = {**backup, "settings": [*backup["settings"], {"key": "workflow_download_queue", "value": "[{}]"}]}
+for bad, why in (({}, "빈 JSON"), ({"foo": 1}, "엉뚱한 JSON"), ([], "객체 아님"),
+                 ({"settings": []}, "잘린 백업"), (truncated, "필수 테이블 없음"),
+                 (malformed, "필수 컬럼 없음"), (damaged_queue, "손상된 다운로드 대기열"),
+                 ({"webtoons": [], "_meta": {"format_version": repository.BACKUP_FORMAT_VERSION + 1}}, "더 새로운 버전")):
     try: backup_restore.restore_backup(bad, ST); raise AssertionError(f"거부돼야 함: {why}")
     except ValueError as e: assert str(e), why
     assert snapshot() == snap, f"거부했는데 데이터가 바뀜: {why}"
@@ -121,7 +129,11 @@ old = {"webtoons": [{"title_id": "9", "title": "옛웹툰", "status": "active", 
        "kakao_webtoons": [{"title_id": 55, "title": "옛카카오", "status": "active", "ever_subscribed": 1, "thumbnail_url": "", "author_summary": "", "created_at": "x", "updated_at": "x"}],
        "episode_history": [{"id": 1, "title_id": "9", "title_name": "옛웹툰", "episode_no": 1, "subtitle": "", "status": "success", "error_msg": "", "downloaded_at": "x"}],
        "settings": [{"key": "app_public_base_url", "value": "https://old"}]}
+authors_before = snapshot()["watched_authors"]
+repository.set_setting("archive_conflict_policy", "rename")
 backup_restore.restore_backup(old, ST)
+assert snapshot()["watched_authors"] == authors_before
+assert repository.get_setting("archive_conflict_policy") == "rename"
 w = repository.get_kakao_webtoon(55); assert w["status"] == "active" and w["writer_names"] == [] and w["is_finished"] is False
 assert repository.list_episode_history_since("0")[0]["platform"] == "naver" and repository.get_setting("app_public_base_url") == "https://old"
 print("8) 예전 형식 백업 OK")
@@ -151,6 +163,70 @@ async def api():
         for bad in ({}, {"x": 1}, [1, 2]):
             r = await c.post("/api/restore", json=bad); assert r.status_code in (400, 422), (bad, r.status_code)
         assert snapshot() == snap and calls["resched"] == 2                                                           # 거부된 복원은 아무것도 안 바꾸고 스케줄도 안 건드림
-asyncio.run(api())
+async def queue_recovery_and_job_exclusion():
+    from app import job_status, viewer_scan
+
+    viewer_scan.set_config(enabled=True, token="current-fixture-token")
+    repository.set_setting("viewer_scan_state", '{"requested_at":"preserve-this-value"}')
+    repository.upsert_new("999", "중단된 작업")
+    item = repository.enqueue_download("naver", "999", "중단된 작업")[0]
+    repository.update_download_queue(item["id"], state="running")
+    body = repository.export_all()
+    assert not {"viewer_scan_token", "viewer_scan_state"} & {row["key"] for row in body["settings"]}
+    body["settings"].extend([
+        {"key": "viewer_scan_token", "value": "stale-token"},
+        {"key": "viewer_scan_state", "value": "{}"},
+    ])
+    repository.update_download_queue(item["id"])
+    entered = threading.Event()
+    release = threading.Event()
+    original = backup_restore.restore_backup
+
+    def paused_restore(data, settings):
+        entered.set()
+        assert release.wait(3)
+        return original(data, settings)
+
+    ran = asyncio.Event()
+
+    async def successful_download(platforms, *, only_title):
+        assert platforms == {"naver"} and only_title == "999"
+        assert repository.list_download_queue()[0]["id"] == item["id"]
+        ran.set()
+
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=m.app), base_url="http://test") as c:
+        job_status.start("archive")
+        try:
+            rejected = await c.post("/api/restore", json=body)
+            assert rejected.status_code == 409
+        finally:
+            job_status.finish("archive", success=True)
+        with patch.object(rclone_updater, "check_and_update", new_callable=AsyncMock) as rclone_check, \
+             patch.object(backup_restore, "restore_backup", paused_restore), \
+             patch.object(download_job, "_run_download_job_impl", new=AsyncMock(side_effect=successful_download)):
+            restore = asyncio.create_task(c.post("/api/restore", json=body))
+            try:
+                assert await asyncio.to_thread(entered.wait, 2)
+                assert (await c.post("/api/archive/run", json={})).status_code == 409
+                rclone_check.assert_not_awaited()
+                assert (await c.post("/api/restore", json=body)).status_code == 409
+                assert download_job.download_busy()
+            finally:
+                release.set()
+            assert (await restore).status_code == 200
+            await asyncio.wait_for(ran.wait(), 2)
+            await asyncio.wait_for(download_job._queue_worker_task, 2)
+    assert not repository.list_download_queue()
+    assert viewer_scan.get_token() == "current-fixture-token"
+    assert repository.get_setting("viewer_scan_state") == '{"requested_at":"preserve-this-value"}'
+    print("11) 복원 중 작업 배제, 실행 중이던 큐 재개, 뷰어 연동 정보 유지 OK")
+
+
+async def main():
+    await api()
+    await queue_recovery_and_job_exclusion()
+
+
+asyncio.run(main())
 print("10) /api/restore OK (스케줄 재적용, 카카오 목록 갱신, 잘못된 입력 거부)")
 print("\n전부 통과")

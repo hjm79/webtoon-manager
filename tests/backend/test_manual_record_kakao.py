@@ -10,7 +10,7 @@ from pathlib import Path
 
 import httpx
 
-from app import db, kakao_records, repository
+from app import db, kakao_records, repository, subscription_scope
 from app import kakao_page_download as kp
 from app import kakao_cover
 from fake_kakao_rental_site import JPG, Site, item
@@ -107,6 +107,28 @@ async def clearing_pending_on_download():
     assert path is not None and repository.get_kakao_pending_numbers(SID) == {5} and 1 in repository.get_kakao_downloaded_numbers(SID)
     print("8) 받으면 지정이 풀림 OK")
 
+
+async def reopen_within_scope():
+    for offset, mode, marked, left in ((2, "selected", {2, 3}, {3}), (3, "all", {2}, set())):
+        sid = SID + offset
+        root = Path(tempfile.mkdtemp())
+        repository.upsert_new_kakao_webtoon(sid, "작품", status=repository.STATUS_ACTIVE)
+        repository.set_kakao_downloaded_numbers(sid, {1, 2, 3})
+        entries = [{"episode_no": n, "owned": True, "available": True} for n in (1, 2, 3)]
+        scope = subscription_scope.set_choice("kakao", sid, mode, entries,
+                                              episode_nos=[2] if mode == "selected" else None)
+        assert scope["completed_numbers"] == [1, 2, 3]
+        assert set(kakao_records.mark(sid, marked, False, [])["marked"]) == marked
+        site = Site([item(n, free=True) for n in (1, 2, 3)])
+        client = kp.KakaoPageClient(site, {}, 10)
+        result = await kp.run_download(client, series_id=sid, title="작품", download_root=str(root), max_episodes=10)
+        assert result.downloaded == [2], result
+        assert [entry.number for entry in kp.scan_existing_files(root / "작품")] == [2]
+        assert subscription_scope.get("kakao", sid)["episode_nos"] == scope["episode_nos"]
+        assert repository.get_kakao_pending_numbers(sid) == left and not site.posts
+    print("9) 수동 재다운로드 지정은 선택한 구독 범위 안에서만 반영됩니다")
+
 asyncio.run(api())
 asyncio.run(clearing_pending_on_download())
+asyncio.run(reopen_within_scope())
 print("ALL OK")

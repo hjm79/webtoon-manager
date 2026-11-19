@@ -185,7 +185,7 @@ function buildWebtoonCard(w, context) {
       row.append(primary, scopeButton);
     } else actions.appendChild(scopeButton);
   }
-  actions.appendChild(makeWorkflowReadButton(w.title, platform));
+  actions.appendChild(makeWorkflowReadButton(w.title, platform, w.title_id));
   if (context === "naver-list") {
     const analyzeBtn = makeButton("분석", () => openManualAnalysis(platform, w.title_id)); // 수동 다운로드의 분석 화면으로(자리는 syncCardActionRows가 맞춘다)
     analyzeBtn.dataset.analyze = "1";

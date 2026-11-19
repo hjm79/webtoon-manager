@@ -33,6 +33,16 @@ assert run(client.scan_status(Session(Resp(200, {"running": False})), "http://vi
 for bad in (Resp(200, {"nothing": 1}), Resp(200, ["x"]), Resp(500, None), Resp(404, None), ConnectionError("끊김")):
     assert run(client.scan_status(Session(bad), "http://viewer", "t", 5)) is None
 s = Session(Resp(200, {"running": False})); run(client.scan_status(s, "http://viewer/", "토큰", 3)); assert s.calls == [("GET", "http://viewer/api/integration/scan-status", {"X-Integration-Token": "토큰"}, 3)]
+scan_id = "a" * 32
+s = Session(Resp(200, {"started": True, "scan_id": scan_id, "outcome": "running"}))
+assert run(client.start_scan(s, "http://viewer", "t", 5, request_id=scan_id)) == "started"
+assert s.calls[0][2] == {"X-Integration-Token": "t", "X-Scan-Request-Id": scan_id}
+assert run(client.start_scan(Session(Resp(200, {"started": True})), "http://viewer", "t", 5, request_id=scan_id)) == "legacy"
+other = {"started": True, "scan_id": "b" * 32, "outcome": "running"}
+assert run(client.start_scan(Session(Resp(200, other)), "http://viewer", "t", 5, request_id=scan_id)) == "error"
+s = Session(Resp(200, {"running": False, "scan_id": scan_id, "outcome": "success"}))
+assert run(client.scan_status(s, "http://viewer", "t", 5, scan_id=scan_id))["outcome"] == "success"
+assert s.calls[0][1].endswith("?scan_id=" + scan_id)
 print("1~2) 클라이언트 OK")
 
 async def api():

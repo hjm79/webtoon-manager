@@ -20,6 +20,7 @@ sent = []; FAIL = {"on": False}
 async def fake_send(session, message):
     if FAIL["on"]: raise RuntimeError("웹훅 전송 실패")
     sent.append(message)
+    return True
 scheduler.report_job.discord_notify.send_webhook_notification = fake_send
 NEW_N, NEW_K, EP_N, EP_K = [], [], [], []
 async def fake_new_n(session, settings): return list(NEW_N)

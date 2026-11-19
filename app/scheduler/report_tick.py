@@ -59,7 +59,14 @@ async def run_report_tick(now: datetime | None = None) -> None:
 async def _list_alert_step(now: datetime) -> None:
     """웹툰 전체목록 알림(신규 웹툰 + 새 에피소드)을 단독으로 보낼 때가 됐으면 보낸다 — 정해진 발송 시각이거나, 발송하지 않는 시간이 끝난 뒤 30분 안에 다운로드 리포트가
     안 나간 경우(그 사이 리포트가 나갔으면 거기 얹혔으므로 오늘은 이미 끝난 것이다). 하루 한 번(list_alert)."""
-    if not list_alert.standalone_due(now):
+    batch = report_dispatch.load_state()["delivery"]
+    if batch and batch["alert_at"]:
+        return  # 이 알림의 일부가 다운로드 리포트로 이미 전송됐을 수 있다.
+    if report_dispatch.load_list_delivery():
+        due = list_alert.can_send(now)
+    else:
+        due = list_alert.standalone_due(now)
+    if not due:
         return
     async with _report_job_lock:
         await send_list_alert(now)
@@ -82,23 +89,26 @@ async def _report_step(now: datetime, scan: _TickScan) -> None:
         state = report_dispatch.update_state(scan_requested=True)
 
     rows = report_seen.filter_unseen_rows(repository.list_episode_history_window(since, cutoff)) if since else []
-    if not rows or not discord_config.get_webhook_url():
+    if not state["delivery_started"] and (not rows or not discord_config.get_webhook_url()):
         report_dispatch.finish_cycle(cutoff)  # 보낼 것이 없거나 보낼 곳이 없다 — 리포트만 건너뛴다(스캔 요청은 이미 했다)
         return
+    if not discord_config.get_webhook_url():
+        return  # 발송 시도 중 설정이 비워졌으면 남은 조각을 보존한다.
     if viewer_scan.is_ready() and not state["scan_done"]:
-        await _advance_scan(now, scan)
         started = state["scan_started_at"] or now.isoformat()
         if not state["scan_started_at"]:
             state = report_dispatch.update_state(scan_started_at=started)
+        await _advance_scan(now, scan)
         waited = now - datetime.fromisoformat(started)
         if viewer_scan.covered_state(datetime.fromisoformat(cutoff)) == "waiting" and waited < timedelta(minutes=viewer_scan.get_max_wait_minutes()):
             return  # 뷰어 스캔이 끝나기를 기다린다(그 뒤에 리포트의 바로가기 링크가 새 회차를 가리킨다)
         state = report_dispatch.update_state(scan_done=True)  # 반영됐거나(done), 스캔을 못 시켰거나(failed), 너무 오래 걸려서 — 기다리지 않는다
     if report_dispatch.is_quiet(now):
         return  # 발송하지 않는 시간 — 쌓아 둔 채 끝날 때까지 기다린다
+    if state["retry_at"] and now < datetime.fromisoformat(state["retry_at"]):
+        return
     async with _report_job_lock:
-        await send_batch_report(cutoff)
-    report_dispatch.finish_cycle(cutoff)
+        await send_batch_report(cutoff, now=now)
 
 
 def _request_scan_for_batch(cutoff: str) -> None:

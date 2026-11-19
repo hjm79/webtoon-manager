@@ -4,13 +4,14 @@
 ② PROFILES_ENABLED(로그인)가 켜져 있으면 관리자 API는 쿠키 없는 외부 호출이 401이다. 그래서 환경변수 INTEGRATION_TOKEN으로 인증하는 별도 경로를 둔다:
   POST /api/integration/rescan     — 스캔을 시작하고 바로 돌아온다({"started": 새로 시작했는지, "running": true}). 이미 스캔 중이면 새로 시작하지 않는다.
   GET  /api/integration/scan-status — {"running": 진행 중인지, "last_scan_at": 화면에 표시하는 마지막 스캔 시각, "last_scan_finished_at": 마지막 스캔 종료 시각(ISO)}
+  X-Scan-Request-Id 헤더로 요청하면 같은 ID의 재전송은 기존 스캔을 돌려준다. scan-status의 scan_id로 해당 스캔의 결과를 조회한다.
 요청 헤더 X-Integration-Token에 INTEGRATION_TOKEN과 같은 값(영문/숫자/기호)을 넣는다. 토큰을 정하지 않으면(기본) 이 기능은 없는 것처럼 404다.
 """
 
 import os
 import secrets
 
-from fastapi import APIRouter, Depends, Header, HTTPException
+from fastapi import APIRouter, Depends, Header, HTTPException, Query
 
 from .. import access_control, catalog, services
 
@@ -27,16 +28,21 @@ def require_integration_token(x_integration_token: str | None = Header(None)) ->
 
 
 @router.post("/api/integration/rescan", dependencies=[Depends(require_integration_token)])
-async def integration_rescan():
-    # 스캔이 끝난 뒤의 후처리(커버 미리 만들기 등)는 수동/자동 재스캔과 같게 하려고 같은 헬퍼를 쓴다
-    started = services.start_background_scan()
-    return {"started": started, "running": True}
+async def integration_rescan(x_scan_request_id: str | None = Header(None, pattern=r"^[0-9a-f]{32}$")):
+    if x_scan_request_id is None:
+        return {"started": services.start_background_scan(), "running": True}
+    accepted = services.start_integration_scan(x_scan_request_id)
+    return {"started": accepted, "running": services.is_scan_running(),
+            **services.integration_scan_result(x_scan_request_id)}
 
 
 @router.get("/api/integration/scan-status", dependencies=[Depends(require_integration_token)])
-def integration_scan_status():
-    return {
+async def integration_scan_status(scan_id: str | None = Query(None, pattern=r"^[0-9a-f]{32}$")):
+    status = {
         "running": services.is_scan_running(),
         "last_scan_at": catalog.get_last_scan_display(),
         "last_scan_finished_at": services.last_scan_finished_at(),
     }
+    if scan_id is not None:
+        status.update(services.integration_scan_result(scan_id))
+    return status

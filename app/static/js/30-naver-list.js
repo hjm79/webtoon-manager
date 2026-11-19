@@ -200,17 +200,18 @@ async function pruneMissingViewerIcons({ pendingOnly = false } = {}) {
   for (const button of buttons) {
     const title = button.dataset.viewerCheckTitle;
     const platform = button.dataset.viewerCheckPlatform || "naver";
-    const key = `${title}\u0000${platform}`;
-    if (!seen.has(key)) seen.set(key, { title, platform, buttons: [] });
+    const titleId = button.dataset.viewerCheckTitleId;
+    const key = `${title}\u0000${platform}\u0000${titleId || ""}`;
+    if (!seen.has(key)) seen.set(key, { title, platform, titleId, buttons: [] });
     seen.get(key).buttons.push(button);
   }
   const tasks = [...seen.values()].filter(({ buttons: matching }) => !pendingOnly || matching.some((button) => button.dataset.readerStatus === "indexing"));
   async function worker() {
     while (tasks.length) {
-      const { title, platform, buttons: matching } = tasks.shift();
+      const { title, platform, titleId, buttons: matching } = tasks.shift();
       let data;
       try {
-        data = await apiCall(`/api/reader/status?title=${encodeURIComponent(title)}&platform=${encodeURIComponent(platform)}`);
+        data = await apiCall(readerStatusEndpoint(title, platform, titleId));
       } catch (e) { data = { status: "error", message: e.message }; }
       for (const button of matching) {
         applyWorkflowReaderAvailability(button, data);

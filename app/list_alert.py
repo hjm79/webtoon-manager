@@ -74,7 +74,10 @@ def is_done(now: datetime) -> bool:
 
 
 def mark_done(now: datetime) -> None:
-    repository.set_setting(SETTING_DONE, _today(now))
+    day = _today(now)
+    previous = repository.get_setting(SETTING_DONE)
+    if not previous or previous < day:
+        repository.set_setting(SETTING_DONE, day)
 
 
 def note_failure(now: datetime) -> None:
@@ -108,10 +111,16 @@ def should_attach(now: datetime) -> bool:
 
 def standalone_due(now: datetime) -> bool:
     """이 알림만 따로 보낼 때가 됐는가 — 시각 방식은 그 시각부터, 발송하지 않는 시간 방식은 기준 시각 + 30분부터(그 사이 다운로드 리포트가 안 나갔을 때). 디스코드가 없거나 발송하지 않는 시간이면 아직."""
-    if not _enabled() or is_done(now) or not discord_config.get_webhook_url() or report_dispatch.is_quiet(now) or _retry_blocked(now):
+    if not can_send(now) or is_done(now):
         return False
     current = plan(now)
     if current.anchor_minute is None:
         return False
     wait = FALLBACK_MINUTES if current.mode == "quiet" else 0
     return _minute_of_day(now) >= current.anchor_minute + wait
+
+
+def can_send(now: datetime) -> bool:
+    """Whether a pending standalone delivery can be attempted now."""
+    return (bool(_enabled() and discord_config.get_webhook_url())
+            and not report_dispatch.is_quiet(now) and not _retry_blocked(now))

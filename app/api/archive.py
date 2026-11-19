@@ -608,6 +608,10 @@ class ArchiveRunIn(BaseModel):
 
 @router.post("/archive/run")
 async def run_archive_now(payload: ArchiveRunIn):
+    from app.api.system import restore_in_progress
+
+    if restore_in_progress():
+        raise HTTPException(status_code=409, detail="백업 복원이 끝난 뒤 보관 작업을 실행해주세요.")
     settings = get_settings()
     cancel.reset()  # 지난 중단 요청을 이어받지 않는다
     job_status.start("archive")
@@ -755,6 +759,10 @@ async def bulk_move(payload: BulkMoveIn):
             raise HTTPException(status_code=404, detail="존재하지 않는 프리셋입니다.")
         filename_template = preset.template
 
+    from app.api.system import restore_in_progress
+
+    if restore_in_progress():
+        raise HTTPException(status_code=409, detail="백업 복원이 끝난 뒤 폴더 이동을 실행해주세요.")
     job_status.start("bulk_move")
 
     async def _run():

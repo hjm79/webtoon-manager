@@ -159,7 +159,7 @@ def _find_series_by_title(series: str, platform: str | None) -> dict | None:
 
 
 @router.get("/api/lookup/latest", dependencies=[Depends(access_control.require_admin)])
-def lookup_latest(series: str, platform: str | None = None):
+def lookup_latest(series: str, platform: str | None = None, origin_platform: str | None = None, origin_title_id: str | None = None):
     """
     hermes(webtoon_checker.py 등)가 디스코드 알림에 붙일 바로가기 URL을 구할 때 쓰는 API.
     시리즈 폴더명만으로 찾을 수 있다 - platform은 선택사항이며, 여러 플랫폼에 같은 이름의
@@ -171,7 +171,17 @@ def lookup_latest(series: str, platform: str | None = None):
     경로라, main.py의 관리자 비밀번호 게이트에서도 예외로 빼둬야 한다(그렇지 않으면
     이 API를 쓰는 외부 연동이 전부 401로 막혀버린다).
     """
-    candidate = _find_series_by_title(series, platform)
+    if origin_platform is not None or origin_title_id is not None:
+        if platform != "archive" or origin_platform not in {"naver", "kakao"} or not origin_title_id:
+            raise HTTPException(422, "archive lookup requires a provider and work ID")
+        identity = (origin_platform, origin_title_id)
+        matches = [entry for entry in catalog.get_series_map().values()
+                   if entry["platform"] == "archive" and entry.get("archive_identity") == identity]
+        if len(matches) > 1:
+            raise HTTPException(409, detail={"reason": "ambiguous_series", "platforms": ["archive"]})
+        candidate = matches[0] if matches else None
+    else:
+        candidate = _find_series_by_title(series, platform)
     if candidate is None:
         raise HTTPException(404, "series not found")
     if not candidate["chapters"]:
@@ -180,12 +190,15 @@ def lookup_latest(series: str, platform: str | None = None):
     url = None
     if services.PUBLIC_BASE_URL:
         url = f"{services.PUBLIC_BASE_URL}/reader.html?series={candidate['id']}&chapter={latest['id']}&page=0"
-    return {
+    result = {
         "series_id": candidate["id"],
         "chapter_id": latest["id"],
         "chapter_label": latest["label"],
         "url": url,
     }
+    if origin_platform is not None:
+        result.update(origin_platform=origin_platform, origin_title_id=origin_title_id)
+    return result
 
 
 @router.get("/api/lookup/read-state", dependencies=[Depends(access_control.require_admin)])

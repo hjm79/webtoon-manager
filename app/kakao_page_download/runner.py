@@ -123,7 +123,7 @@ def _plan_for_run(series_id: int, series_item: dict, episodes: list[Episode], ex
     pending = repository.get_kakao_pending_numbers(series_id)
     if recorded or pending:
         plan = plan_by_folder_rules(episodes, existing, series_title, recorded, pending)
-    allowed = subscription_scope.allowed_numbers("kakao", series_id, [ep.number for ep in episodes])
+    allowed = subscription_scope.allowed_numbers("kakao", series_id, [ep.number for ep in episodes], reopen=pending)
     if allowed is not None:
         # Scope admission is independent of the folder marker: an earlier failed selected
         # episode must remain eligible even when a later file already exists.

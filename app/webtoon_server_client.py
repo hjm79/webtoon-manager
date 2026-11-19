@@ -8,6 +8,7 @@ webtoon-server 자체는 이 프로젝트 소스에 없으므로, 실제 스펙�
 """
 
 import logging
+from urllib.parse import urlencode
 
 import aiohttp
 
@@ -72,13 +73,17 @@ async def fetch_read_numbers(
 _SCAN_HEADER = "X-Integration-Token"
 
 
-async def start_scan(session: aiohttp.ClientSession, base_url: str, token: str, timeout_seconds: int) -> str:
+async def start_scan(session: aiohttp.ClientSession, base_url: str, token: str, timeout_seconds: int,
+                     *, request_id: str | None = None) -> str:
     """뷰어에 스캔을 시킨다: POST {base_url}/api/integration/rescan (헤더 X-Integration-Token). 스캔이 오래 걸려도 응답은 바로 온다.
-    "started"(시작함) / "running"(이미 스캔 중) / "unsupported"(연동이 없거나 토큰이 안 맞음: 404/401/403) / "error"(연결 오류 등)."""
+    "started"(요청 수락) / "running"(다른 스캔 중) / "legacy"(ID 미지원) / "unsupported"(404/401/403) / "error"(연결 오류 등)."""
     try:
         base_url = viewer_connection.internal_base(base_url)
+        headers = {_SCAN_HEADER: token}
+        if request_id is not None:
+            headers["X-Scan-Request-Id"] = request_id
         async with session.post(
-            base_url.rstrip("/") + "/api/integration/rescan", headers={_SCAN_HEADER: token}, timeout=aiohttp.ClientTimeout(total=timeout_seconds)
+            base_url.rstrip("/") + "/api/integration/rescan", headers=headers, timeout=aiohttp.ClientTimeout(total=timeout_seconds)
         ) as response:
             if response.status in (401, 403, 404):
                 return "unsupported"
@@ -86,23 +91,34 @@ async def start_scan(session: aiohttp.ClientSession, base_url: str, token: str, 
                 log.warning("뷰어 스캔 시작 실패: HTTP %s", response.status)
                 return "error"
             data = await response.json(content_type=None)
-            return "started" if data.get("started") else "running"
+            if not isinstance(data, dict) or not isinstance(data.get("started"), bool):
+                return "error"
+            if request_id is not None:
+                if data.get("scan_id") is None:
+                    return "legacy"
+                if data["scan_id"] != request_id:
+                    return "error"
+            return "started" if data["started"] else "running"
     except Exception as e:
         log.warning("뷰어 스캔 시작 중 오류: %s", e)
         return "error"
 
 
-async def scan_status(session: aiohttp.ClientSession, base_url: str, token: str, timeout_seconds: int) -> dict | None:
+async def scan_status(session: aiohttp.ClientSession, base_url: str, token: str, timeout_seconds: int,
+                      *, scan_id: str | None = None) -> dict | None:
     """뷰어의 스캔 진행 상태: GET {base_url}/api/integration/scan-status → {"running": bool, ...}. 못 읽으면 None(다음에 다시 확인)."""
     try:
         base_url = viewer_connection.internal_base(base_url)
+        url = base_url.rstrip("/") + "/api/integration/scan-status"
+        if scan_id is not None:
+            url += "?" + urlencode({"scan_id": scan_id})
         async with session.get(
-            base_url.rstrip("/") + "/api/integration/scan-status", headers={_SCAN_HEADER: token}, timeout=aiohttp.ClientTimeout(total=timeout_seconds)
+            url, headers={_SCAN_HEADER: token}, timeout=aiohttp.ClientTimeout(total=timeout_seconds)
         ) as response:
             if response.status != 200:
                 return None
             data = await response.json(content_type=None)
-            return data if isinstance(data, dict) and "running" in data else None
+            return data if isinstance(data, dict) and isinstance(data.get("running"), bool) else None
     except Exception as e:
         log.warning("뷰어 스캔 상태 확인 중 오류: %s", e)
         return None

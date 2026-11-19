@@ -11,7 +11,8 @@ import httpx
 import pytest
 from fastapi.testclient import TestClient
 
-from app import auth, profiles, services
+from app import auth, catalog, profiles, scan, services
+from conftest import make_chapter_zip
 
 H = lambda token: {"X-Integration-Token": token}   # HTTP 헤더 값이라 영문/숫자/기호(ASCII) 토큰만 쓸 수 있다
 
@@ -21,6 +22,7 @@ def fresh_scan_state(monkeypatch):
     """스캔 진행 상태는 모듈 전역이라 앞 테스트의 값이 남지 않게 매번 비운다."""
     monkeypatch.setattr(services, "_scan_task", None)
     monkeypatch.setattr(services, "_scan_finished_at", None)
+    monkeypatch.setattr(services, "_scan_runs", {})
 
 
 def test_disabled_without_token(client):
@@ -32,7 +34,7 @@ def test_disabled_without_token(client):
 def test_token_required(client, monkeypatch):
     """토큰이 없거나 틀리면 403, 맞으면 통과"""
     monkeypatch.setenv("INTEGRATION_TOKEN", "secret")
-    async def quick(): return {}, {}
+    async def quick(): return services._ScanResult({}, {})
     monkeypatch.setattr(services, "_scan_all_platforms_impl", quick)
     assert client.post("/api/integration/rescan").status_code == 403
     assert client.post("/api/integration/rescan", headers=H("wrong")).status_code == 403
@@ -51,7 +53,7 @@ def test_start_returns_immediately_and_reports_progress(library, monkeypatch):
         async def slow():
             runs.append(1)
             await gate.wait()
-            return {}, {}
+            return services._ScanResult({}, {})
         monkeypatch.setattr(services, "_scan_all_platforms_impl", slow)
         async with httpx.AsyncClient(transport=httpx.ASGITransport(app=main_module.app), base_url="http://test") as c:
             before = (await c.get("/api/integration/scan-status", headers=H("secret"))).json()
@@ -70,12 +72,40 @@ def test_start_returns_immediately_and_reports_progress(library, monkeypatch):
     asyncio.run(scenario())
 
 
+def test_identified_scan_terminal_error_and_cancellation(library, monkeypatch):
+    async def scenario():
+        failed_id, cancelled_id = (character * 32 for character in "de")
+
+        async def fail():
+            raise OSError("unreadable library root")
+
+        monkeypatch.setattr(services, "_scan_all_platforms_impl", fail)
+        assert services.start_integration_scan(failed_id)
+        with pytest.raises(OSError):
+            await services._scan_task
+        assert services.integration_scan_result(failed_id)["outcome"] == "failed"
+
+        async def wait():
+            await asyncio.Event().wait()
+
+        monkeypatch.setattr(services, "_scan_all_platforms_impl", wait)
+        assert services.start_integration_scan(cancelled_id)
+        assert not services.start_integration_scan("f" * 32)
+        services._scan_task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await services._scan_task
+        assert services.integration_scan_result(cancelled_id)["outcome"] == "cancelled"
+        assert services.integration_scan_result(failed_id)["outcome"] == "failed"
+
+    asyncio.run(scenario())
+
+
 def test_concurrent_scans_share_one_run_and_survive_cancel(library, monkeypatch):
     """GIVEN 스캔이 도는 중 WHEN 다른 곳(수동 재스캔/자동 재스캔)이 스캔을 요청 THEN 같은 스캔에 합류한다(두 번 훑지 않음). 요청이 취소돼도(연결 끊김) 스캔은 계속된다"""
     async def scenario():
         gate = asyncio.Event(); runs = []
         async def slow():
-            runs.append(1); await gate.wait(); return {"a": 1}, {"b": 2}
+            runs.append(1); await gate.wait(); return services._ScanResult({"a": 1}, {"b": 2})
         monkeypatch.setattr(services, "_scan_all_platforms_impl", slow)
         first = asyncio.ensure_future(services.scan_all_platforms_incrementally())
         second = asyncio.ensure_future(services.scan_all_platforms_incrementally())
@@ -110,7 +140,7 @@ def profiles_on(library, monkeypatch):
     importlib.reload(main_module)
     auth.init_schema(); auth.ensure_admin_password_exists(); profiles.init_schema()
     created = profiles.create_profile("딸")
-    async def quick(): return {}, {}
+    async def quick(): return services._ScanResult({}, {})
     monkeypatch.setattr(services, "_scan_all_platforms_impl", quick)
     with TestClient(main_module.app) as c:
         yield {"client": c, "token": created["token"]}
@@ -127,3 +157,43 @@ def test_works_through_profiles_gate_but_only_with_token(profiles_on):
     assert c.post("/api/integration/rescan", headers=H("wrong")).status_code == 403
     assert c.post("/api/integration/rescan").status_code == 403
     assert c.post(f"/p/{profiles_on['token']}/api/integration/rescan", headers=H("secret")).status_code == 404    # 공유 프로필은 이 기능이 아예 없다
+
+
+def test_identified_scan_retries_and_real_partial_result(library, monkeypatch):
+    """A file must be visible after a confirmed scan; an unreadable platform is not an empty success."""
+    from app.main import app
+
+    monkeypatch.setenv("INTEGRATION_TOKEN", "secret")
+    make_chapter_zip(str(library / "naver" / "Source" / "1.zip"), page_count=1)
+    good, partial, unrelated = (character * 32 for character in "abc")
+    status_path = "/api/integration/scan-status"
+    start_path = "/api/integration/rescan"
+
+    async def scenario():
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+            async def start(scan_id):
+                return (await client.post(start_path, headers={**H("secret"), "X-Scan-Request-Id": scan_id})).json()
+
+            async def status(scan_id):
+                return (await client.get(status_path, headers=H("secret"), params={"scan_id": scan_id})).json()
+
+            assert (await status(unrelated))["outcome"] == "unknown"
+            assert (await start(good))["scan_id"] == good
+            first_task = services._scan_task
+            assert (await start(good))["started"] is True and services._scan_task is first_task
+            await asyncio.wait_for(asyncio.shield(first_task), 2)
+            assert (await status(good))["outcome"] == "success"
+            assert (await start(good))["outcome"] == "success" and services._scan_task is first_task
+            assert len(catalog.get_chapters_map()) == 1
+
+            # The listed platform disappears between discovery and traversal.
+            monkeypatch.setattr(scan, "list_platforms_in_scan_order", lambda: ["naver", "unmounted"])
+            assert (await start(partial))["scan_id"] == partial
+            await asyncio.wait_for(asyncio.shield(services._scan_task), 2)
+            result = await status(partial)
+            assert not result["running"] and result["outcome"] == "partial"
+            assert result["failed_platforms"] == ["unmounted"] and result["finished_at"]
+            assert (await status(good))["outcome"] == "success" and len(catalog.get_chapters_map()) == 1
+            assert (await status(unrelated))["outcome"] == "unknown"
+
+    asyncio.run(scenario())

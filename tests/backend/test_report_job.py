@@ -8,7 +8,7 @@ from fakes import discord_fake
 db.get_connection()
 
 sent = []; lookups = []; collected = []
-fake_send = discord_fake(sent, result=None)
+fake_send = discord_fake(sent)
 discord_notify.send_webhook_notification = fake_send
 NEW = {"naver": [], "kakao": []}                                                                                        # 수집 결과(새 에피소드 요약) — 시나리오에서 바꾼다
 async def fake_naver(session, settings): collected.append("naver"); return list(NEW["naver"])

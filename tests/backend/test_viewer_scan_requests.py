@@ -4,7 +4,7 @@
 - request(when): 스캔이 필요한 변경을 기록한다(뷰어 연동이 켜져 있고 준비됐을 때만). 같은 변경에 스캔을 두 번 시키지 않는다.
 - tick(): 1분마다 한 번 — 우리가 시작한 스캔이 끝났는지만 확인하거나(서버에는 가벼운 상태 조회), 필요하면 새로 시작한다.
   스캔 도중에 새 변경이 생기면 그 스캔이 끝난 뒤 다시 시작한다. 뷰어가 이미 스캔 중이면(자동 재스캔 등) 끝나기를 기다렸다가 시작한다.
-- 연동이 없거나(404)/토큰이 안 맞거나(401·403)/연결 오류면 그 요청은 버리고(재시도 폭주 없음), 너무 오래 걸리면 추적을 멈춘다.
+- 연동이 없거나(404)/토큰이 안 맞으면(401·403) 실패를 남긴다. 일시 오류나 부분 스캔은 간격을 두고 재시도한다.
 """
 import asyncio
 import httpx
@@ -20,15 +20,30 @@ UTC = timezone.utc
 T0 = datetime(2026, 10, 13, 3, 0, tzinfo=UTC)
 MIN = lambda n: timedelta(minutes=n)
 SCAN = {}
-async def fake_start(session, base, token, timeout): SCAN["start"].append((base, token)); return SCAN["start_result"]
-async def fake_status(session, base, token, timeout): SCAN["poll"] += 1; return SCAN["status"]
+async def fake_start(session, base, token, timeout, *, request_id):
+    SCAN["start"].append((base, token))
+    SCAN["ids"].append(request_id)
+    if SCAN.get("during_start"):
+        await SCAN["during_start"]()
+    return SCAN["start_result"]
+
+
+async def fake_status(session, base, token, timeout, *, scan_id):
+    SCAN["poll"] += 1
+    response = SCAN["status"]
+    if response is None or SCAN.get("legacy_status"):
+        return response
+    return {"scan_id": scan_id, "outcome": "running" if response["running"] else "success", **response}
+
+
 webtoon_server_client.start_scan = fake_start; webtoon_server_client.scan_status = fake_status
 logs = []
 viewer_scan.job_status.log_line = lambda job, line: logs.append(line)
 
 
 def reset(*, ready=True, max_wait=45):
-    SCAN.update(start=[], poll=0, start_result="started", status={"running": True}); logs.clear()
+    SCAN.clear()
+    SCAN.update(start=[], ids=[], poll=0, start_result="started", status={"running": True}); logs.clear()
     repository.set_setting(viewer_scan.STATE_KEY, None)
     repository.set_setting("webtoon_server_url", "http://viewer" if ready else None); viewer_scan.set_config(enabled=ready, token="secret-token" if ready else "", max_wait_minutes=max_wait)
 def tick(now): asyncio.run(viewer_scan.tick(None, now, 5))
@@ -51,9 +66,9 @@ SCAN["status"] = {"running": False}; tick(T0 + MIN(4)); assert viewer_scan.cover
 tick(T0 + MIN(5)); assert SCAN["poll"] == 3 and len(SCAN["start"]) == 1                                                                     # 끝난 뒤에는 요청도 확인도 없다
 print("2) 시작/진행 확인/완료 OK")
 
-# Scenario 3: 같은 변경에 스캔을 두 번 시키지 않는다 — 이미 시작한 스캔보다 먼저 일어난 변경(또는 같은 시각)의 요청은 그 스캔이 덮는다. 더 늦은 변경은 끝난 뒤 다시
+# Scenario 3: 이미 배정한 범위가 같은 변경은 중복 요청하지 않는다. 더 최신 범위는 다음 스캔에서 확인한다.
 reset(); viewer_scan.request(T0); tick(T0 + MIN(1))                                                                                          # 시작 시각 T0+1분
-viewer_scan.request(T0 + MIN(1)); assert viewer_scan.covered_state(T0 + MIN(1)) == "waiting"                                                  # 시작과 같은 시각 변경: 그 스캔이 덮는다
+viewer_scan.request(T0); assert viewer_scan.covered_state(T0) == "waiting"
 tick(T0 + MIN(2)); assert len(SCAN["start"]) == 1
 viewer_scan.request(T0 + MIN(3))                                                                                                             # 스캔이 도는 중에 새 변경(시작 뒤)
 assert viewer_scan.covered_state(T0 + MIN(3)) == "waiting"
@@ -65,26 +80,29 @@ print("3) 중복 방지/스캔 중 새 변경 OK")
 
 # Scenario 4: 뷰어가 이미 스캔 중이면(자동 재스캔 등 우리가 시작하지 않은 스캔) 끝나기를 기다렸다가 시작한다 — 그 스캔은 우리 변경 전에 시작했을 수 있어서 그것만으로는 반영을 장담할 수 없다
 reset(); SCAN["start_result"] = "running"; viewer_scan.request(T0); tick(T0 + MIN(1))
-assert len(SCAN["start"]) == 1 and state()["foreign_wait"] is True and viewer_scan.covered_state(T0) == "waiting"
+assert len(SCAN["start"]) == 1 and state()["active"]["phase"] == "foreign" and viewer_scan.covered_state(T0) == "waiting"
 tick(T0 + MIN(2)); tick(T0 + MIN(3)); assert len(SCAN["start"]) == 1 and SCAN["poll"] == 2                                                    # 끝날 때까지 상태만 확인
-SCAN["status"] = {"running": False}; SCAN["start_result"] = "started"; tick(T0 + MIN(4))
-assert len(SCAN["start"]) == 2 and state()["foreign_wait"] is False and state()["started_at"] == (T0 + MIN(4)).isoformat()                    # 끝나자마자 우리 스캔 시작
+SCAN["status"] = {"running": False, "outcome": "unknown"}; SCAN["start_result"] = "started"; tick(T0 + MIN(4))
+assert len(SCAN["start"]) == 2 and state()["active"]["phase"] == "poll" and state()["active"]["phase_at"] == (T0 + MIN(4)).isoformat()
 print("4) 이미 스캔 중이면 기다렸다 시작 OK")
 
-# Scenario 5: 연동이 없거나(unsupported)/연결 오류면 요청을 버린다 — 다시 시도하지 않고, "실패"로 알려서 리포트가 기다리지 않게 한다
-for result in ("unsupported", "error"):
-    reset(); SCAN["start_result"] = result; viewer_scan.request(T0); tick(T0 + MIN(1))
-    assert state()["requested_at"] is None and not viewer_scan.has_work() and viewer_scan.covered_state(T0) == "failed" and len(SCAN["start"]) == 1 and any("건너뜁니다" in l for l in logs)
-    tick(T0 + MIN(2)); tick(T0 + MIN(3)); assert len(SCAN["start"]) == 1                                                                      # 재시도 폭주 없음
-print("5) 연동 없음/오류는 버림 OK")
+# Scenario 5: 미지원은 명시적 실패. 시작 응답이 없으면 같은 ID를 보내며 정해진 횟수에서 멈춘다.
+reset(); SCAN["start_result"] = "unsupported"; viewer_scan.request(T0); tick(T0 + MIN(1))
+assert not viewer_scan.has_work() and viewer_scan.covered_state(T0) == "failed" and state()["failed_through"] == T0.isoformat()
+reset(); SCAN["start_result"] = "error"; viewer_scan.request(T0); tick(T0 + MIN(1))
+assert viewer_scan.covered_state(T0) == "waiting" and state()["active"]["retry_at"] == (T0 + MIN(2)).isoformat()
+for minute in (2, 3, 4, 5, 7, 8, 10): tick(T0 + MIN(minute))
+assert len(SCAN["start"]) == 4 and len(set(SCAN["ids"])) == 1 and not viewer_scan.has_work() and viewer_scan.covered_state(T0) == "failed"
+print("5) 미지원/연결 오류의 제한된 재시도 OK")
 
-# Scenario 6: 너무 오래 걸리면 추적을 멈춘다(최대 대기 45분) — 우리가 시작한 스캔을 계속 확인하지 않고, 남이 돌리는 스캔이 안 끝나면 요청을 버린다
+# Scenario 6: 최대 대기 시간 이후에도 새 변경 요청을 지우지 않는다. 오래 걸린 스캔은 다음 확인으로 넘긴다.
 reset(max_wait=45); viewer_scan.request(T0); tick(T0 + MIN(1))
 tick(T0 + MIN(30)); assert SCAN["poll"] == 1 and viewer_scan.has_work()
-tick(T0 + MIN(46)); assert not viewer_scan.has_work() and SCAN["poll"] == 1 and any("추적" in l for l in logs), (SCAN, logs)                    # 시작(1분) + 45분 뒤 확인 없이 추적 중단
+tick(T0 + MIN(46)); assert state()["active"]["phase"] == "start" and state()["active"]["id"] != SCAN["ids"][0] and any("대기 시간 초과" in l for l in logs)
 reset(max_wait=45); SCAN["start_result"] = "running"; viewer_scan.request(T0); tick(T0 + MIN(1)); tick(T0 + MIN(30)); assert viewer_scan.has_work()
-tick(T0 + MIN(46)); assert not viewer_scan.has_work() and state()["requested_at"] is None and state()["foreign_wait"] is False and viewer_scan.covered_state(T0) == "failed"
-print("6) 오래 걸리면 추적 중단 OK")
+viewer_scan.request(T0 + MIN(31))
+tick(T0 + MIN(46)); assert state()["active"]["phase"] == "start" and state()["requested_at"] == (T0 + MIN(31)).isoformat()
+print("6) 최대 대기/새로운 변경 보존 OK")
 
 # Scenario 7: 변경이 생겼다고 알리는 곳 — 새 파일이 0개면 아무것도 안 하고, 1개 이상이면 요청한다
 reset(); viewer_scan.note_library_changed(0, T0); assert state()["requested_at"] is None
@@ -133,4 +151,36 @@ with ThreadPoolExecutor(8) as pool: list(pool.map(lambda i: viewer_scan.update_s
 assert all(f"k{i}" in state() for i in range(120)), f"동시에 갱신하면 사라진다: {sum(1 for i in range(120) if f'k{i}' in state())}/120"
 reset()
 print("10) 동시 갱신 OK")
+
+# Scenario 11: 시작 요청에 응답하기 전 들어온 변경은 다음 스캔으로 남고, 이미 수락한 ID는 상태에서 이어 확인한다.
+async def request_during_start():
+    viewer_scan.request(T0 + MIN(2))
+    await asyncio.sleep(0)
+
+reset(); SCAN["during_start"] = request_during_start; viewer_scan.request(T0); tick(T0 + MIN(1))
+assert state()["requested_at"] == (T0 + MIN(2)).isoformat()
+SCAN["status"] = {"running": False}; SCAN["during_start"] = None; tick(T0 + MIN(3))
+assert viewer_scan.covered_state(T0) == "done" and viewer_scan.covered_state(T0 + MIN(2)) == "waiting"
+assert len(set(SCAN["ids"])) == 2
+tick(T0 + MIN(4)); assert viewer_scan.covered_state(T0 + MIN(2)) == "done"
+print("11) 시작 중 도착한 요청 보존 OK")
+
+# Scenario 12: 부분 완료나 재시작으로 지워진 결과는 해당 범위를 반영했다는 증거가 아니다.
+for outcome in ("unknown", "partial", "failed", "cancelled"):
+    reset(); viewer_scan.request(T0); tick(T0 + MIN(1))
+    SCAN["status"] = {"running": False, "outcome": outcome}; tick(T0 + MIN(2))
+    assert viewer_scan.covered_state(T0) == "waiting" and state()["done_through"] is None
+    tick(T0 + MIN(3)); assert len(set(SCAN["ids"])) == 2
+    SCAN["status"] = {"running": False}; tick(T0 + MIN(4))
+    assert viewer_scan.covered_state(T0) == "done"
+reset(); viewer_scan.request(T0); tick(T0 + MIN(1))
+SCAN["legacy_status"] = True; SCAN["status"] = {"running": False, "last_scan_finished_at": None}; tick(T0 + MIN(2))
+assert state()["done_through"] is None and state()["active"]["phase"] == "legacy" and viewer_scan.covered_state(T0) == "waiting"
+SCAN["legacy_status"] = False; SCAN["status"] = {"running": False, "outcome": "unknown"}; tick(T0 + MIN(3))
+assert len(SCAN["start"]) == 2 and state()["done_through"] is None
+SCAN["status"] = {"running": False}; tick(T0 + MIN(4)); assert viewer_scan.covered_state(T0) == "done"
+reset(); viewer_scan.update_state(started_at=T0.isoformat(), finished=False, done_started_at=T0.isoformat())
+assert viewer_scan.has_work() and viewer_scan.covered_state(T0) == "waiting"
+tick(T0 + MIN(1)); assert len(SCAN["ids"]) == 1 and state()["done_through"] is None
+print("12) 부분/오류/취소, 재시작, 구버전에서 완료 오인 방지 OK")
 print("ALL OK")

@@ -8,9 +8,10 @@
 상태(state)는 설정 테이블에 JSON 한 덩어리로 저장해서 재시작해도 이어진다. 1분마다 도는 확인(scheduler.report_tick.run_report_tick)이 이 상태만 보고 움직인다:
   last_download_at: 마지막으로 다운로드가 끝난 시각(없으면 보낼 것이 대기 중이 아님) / cutoff: 확정된 묶음의 끝(이 시각까지의 이력을 보낸다)
   scan_requested: 이 묶음에서 뷰어 스캔을 이미 요청했다 / scan_started_at: 리포트가 스캔을 기다리기 시작한 시각(최대 대기 계산용) / scan_done: 기다림이 끝났다(스캔 반영/실패/시간 초과).
+  delivery_started: 확정된 묶음을 발송하기 시작했다 / delivery: 내용과 전송 완료 위치 / retry_at: 다음 시도 가능 시각.
 """
 import json
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 from app import job_status, repository
@@ -20,6 +21,7 @@ from app.schedule_config import VALID_DAYS
 QUIET_KEY = "report_quiet_hours"
 BATCH_KEY = "report_batch_minutes"
 STATE_KEY = "report_dispatch_state"
+LIST_DELIVERY_KEY = "report_list_delivery"
 LAST_SENT_KEY = "report_last_sent_at"
 DEFAULT_BATCH_MINUTES = 10
 MAX_BATCH_MINUTES = 24 * 60
@@ -135,7 +137,8 @@ def set_batch_minutes(minutes: int) -> None:
 # ── 발송 상태 ─────────────────────────────────────────────────────────
 
 def _empty_state() -> dict:
-    return {"last_download_at": None, "cutoff": None, "scan_requested": False, "scan_started_at": None, "scan_done": False}
+    return {"last_download_at": None, "cutoff": None, "scan_requested": False, "scan_started_at": None, "scan_done": False,
+            "delivery_started": False, "delivery": None, "delivery_failures": 0, "retry_at": None}
 
 
 # 발송 상태 — 설정에 JSON 한 덩어리로 저장한다(읽고-바꾸고-쓰기는 JsonSetting이 잠금으로 한 덩어리로 보호한다: 작업 종료 알림 등 다른 스레드와 겹쳐도 안전).
@@ -143,6 +146,25 @@ _STATE = JsonSetting(STATE_KEY, _empty_state)
 load_state = _STATE.load
 update_state = _STATE.update  # 이 칸들만 덮어쓴다(다운로드가 끝났다는 기록 같은 다른 칸을 건드리지 않게)
 clear_state = _STATE.clear
+_LIST_DELIVERY = JsonSetting(LIST_DELIVERY_KEY)
+load_list_delivery = _LIST_DELIVERY.load
+save_list_delivery = _LIST_DELIVERY.save
+clear_list_delivery = _LIST_DELIVERY.clear
+
+
+def advance_sent_cursor(until: str) -> None:
+    """A restored cursor can be newer than a retained local notification."""
+    with _STATE.lock:
+        current = repository.get_setting(LAST_SENT_KEY)
+        if current and current >= until:
+            return
+        repository.set_setting(LAST_SENT_KEY, until)
+
+
+def note_delivery_failure(now: datetime) -> None:
+    with _STATE.lock:
+        failures = min(7, load_state()["delivery_failures"] + 1)
+        update_state(delivery_failures=failures, retry_at=(now + timedelta(minutes=min(60, 2 ** (failures - 1)))).isoformat())
 
 
 def finish_cycle(cutoff: str) -> None:
@@ -159,13 +181,14 @@ def note_download_finished(now: datetime | None = None, started_at: str | None =
     """다운로드가 하나 끝났다고 기록한다(보낼 이력이 있는지는 보낼 때 이력으로 확인한다).
     started_at: 이 다운로드 작업이 시작한 시각 — 발송 기준 시각이 아직 없을 때(처음 한 번) 이 시각부터의 이력을 보내도록 기준으로 삼는다."""
     now = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
-    if repository.get_setting(LAST_SENT_KEY) is None and started_at:
-        repository.set_setting(LAST_SENT_KEY, started_at)
     with _STATE.lock:
+        if repository.get_setting(LAST_SENT_KEY) is None and started_at:
+            repository.set_setting(LAST_SENT_KEY, started_at)
         state = load_state()
-        fields = {"last_download_at": now.isoformat()}
+        previous = state["last_download_at"] or now.isoformat()
+        fields = {"last_download_at": max(previous, now.isoformat())}
         # 묶음이 확정됐어도 아직 스캔이 진행 중이 아니면(시작 전이거나, 끝나고 발송하지 않는 시간을 기다리는 중) 다시 열어서 새로 끝난 다운로드까지 한 통으로 보낸다.
-        if state["cutoff"] and not (state["scan_started_at"] and not state["scan_done"]):
+        if state["cutoff"] and not state["delivery_started"] and not (state["scan_started_at"] and not state["scan_done"]):
             fields.update(cutoff=None, scan_requested=False, scan_started_at=None, scan_done=False)
         update_state(**fields)
 

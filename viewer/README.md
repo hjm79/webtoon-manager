@@ -420,6 +420,8 @@ GET  /api/integration/scan-status   → {"running": true|false, "last_scan_at": 
 
 스캔은 한 번에 하나만 돕니다. 수동 재스캔·자동 재스캔·외부 연동이 겹치면 진행 중인 스캔에 합류해서 같은 폴더를 두 번 훑지 않습니다(요청이 끊겨도 스캔은 계속됩니다).
 
+완료를 확인해야 하는 연동은 시작 요청에 `X-Scan-Request-Id` 헤더로 32자리 소문자 16진수 ID를 보내고, `GET /api/integration/scan-status?scan_id=<ID>`로 결과를 조회합니다. 수락한 ID를 재전송하면 같은 스캔을 반환합니다. `outcome`은 `running`, `success`, `partial`, `failed`, `cancelled`, `unknown` 중 하나입니다. 다른 스캔이 실행 중이면 요청을 수락하지 않으며, 서버 재시작 등으로 ID를 찾을 수 없으면 `unknown`입니다. 해당 ID의 `success`로 완료를 확인할 수 있습니다.
+
 ## API로 최신 화 바로가기 URL 조회하기
 
 디스코드 알림 봇처럼 외부에서 "이 시리즈 최신 화로 바로 가는 링크"가 필요하면

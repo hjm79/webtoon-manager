@@ -49,6 +49,7 @@ class TitleArchiveJob:
     filename_template_preset_id: int | None = None
     kakao: bool = False
     read_numbers: frozenset[int] | None = None  # 뷰어에서 읽은 회차 번호 — 지정하면 이 회차만 옮긴다(None이면 거르지 않음)
+    only_if_unsubscribed: bool = False
 
 
 @dataclass(frozen=True)
@@ -64,6 +65,7 @@ class TitleDestination:
     remote: str
     rclone_dest_path: str
     local_dest_dir: Path | None
+    only_if_unsubscribed: bool = False
 
 
 @dataclass(frozen=True)

@@ -2,8 +2,10 @@
 """
 
 from datetime import datetime, timezone
+import json
 
 from app.db import read_lock, write_transaction
+from app.repository.scoped_subscription import _QUEUE_KEY, normalize_restored_queue
 
 # ── 백업/복원 ───────────────────────────────────────────────────────
 
@@ -17,17 +19,18 @@ BACKUP_FORMAT_VERSION = 2
 #     복원해도 **지금 쓰는 값을 지우지 않고**(같은 컨테이너에서 복원했다고 웹훅/로그인이 날아가면 안 된다), 백업 파일 안에 들어 있어도 무시한다.
 #  ② 캐시: 크고 언제든 다시 채워진다(카카오 전체목록). 복원해도 그대로 둔다.
 #  ③ 알림 기록: "하루에 한 번만 알림"을 위한 시각들. 복원하면 초기화해서, 환경이 바뀐 뒤에 다시 알릴 수 있게 한다.
-_SECRET_SETTING_KEYS = {"discord_webhook_url", "discord_bot_token", "discord_notify_channel_id", "kakao_page_cookies",
+_SECRET_SETTING_KEYS = {"discord_webhook_url", "discord_bot_token", "discord_notify_channel_id", "viewer_scan_token", "kakao_page_cookies",
                         "kakao_page_cookie_version", "kakao_page_cookie_revision", "kakao_page_auth_health", "kakao_page_auto_refresh"}
 
 
-_CACHE_SETTING_KEYS = {"kakao_catalog_snapshot"}
+_LOCAL_SETTING_KEYS = {"kakao_catalog_snapshot", "viewer_scan_state", "report_dispatch_state",
+                       "report_list_delivery", "list_alert_retry_at"}
 
 
 _ALERT_STATE_SETTING_KEYS = {"kakao_page_alert_expired_at", "kakao_page_alert_soon_at", "adult_cookie_expired_notified"}
 
 
-_NOT_IN_BACKUP_KEYS = _SECRET_SETTING_KEYS | _CACHE_SETTING_KEYS | _ALERT_STATE_SETTING_KEYS
+_NOT_IN_BACKUP_KEYS = _SECRET_SETTING_KEYS | _LOCAL_SETTING_KEYS | _ALERT_STATE_SETTING_KEYS
 
 
 _BACKUP_TABLES = (
@@ -105,21 +108,37 @@ _EPISODE_HISTORY_COLUMNS = (
 )
 
 
+_TABLE_COLUMNS = {
+    "webtoons": _WEBTOON_COLUMNS,
+    "watched_authors": _WATCHED_AUTHOR_COLUMNS,
+    "watched_tags": _WATCHED_TAG_COLUMNS,
+    "kakao_seen_titles": _KAKAO_SEEN_TITLE_COLUMNS,
+    "kakao_webtoons": _KAKAO_WEBTOON_COLUMNS,
+    "filename_template_presets": _FILENAME_TEMPLATE_PRESET_COLUMNS,
+    "archive_targets": _ARCHIVE_TARGET_COLUMNS,
+    "archive_history": _ARCHIVE_HISTORY_COLUMNS,
+    "episode_history": _EPISODE_HISTORY_COLUMNS,
+    "archive_pending_finish": _ARCHIVE_PENDING_FINISH_COLUMNS,
+}
+_REQUIRED_ROW_FIELDS = {
+    "webtoons": ("title_id", "title", "created_at", "updated_at"),
+    "settings": ("key", "value"),
+    "watched_authors": ("author_id", "created_at", "updated_at"),
+    "watched_tags": ("tag_id", "created_at", "updated_at"),
+    "kakao_seen_titles": ("author_name", "title_id", "seen_at"),
+    "kakao_webtoons": ("title_id", "created_at", "updated_at"),
+    "filename_template_presets": ("id", "name", "created_at", "updated_at"),
+    "archive_targets": ("title_id", "dest_base_path", "created_at", "updated_at"),
+    "archive_history": ("id", "title_id", "title_name", "file_name", "archived_at", "trigger_type"),
+    "episode_history": ("id", "title_id", "title_name", "episode_no", "status", "downloaded_at"),
+    "archive_pending_finish": ("title_id", "marked_at"),
+}
+
+
 def _insert_validated_rows(conn, table: str, allowed_columns: tuple[str, ...], rows: list[dict]) -> None:
-    """
-    백업 JSON의 키를 SQL 컬럼명으로 그대로 쓰면 조작된 백업 파일로 SQL 인젝션이
-    가능해진다(f-string에 row.keys()를 직접 꽂는 형태였음 — 실제로 이런 문제가
-    있었다). 그래서 컬럼명은 절대 입력에서 가져오지 않고, 여기 하드코딩된
-    allowed_columns 중에서 실제로 그 행에 존재하는 것만, 정해진 순서로만 사용한다.
-    모르는 키는 조용히 무시하고(공격 표면이 안 되도록), 필수 컬럼이 하나라도
-    없으면 이 행 전체를 건너뛴다(스키마가 다른 백업이어도 크래시 없이 처리).
-    """
+    """Use only known SQL columns; legacy optional fields retain database defaults."""
     for row in rows:
-        if not isinstance(row, dict):
-            continue
         present_columns = [c for c in allowed_columns if c in row]
-        if not present_columns:
-            continue
         placeholders = ", ".join("?" for _ in present_columns)
         column_list = ", ".join(present_columns)  # allowed_columns에서만 골랐으므로 안전
         conn.execute(
@@ -128,53 +147,81 @@ def _insert_validated_rows(conn, table: str, allowed_columns: tuple[str, ...], r
         )
 
 
-def validate_backup(data) -> None:
-    """복원해도 되는 백업인지 확인한다(지우기 전에). 아니면 ValueError — 데이터는 건드리지 않는다.
-    빈 JSON이나 엉뚱한 JSON을 올려도 "복원"이 돼 버리면 현재 데이터가 전부 지워지는 사고가 나므로, 백업 테이블이 하나라도 있어야 한다."""
+def validate_backup(data) -> int:
+    """Ensure a current snapshot is complete, and accept recognized legacy subsets."""
     if not isinstance(data, dict):
         raise ValueError("백업 데이터 형식이 올바르지 않습니다 (JSON 객체가 아님).")
-    if not any(isinstance(data.get(table), list) for table in _BACKUP_TABLES):
-        raise ValueError("백업 파일이 아닌 것 같습니다 (백업 데이터가 하나도 들어 있지 않습니다).")
     meta = data.get("_meta")
-    version = meta.get("format_version", 1) if isinstance(meta, dict) else 1
-    if not isinstance(version, int) or version > BACKUP_FORMAT_VERSION:
+    if "_meta" in data and not isinstance(meta, dict):
+        raise ValueError("백업 버전 정보가 올바르지 않습니다.")
+    version = meta.get("format_version", 1) if meta is not None else 1
+    if type(version) is not int or not 1 <= version <= BACKUP_FORMAT_VERSION:
         raise ValueError("이 백업은 더 새로운 버전의 프로그램에서 만들어져서 복원할 수 없습니다. 프로그램을 최신 버전으로 업데이트한 뒤 다시 시도해 주세요.")
+    required_tables = _BACKUP_TABLES if version >= 2 else ("webtoons", "settings")
+    missing = [table for table in required_tables if table not in data]
+    if missing:
+        raise ValueError(f"백업 필수 항목이 빠졌습니다: {', '.join(missing)}")
+
+    setting_keys = set()
+    for table in _BACKUP_TABLES:
+        if table not in data:
+            continue
+        if not isinstance(data[table], list):
+            raise ValueError(f"백업 항목 형식이 올바르지 않습니다: {table}")
+        for row in data[table]:
+            if not isinstance(row, dict) or any(key not in row for key in _REQUIRED_ROW_FIELDS[table]):
+                raise ValueError(f"백업에 필수 값이 빠진 행이 있습니다: {table}")
+            if table == "settings":
+                key, value = row["key"], row["value"]
+                if not isinstance(key, str) or not key or (value is not None and not isinstance(value, str)):
+                    raise ValueError("백업 설정 항목 형식이 올바르지 않습니다.")
+                if key in _NOT_IN_BACKUP_KEYS:
+                    continue
+                if key in setting_keys:
+                    raise ValueError("백업에 중복된 설정 항목이 있습니다.")
+                setting_keys.add(key)
+                if key == _QUEUE_KEY:
+                    normalize_restored_queue(value)
+                if key.startswith("subscription_scope:"):
+                    _validate_subscription_scope(value)
+            elif any(row[key] is None for key in _REQUIRED_ROW_FIELDS[table]):
+                raise ValueError(f"백업에 필수 값이 비어 있는 행이 있습니다: {table}")
+    return version
+
+
+def _validate_subscription_scope(raw: str | None) -> None:
+    try:
+        scope = json.loads(raw)
+        if (not isinstance(scope, dict) or scope.get("mode") not in ("all", "latest", "selected", "future")
+                or type(scope.get("initial_cutoff")) is not int or scope["initial_cutoff"] < 0):
+            raise ValueError
+        for key in ("episode_nos", "pending_initial", "completed_numbers"):
+            numbers = scope.get(key, [] if key == "completed_numbers" else None)
+            if not isinstance(numbers, list) or any(type(n) is not int or n <= 0 for n in numbers):
+                raise ValueError
+    except (TypeError, ValueError) as exc:
+        raise ValueError("백업에 올바르지 않은 구독 회차 범위가 있습니다.") from exc
 
 
 def restore_all(data: dict) -> None:
-    """백업 데이터로 11개 테이블을 완전히 교체한다 (기존 내용은 전부 지워짐).
-    설정은 비밀값/캐시(_SECRET/_CACHE_SETTING_KEYS)만 지금 값을 남기고 나머지를 교체하며, 알림 기록은 지워서 초기화한다.
-    백업 파일 안의 비밀값/캐시/알림 기록 항목은 무시한다(조작된 백업이 웹훅 주소 같은 걸 바꿔치기하지 못하게)."""
-    validate_backup(data)
-    keep = sorted(_SECRET_SETTING_KEYS | _CACHE_SETTING_KEYS)
+    """Restore one transaction; a legacy backup leaves absent data in place."""
+    version = validate_backup(data)
+    keep = sorted(_SECRET_SETTING_KEYS | _LOCAL_SETTING_KEYS)
 
     with write_transaction() as conn:
-        for table in _BACKUP_TABLES:
-            if table == "settings":
-                conn.execute(f"DELETE FROM settings WHERE key NOT IN ({', '.join('?' for _ in keep)})", keep)
-            else:
-                conn.execute(f"DELETE FROM {table}")
-
-        _insert_validated_rows(conn, "webtoons", _WEBTOON_COLUMNS, data.get("webtoons") or [])
-        for row in data.get("settings") or []:
-            if isinstance(row, dict) and "key" in row and "value" in row and row["key"] not in _NOT_IN_BACKUP_KEYS:
+        conn.execute("BEGIN IMMEDIATE")
+        if version >= 2:
+            conn.execute(f"DELETE FROM settings WHERE key NOT IN ({', '.join('?' for _ in keep)})", keep)
+        for row in data["settings"]:
+            key, value = row["key"], row["value"]
+            if key not in _NOT_IN_BACKUP_KEYS:
+                if key == _QUEUE_KEY:
+                    value = normalize_restored_queue(value)
                 conn.execute(
                     "INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-                    (row["key"], row["value"]),
+                    (key, value),
                 )
-        _insert_validated_rows(conn, "watched_authors", _WATCHED_AUTHOR_COLUMNS, data.get("watched_authors") or [])
-        _insert_validated_rows(conn, "watched_tags", _WATCHED_TAG_COLUMNS, data.get("watched_tags") or [])
-        _insert_validated_rows(conn, "kakao_seen_titles", _KAKAO_SEEN_TITLE_COLUMNS, data.get("kakao_seen_titles") or [])
-        _insert_validated_rows(conn, "kakao_webtoons", _KAKAO_WEBTOON_COLUMNS, data.get("kakao_webtoons") or [])
-        # 프리셋을 먼저 넣어야 archive_targets.filename_template_preset_id가 참조할 대상이 이미 있다
-        # (SQLite가 FK를 강제하진 않지만, id를 그대로 보존해서 순서를 맞춰주는 게 안전하다).
-        _insert_validated_rows(
-            conn, "filename_template_presets", _FILENAME_TEMPLATE_PRESET_COLUMNS,
-            data.get("filename_template_presets") or [],
-        )
-        _insert_validated_rows(conn, "archive_targets", _ARCHIVE_TARGET_COLUMNS, data.get("archive_targets") or [])
-        _insert_validated_rows(conn, "archive_history", _ARCHIVE_HISTORY_COLUMNS, data.get("archive_history") or [])
-        _insert_validated_rows(conn, "episode_history", _EPISODE_HISTORY_COLUMNS, data.get("episode_history") or [])
-        _insert_validated_rows(
-            conn, "archive_pending_finish", _ARCHIVE_PENDING_FINISH_COLUMNS, data.get("archive_pending_finish") or [],
-        )
+        for table, columns in _TABLE_COLUMNS.items():
+            if table in data:
+                conn.execute(f"DELETE FROM {table}")
+                _insert_validated_rows(conn, table, columns, data[table])

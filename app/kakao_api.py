@@ -279,15 +279,17 @@ async def fetch_latest_episode_url(
 
 
 class KakaoLookupError(RuntimeError):
-    """A complete author lookup is required before updating discovery baselines."""
+    """The provider could not return the requested search results."""
 
 
 async def _search_webtoon_cards(
-    session: aiohttp.ClientSession, keyword: str, timeout_seconds: int, max_pages: int, *, require_complete: bool = False
+    session: aiohttp.ClientSession, keyword: str, timeout_seconds: int, max_pages: int, *,
+    require_complete: bool = False, raise_on_error: bool = False,
 ) -> list[dict]:
     """검색어로 검색해서 웹툰(웹소설/책 제외) 결과 카드를 최대 max_pages 페이지까지 모은다. 검색어는
     제목과 저자 양쪽에 걸리고, 완결/휴재 작품도 요일 목록과 달리 전부 나온다. 수동 검색은 실패 전까지
     모은 것을 반환하며, require_complete인 작가 추적은 실패·페이지 상한 도달 시 오류를 올린다."""
+    strict_response = require_complete or raise_on_error
     cards: list[dict] = []
     for page in range(max_pages):
         data = await _get_json(
@@ -301,16 +303,17 @@ async def _search_webtoon_cards(
             f"검색 keyword={keyword} page={page}",
         )
         if data is None:
-            if require_complete:
-                raise KakaoLookupError(f"카카오 작가 검색 {page + 1}페이지 조회 실패")
+            if strict_response:
+                raise KakaoLookupError(f"카카오 검색 {page + 1}페이지 조회 실패")
             break
-        if require_complete and (not isinstance(data, dict) or not isinstance(data.get("result"), dict)
-                                 or not isinstance(data["result"].get("list"), list)):
-            raise KakaoLookupError(f"카카오 작가 검색 {page + 1}페이지 응답 형식 오류")
+        if strict_response and (not isinstance(data, dict) or not isinstance(data.get("result"), dict)
+                                or not isinstance(data["result"].get("list"), list)
+                                or data.get("result_code", 0) not in (0, "0")):
+            raise KakaoLookupError(f"카카오 검색 {page + 1}페이지 응답 형식 오류")
         result = data.get("result") or {}
         entries = result.get("list") or []
-        if require_complete and any(not isinstance(entry, dict) for entry in entries):
-            raise KakaoLookupError(f"카카오 작가 검색 {page + 1}페이지 작품 정보 오류")
+        if strict_response and any(not isinstance(entry, dict) for entry in entries):
+            raise KakaoLookupError(f"카카오 검색 {page + 1}페이지 작품 정보 오류")
         cards.extend(c for c in entries if c.get("category_uid") == WEBTOON_CATEGORY_UID and c.get("series_id") is not None)
         if result.get("is_end") or not entries:
             break
@@ -321,10 +324,12 @@ async def _search_webtoon_cards(
     return cards
 
 
-async def search_series(session: aiohttp.ClientSession, keyword: str, timeout_seconds: int) -> list[dict]:
+async def search_series(
+    session: aiohttp.ClientSession, keyword: str, timeout_seconds: int, *, raise_on_error: bool = False,
+) -> list[dict]:
     """"수동 다운로드"에서 제목/작가로 웹툰을 찾는다(검색 결과 첫 페이지, 완결/휴재 포함). 항목은 요일 목록
     항목(_card_to_item)과 같은 모양이다."""
-    cards = await _search_webtoon_cards(session, _normalize_title(keyword), timeout_seconds, 1)
+    cards = await _search_webtoon_cards(session, _normalize_title(keyword), timeout_seconds, 1, raise_on_error=raise_on_error)
     return [item for item in (_card_to_item(c) for c in cards) if item is not None]
 
 

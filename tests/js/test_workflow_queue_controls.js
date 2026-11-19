@@ -8,9 +8,15 @@ const { makeApp, idle, ok, done } = require("./harness");
   ];
   let state = { download_busy: true, queue: queued, subscriptions: queued.map((row) => ({ ...row, status: row.state, scope: { mode: "all" } })) };
   const cancelled = [];
+  const retried = [];
   const routes = {
     "/api/naver-list": [],
     "/api/workflow/status": () => state,
+    "/api/workflow/queue": (opts) => {
+      retried.push(JSON.parse(opts.body));
+      state = { ...state, queue: state.queue.map((row) => row.id === "failed" ? { ...row, state: "queued" } : row) };
+      return { execution: "queued", queue: state.queue };
+    },
     "/api/workflow/queue/cancel": (opts) => {
       const value = JSON.parse(opts.body); cancelled.push(value);
       state = { ...state, queue: state.queue.filter((row) => row.title_id !== value.title_id) };
@@ -28,6 +34,16 @@ const { makeApp, idle, ok, done } = require("./harness");
   ok(cancelled.length === 1 && cancelled[0].platform === "kakao" && cancelled[0].title_id === "102", "선택한 대기 작품만 취소 API로 전달");
   ok($("workflow-queue").children.length === 1 && $("workflow-queue").children[0].textContent.includes("마지막 작품"), "취소 후 대기 순서를 다시 표시");
   ok(!calls.some((call) => /unsubscribe|\/scope$|\/subscribe$/.test(call.url)), "대기 취소는 구독·범위 변경 요청을 하지 않음");
+
+  state = { ...state, queue: [
+    { id: "failed", platform: "naver", title_id: "901", title: "저장 실패", state: "failed", reason: "ZIP 저장 실패" },
+    { id: "retry", platform: "kakao", title_id: "902", title: "자동 대기", state: "retry_download", retry_at: 1795100000 },
+  ] };
+  run('refreshWorkflowStatus()'); await idle();
+  const failures = [...$("workflow-queue").children];
+  ok(failures[0].textContent.includes("ZIP 저장 실패") && failures[1].textContent.includes("재시도 예정"), "실패 원인과 자동 재시도 시각을 표시");
+  [...failures[0].querySelectorAll("button")].find((b) => b.textContent === "지금 다시 시도").click(); await idle();
+  ok(retried.length === 1 && retried[0].title_id === "901" && state.queue[0].id === "failed" && state.queue[0].state === "queued", "기존 항목과 범위 그대로 실패 항목 재시도");
 
   const previews = () => calls.filter((call) => call.url === "/api/workflow/preview").length;
   const before = previews();

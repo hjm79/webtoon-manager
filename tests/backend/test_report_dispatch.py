@@ -24,10 +24,14 @@ MIN = lambda n: timedelta(minutes=n)
 LAST_SENT = "report_last_sent_at"
 
 sent = []; SCAN = {}; SECTIONS = {"naver": [], "kakao": []}; VIEWER = {}
-fake_send = discord_fake(sent, result=None)
+fake_send = discord_fake(sent)
 discord_notify.send_webhook_notification = fake_send
-async def fake_start(session, base, token, timeout): SCAN["start"].append((base, token)); return SCAN["start_result"]
-async def fake_status(session, base, token, timeout): SCAN["poll"] += 1; return {"running": SCAN["running"]}
+async def fake_start(session, base, token, timeout, *, request_id=None):
+    SCAN["start"].append((base, token))
+    return SCAN["start_result"]
+async def fake_status(session, base, token, timeout, *, scan_id=None):
+    SCAN["poll"] += 1
+    return {"running": SCAN["running"], "scan_id": scan_id, "outcome": "running" if SCAN["running"] else "success"}
 webtoon_server_client.start_scan = fake_start; webtoon_server_client.scan_status = fake_status
 async def fake_sections(session, settings, *, force_test): return list(SECTIONS["naver"]), list(SECTIONS["kakao"])
 scheduler.report_job.collect_new_episode_sections = fake_sections

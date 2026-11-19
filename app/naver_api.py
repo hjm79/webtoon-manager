@@ -389,7 +389,7 @@ async def fetch_tag_catalog(
 
 
 async def search_webtoons(
-    session: aiohttp.ClientSession, keyword: str, timeout_seconds: int
+    session: aiohttp.ClientSession, keyword: str, timeout_seconds: int, *, raise_on_error: bool = False
 ) -> list[SearchResultItem]:
     """
     네이버 통합검색. 제목뿐 아니라 작가 이름으로도 매칭되고, 요일별 목록 API와 달리
@@ -406,14 +406,23 @@ async def search_webtoons(
             headers=DEFAULT_HEADERS,
             timeout=aiohttp.ClientTimeout(total=timeout_seconds),
         ) as response:
-            if response.status != 200:
-                log.error("통합검색 실패 (keyword=%s): HTTP %s", keyword, response.status)
-                return []
-            data = await response.json()
+            status = response.status
+            data = await response.json() if status == 200 else None
     except Exception as e:
         log.error("통합검색 예외 (keyword=%s): %s", keyword, e)
+        if raise_on_error:
+            raise NaverApiError("네이버 검색 응답을 받지 못했습니다") from e
         return []
 
+    if status != 200:
+        log.error("통합검색 실패 (keyword=%s): HTTP %s", keyword, status)
+        if raise_on_error:
+            raise NaverApiError(f"네이버 검색 실패: HTTP {status}")
+        return []
+    if not isinstance(data, dict):
+        if raise_on_error:
+            raise NaverApiError("네이버 검색 응답 형식이 올바르지 않습니다")
+        return []
     results: list[SearchResultItem] = []
     seen_ids: set[str] = set()
 
@@ -421,8 +430,13 @@ async def search_webtoons(
     # 전체를 다 돌면 베스트도전/도전만화가 섞여 들어온다(실제로 확인된 문제) —
     # 정식 연재 웹툰만 원하므로 searchWebtoonResult 하나만 쓴다.
     category = data.get("searchWebtoonResult")
+    if raise_on_error and category not in (None, []) and not isinstance(category, dict):
+        raise NaverApiError("네이버 웹툰 검색 결과 형식이 올바르지 않습니다")
     if isinstance(category, dict):
-        for item in category.get("searchViewList") or []:
+        items = category.get("searchViewList")
+        if raise_on_error and items is not None and not isinstance(items, list):
+            raise NaverApiError("네이버 작품 목록 형식이 올바르지 않습니다")
+        for item in items or []:
             title_id = item.get("titleId")
             if title_id is None:  # contentId만 있는(titleId 없는) 카테고리는 건너뜀
                 continue

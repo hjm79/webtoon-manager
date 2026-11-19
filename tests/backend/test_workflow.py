@@ -184,10 +184,12 @@ async def kakao_preview_records():
 async def api_contract():
     async def hidden(*_):
         return {"444"}
-    async def naver_search(*_):
+    async def naver_search(*_, raise_on_error):
+        assert raise_on_error
         return [NS(title_id="333", title_name="휴재작", thumbnail_url="", is_paused=True, is_finished=False),
                 NS(title_id="444", title_name="매일+ 휴재작", thumbnail_url="", is_paused=False, is_finished=False)]
-    async def kakao_failure(*_):
+    async def kakao_failure(*_, raise_on_error):
+        assert raise_on_error
         raise RuntimeError("Cookie: should-never-leak")
     async def preview(platform, title_id):
         return {"platform": platform, "title_id": title_id, "title": "새 구독", "episodes": rows, "available_count": 5}

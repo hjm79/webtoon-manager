@@ -8,14 +8,20 @@ from pathlib import Path
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import HTMLResponse
 
-from app import backup_restore, help_page, kakao_catalog, kakao_records, repository
+from app import backup_restore, help_page, job_status, kakao_catalog, kakao_page_download, kakao_records, repository
 from app import scheduler as scheduler_mod
 from app.config import get_settings
+from app.scheduler import archive_job, download_job, report_job, report_tick
 
 
 log = logging.getLogger(__name__)
 
 router = APIRouter()
+_restore_lock = asyncio.Lock()
+
+
+def restore_in_progress() -> bool:
+    return _restore_lock.locked()
 
 
 
@@ -37,10 +43,41 @@ async def download_backup():
 
 @router.post("/restore")
 async def restore_backup(data: dict, request: Request):
-    """백업으로 데이터를 복원한다. 복원이 끝나면 ① 저장된 스케줄을 바로 적용하고(재시작을 기다리지 않게) ② 카카오가 켜져 있으면
-    전체목록을 새로 채운 뒤, 복원한 환경을 점검한 결과(warnings: 확인할 것 / reenter: 다시 입력할 것)를 돌려준다."""
+    """Restore without allowing a download or archive move to overlap the database swap."""
+    from app.api.workflow import _subscription_lock
+
+    jobs = job_status.snapshot()
+    if (restore_in_progress() or _subscription_lock.locked() or download_job.download_busy()
+            or kakao_page_download.download_lock.locked() or archive_job._archive_job_lock.locked()
+            or report_tick._report_tick_lock.locked() or report_job._report_job_lock.locked()
+            or any(jobs[name]["status"] == "running" for name in ("archive", "bulk_move"))):
+        raise HTTPException(status_code=409, detail="작업이 진행 중입니다. 완료 후 백업을 복원해주세요.")
+
+    async with (
+        _restore_lock, _subscription_lock, download_job._download_job_lock, archive_job._archive_job_lock,
+        report_tick._report_tick_lock, report_job._report_job_lock,
+    ):
+        task = asyncio.create_task(_restore_and_reconfigure(data, request))
+        try:
+            report = await asyncio.shield(task)
+        except asyncio.CancelledError:
+            # Cancelling the request cannot interrupt the SQLite worker thread.
+            # Keep the job locks until recovery and scheduler reconfiguration finish.
+            try:
+                await task
+            except Exception:
+                log.exception("요청 중단 뒤 백업 복원 실패")
+            else:
+                download_job.start_queued_downloads(recover=True)
+            raise
+    download_job.start_queued_downloads(recover=True)
+    return report
+
+
+async def _restore_and_reconfigure(data: dict, request: Request) -> dict:
+    settings = get_settings()
     try:
-        report = await asyncio.to_thread(backup_restore.restore_backup, data, get_settings())
+        report = await asyncio.to_thread(backup_restore.restore_backup, data, settings)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
     except Exception as e:
@@ -50,7 +87,7 @@ async def restore_backup(data: dict, request: Request):
         raise HTTPException(status_code=400, detail=f"백업 파일 형식이 올바르지 않아 복원하지 못했습니다: {e}") from e
 
     # 예전 백업에는 받은 회차 기록이 없다 — 복원한 폴더가 있으면 그 폴더와 아카이빙 이력으로 만든다(없으면 첫 자동 다운로드 때)
-    await asyncio.to_thread(kakao_records.backfill_and_log, get_settings())
+    await asyncio.to_thread(kakao_records.backfill_and_log, settings)
     scheduler = getattr(request.app.state, "scheduler", None)
     if scheduler is not None:
         await asyncio.to_thread(scheduler_mod.reschedule_all, scheduler)

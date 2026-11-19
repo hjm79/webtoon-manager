@@ -16,8 +16,9 @@ import threading
 import xml.etree.ElementTree as ET
 import zipfile
 from collections import OrderedDict
+from pathlib import Path
 
-from . import db
+from . import archive_origin, db
 
 log = logging.getLogger("webtoon-server")
 
@@ -244,12 +245,8 @@ def list_platforms_in_scan_order() -> list[str]:
     SLOW_PLATFORMS(콤마로 구분한 플랫폼 폴더명)로 직접 지정하게 한다. 지정된 플랫폼은
     항상 뒤로 미뤄지고, 나머지는 기존처럼 이름순이다.
     """
-    if not os.path.isdir(LIBRARY_ROOT):
-        return []
-    platforms = [
-        name for name in sorted(os.listdir(LIBRARY_ROOT))
-        if os.path.isdir(os.path.join(LIBRARY_ROOT, name))
-    ]
+    with os.scandir(LIBRARY_ROOT) as entries:
+        platforms = sorted(entry.name for entry in entries if entry.is_dir())
     slow = {p.strip() for p in os.environ.get("SLOW_PLATFORMS", "").split(",") if p.strip()}
     fast_platforms = [p for p in platforms if p not in slow]
     slow_platforms = [p for p in platforms if p in slow]
@@ -270,7 +267,8 @@ def _scan_series_at_path(platform: str, series_ref: str, series_path: str) -> tu
     같은 로직을 중복 없이 공유하기 위해 따로 뺀 것.
     """
     series_name = os.path.basename(series_ref)
-    zip_filenames = [f for f in os.listdir(series_path) if os.path.splitext(f.lower())[1] in ARCHIVE_EXTS]
+    filenames = set(os.listdir(series_path))
+    zip_filenames = [f for f in filenames if os.path.splitext(f.lower())[1] in ARCHIVE_EXTS]
     if not zip_filenames:
         return None
 
@@ -313,6 +311,27 @@ def _scan_series_at_path(platform: str, series_ref: str, series_path: str) -> tu
         # 있어도) zip을 다시 열어서 mtime을 확인하는 불필요한 파일 작업을 안 해도 된다.
         cover_mtime = chapter_mtimes[0] if chapter_mtimes else 0
 
+    info = _parse_series_info(series_path)
+    archive_identity = None
+    if platform == "archive":
+        mappings = []
+        identities = set()
+        for index, chapter in enumerate(chapters):
+            origin = archive_origin.load(Path(chapter["path"]), filenames)
+            if origin is None:
+                continue
+            identities.add((origin["platform"], origin["title_id"]))
+            mappings.append((make_id(origin["platform"], origin["series_ref"]),
+                             make_id(origin["platform"], origin["series_ref"], origin["filename"]), chapter["id"], index))
+        db.copy_archived_progress(series_id, mappings)
+        metadata_identity = archive_origin.from_official_url((info or {}).get("web_url", ""))
+        # A custom archive destination can contain unrelated series. Resolve a
+        # work only when its folder has unambiguous evidence for that origin.
+        if len(identities) == 1 and len(mappings) == len(chapters):
+            archive_identity = next(iter(identities))
+        elif metadata_identity and (not identities or identities == {metadata_identity}):
+            archive_identity = metadata_identity
+
     series_entry = {
         "id": series_id,
         "platform": platform,
@@ -322,7 +341,8 @@ def _scan_series_at_path(platform: str, series_ref: str, series_path: str) -> tu
         "latest_mtime": latest_mtime,
         "cover_path": cover_path,
         "cover_mtime": cover_mtime,
-        "info": _parse_series_info(series_path),
+        "info": info,
+        "archive_identity": archive_identity,
     }
     return series_entry, chapters_map
 
@@ -378,10 +398,12 @@ def iter_platform_series_streaming(platform: str):
     series_entry에 "excluded" 플래그를 남겨서, 그 판단(숨길지 말지)은 이 결과를
     쓰는 쪽(관리자 메인 목록 API)이 하도록 넘긴다.
     """
+    def raise_walk_error(error: OSError) -> None:
+        # os.walk otherwise treats an unreadable folder as an empty one.
+        raise error
+
     platform_path = os.path.join(LIBRARY_ROOT, platform)
-    if not os.path.isdir(platform_path):
-        return
-    for dirpath, dirnames, filenames in os.walk(platform_path):
+    for dirpath, dirnames, filenames in os.walk(platform_path, onerror=raise_walk_error):
         dirnames.sort()
         has_archive = any(os.path.splitext(f.lower())[1] in ARCHIVE_EXTS for f in filenames)
         if not has_archive:

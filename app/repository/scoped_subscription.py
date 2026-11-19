@@ -1,6 +1,7 @@
 """Commit a newly activated subscription and its explicit scope together."""
 import json
 from contextlib import nullcontext
+import math
 import uuid
 
 from app.db import read_lock, write_transaction
@@ -9,6 +10,35 @@ from app.repository.naver_webtoons import _row_to_record
 from app.repository.kakao_webtoons import _row_to_kakao_webtoon
 
 _QUEUE_KEY = "workflow_download_queue"
+_RETRYABLE_DOWNLOAD_STATES = {"retry_download", "failed"}
+_QUEUE_STATES = {"queued", "running", "blocked_auth", "retry_wait"} | _RETRYABLE_DOWNLOAD_STATES
+
+
+def normalize_restored_queue(value: str | None) -> str:
+    """Check the stored queue before replacing data, then recover interrupted rows."""
+    try:
+        items = json.loads(value) if value is not None else []
+    except (TypeError, ValueError) as exc:
+        raise ValueError("백업에 올바르지 않은 다운로드 대기열이 있습니다.") from exc
+    if not isinstance(items, list):
+        raise ValueError("백업에 올바르지 않은 다운로드 대기열이 있습니다.")
+    ids, titles = set(), set()
+    for item in items:
+        if not isinstance(item, dict) or any(not isinstance(item.get(k), str) or not item[k]
+                                             for k in ("id", "platform", "title_id", "title", "state")):
+            raise ValueError("백업에 올바르지 않은 다운로드 대기 항목이 있습니다.")
+        key = (item["platform"], item["title_id"])
+        retry_at, attempts = item.get("retry_at"), item.get("attempts", 0)
+        if (item["state"] not in _QUEUE_STATES or key[0] not in ("naver", "kakao")
+                or item["id"] in ids or key in titles or type(attempts) is not int or attempts < 0
+                or (retry_at is not None and (type(retry_at) not in (int, float)
+                                              or not math.isfinite(retry_at) or retry_at < 0))):
+            raise ValueError("백업 다운로드 대기열에 중복되거나 올바르지 않은 상태가 있습니다.")
+        ids.add(item["id"])
+        titles.add(key)
+        if item["state"] == "running":
+            item.update(state="queued", reason=None, retry_at=None)
+    return json.dumps(items)
 
 
 def _queue(conn) -> list[dict]:
@@ -23,8 +53,14 @@ def _save_queue(conn, items: list[dict]) -> None:
 
 def _append_queue(conn, platform: str, title_id: str, title: str) -> list[dict]:
     items = _queue(conn)
-    if any(row["platform"] == platform and row["title_id"] == str(title_id) for row in items):
-        raise ValueError("이미 다운로드 대기열에 등록된 작품입니다.")
+    for row in items:
+        if row["platform"] != platform or row["title_id"] != str(title_id):
+            continue
+        if row["state"] not in _RETRYABLE_DOWNLOAD_STATES:
+            raise ValueError("이미 다운로드 대기열에 등록된 작품입니다.")
+        row.update(state="queued", reason=None, retry_at=None, attempts=0)
+        _save_queue(conn, items)
+        return items
     items.append({"id": uuid.uuid4().hex, "platform": platform, "title_id": str(title_id),
                   "title": title, "state": "queued", "enqueued_at": _now()})
     _save_queue(conn, items)
@@ -48,19 +84,22 @@ def enqueue_download(platform: str, title_id: str, title: str) -> list[dict]:
 
 
 def update_download_queue(item_id: str | None = None, *, state: str | None = None, recover: bool = False,
-                          reason: str | None = None, retry_at: float | None = None, connection=None) -> None:
+                          reason: str | None = None, retry_at: float | None = None,
+                          attempts: int | None = None, connection=None) -> None:
     with (write_transaction() if connection is None else nullcontext(connection)) as conn:
         items = _queue(conn)
         if recover:
             for item in items:
                 if item["state"] == "running":
-                    item["state"] = "queued"
+                    item.update(state="queued", reason=None, retry_at=None)
         elif state:
             for item in items:
                 if item["id"] == item_id:
                     item["state"] = state
                     item["reason"] = reason
                     item["retry_at"] = retry_at
+                    if attempts is not None:
+                        item["attempts"] = attempts
         else:
             items = [item for item in items if item["id"] != item_id]
         _save_queue(conn, items)

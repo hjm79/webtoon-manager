@@ -24,6 +24,8 @@ _download_job_lock = asyncio.Lock()
 
 
 _DOWNLOAD_TARGET_PLATFORMS = {"naver": {"naver"}, "kakao": {"kakao"}, "both": {"naver", "kakao"}}
+_DOWNLOAD_RETRY_DELAYS = (60, 300)
+_TIMED_QUEUE_STATES = {"retry_wait", "retry_download"}
 
 
 _download_claimed_platforms: set[str] = set()  # 지금 실행 중이거나 순서를 기다리는 실행이 맡은 플랫폼
@@ -74,9 +76,9 @@ async def _run_queued_downloads() -> None:
             await asyncio.sleep(1)
             continue
         eligible = [row for row in items if row['state'] == 'queued' or
-                    (row['state'] == 'retry_wait' and (row.get('retry_at') or 0) <= time.time())]
+                    (row['state'] in _TIMED_QUEUE_STATES and (row.get('retry_at') or 0) <= time.time())]
         if not eligible:
-            if any(row['state'] == 'retry_wait' for row in items):
+            if any(row['state'] in _TIMED_QUEUE_STATES for row in items):
                 await asyncio.sleep(1)
                 continue
             return
@@ -86,7 +88,7 @@ async def _run_queued_downloads() -> None:
         try:
             repository.update_download_queue(item["id"], state="running")
             async with _download_job_lock:
-                await _run_download_job_impl({platform}, only_title=title_id)
+                failure = await _run_download_job_impl({platform}, only_title=title_id)
         except kakao_page_auth.KakaoAuthPending as exc:
             state, message = kakao_page_auth.defer_download(item['id'], exc)
             workflow_progress.update(state=state, error=message, rest_until=None)
@@ -97,12 +99,25 @@ async def _run_queued_downloads() -> None:
             raise
         except Exception:
             log.exception("대기열 작품 다운로드 처리 중 오류")
-            workflow_progress.fail("다운로드 처리 중 오류가 발생했습니다. 다음 대기 작품으로 진행합니다.")
+            failure = "다운로드 처리 중 오류가 발생했습니다. 실행 이력을 확인해주세요."
+            workflow_progress.fail(failure)
             job_status.finish("download", success=False)
         finally:
             _active_batch_titles.clear()
             release_title_download(platform)
-        repository.update_download_queue(item["id"])
+        if failure is None:
+            repository.update_download_queue(item["id"])
+        else:
+            _retain_failed_download(item, failure)
+
+
+def _retain_failed_download(item: dict, reason: str) -> None:
+    attempts = item.get("attempts", 0) + 1
+    if attempts <= len(_DOWNLOAD_RETRY_DELAYS):
+        state, retry_at = "retry_download", time.time() + _DOWNLOAD_RETRY_DELAYS[attempts - 1]
+    else:
+        state, retry_at = "failed", None
+    repository.update_download_queue(item["id"], state=state, reason=reason, retry_at=retry_at, attempts=attempts)
 
 
 def download_busy() -> bool:
@@ -171,8 +186,8 @@ async def run_download_job(target: str = "naver", scheduled: bool = False) -> No
 
 
 async def _run_download_job_impl(platforms: set[str], scheduled: bool = False, partial: bool = False,
-                                 only_title: str | None = None) -> None:
-    """partial: 일부 플랫폼은 이미 다른 실행이 맡고 있어서 나머지만 실행하는 경우 — 안내 줄은 job_status.start가 로그를 비운 뒤에 남겨야 사라지지 않는다."""
+                                 only_title: str | None = None) -> str | None:
+    """Return a failure reason if a queued title did not finish successfully."""
     settings = get_settings()
     # 신작 스캔이 자동으로 구독 추가해 둔 매일+ 작품은 받지 않는다 — 저장해 둔 매일+ 목록으로(네트워크 없이) 먼저 제외됨으로 정리한다
     auto_excluded = repository.exclude_auto_added_titles(daily_plus.cached_ids()) if "naver" in platforms else []
@@ -248,6 +263,14 @@ async def _run_download_job_impl(platforms: set[str], scheduled: bool = False, p
 
     job_status.log_line("download", "다운로드 스캔 종료")
     job_status.finish("download", success=not had_error and not failures)
+    if only_title is not None and (had_error or failures):
+        progress = workflow_progress.title_snapshot(next(iter(platforms)), only_title) or {}
+        if progress.get("state") == "error" and progress.get("error"):
+            return progress["error"]
+        if failures and failures[0].get("episode_no") is not None:
+            return f"{failures[0]['episode_no']}화 다운로드 실패. 실행 이력을 확인해주세요."
+        return "작품 다운로드에 실패했습니다. 실행 이력을 확인해주세요."
+    return None
 
 
 def _cleanup_old_job_history() -> None:

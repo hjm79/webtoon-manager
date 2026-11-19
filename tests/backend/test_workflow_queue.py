@@ -52,8 +52,8 @@ async def concurrent_registration():
         if title_id == "9901":
             entered.set()
             await release.wait()
-        elif title_id == "9904":
-            raise RuntimeError("first queued title failed")
+        elif title_id == "9904" and sum(run[1] == "9904" for run in runs) == 1:
+            failures.append({"title_name": "검증 9904", "episode_no": 3, "subtitle": "ZIP 저장 실패"})
 
     async def kakao(settings, failures, *, only=None, skip_waiting=False):
         assert only is not None, "Kakao phase must use the snapshot captured before the Naver phase"
@@ -121,9 +121,21 @@ async def concurrent_registration():
             assert [row["state"] for row in repository.list_download_queue()] == ["queued", "queued"]
             release.set()
             await asyncio.wait_for(current, 3)
+            for _ in range(200):
+                retained = repository.list_download_queue()
+                if len(retained) == 1 and retained[0]["state"] == "retry_download":
+                    break
+                await real_sleep(0.01)
+            else:
+                raise AssertionError("failed item must remain retryable while the next title completes")
+            assert retained[0]["id"] == first["id"] and retained[0]["attempts"] == 1
+            assert retained[0]["retry_at"] > dj.time.time() and "3화" in retained[0]["reason"]
+            assert subscription_scope.get("naver", "9904")["pending_initial"] == [3]
+            repository.update_download_queue(first["id"], state="retry_download", retry_at=0)
             await asyncio.wait_for(dj._queue_worker_task, 3)
             assert [entry[:2] for entry in runs] == [("naver", "9901"), ("kakao", "9902"),
-                                                     ("naver", "9904"), ("kakao", "9905")], runs
+                                                     ("naver", "9904"), ("kakao", "9905"),
+                                                     ("naver", "9904")], runs
             assert runs[2][2] == {3} and runs[3][2] == {2}, runs
             assert repository.list_download_queue() == [] and not dj.download_busy()
             assert subscription_scope.get("naver", "9903")["episode_nos"] == [2, 4]
@@ -168,6 +180,43 @@ async def concurrent_registration():
                 job_status.finish("manual", success=True)
 
 
+async def bounded_retries_and_manual_restart():
+    title_id = "9910"
+    scope = subscription_scope.make_choice("naver", title_id, "selected", rows, episode_nos=[1, 3])
+    repository.activate_scoped_subscription("naver", title_id, "보존할 실패 작업", "", "", scope, enqueue=True)
+    item = repository.list_download_queue()[0]
+    calls = 0
+
+    async def failure(platforms, *, only_title):
+        nonlocal calls
+        assert platforms == {"naver"} and only_title == title_id
+        calls += 1
+        if calls == 1:
+            subscription_scope.completed("naver", title_id, 1)
+        raise RuntimeError("fixture write failed")
+
+    with patch.object(dj, "_DOWNLOAD_RETRY_DELAYS", (0, 0)), patch.object(dj, "_run_download_job_impl", failure):
+        await asyncio.wait_for(dj._run_queued_downloads(), 3)
+    retained = repository.list_download_queue()[0]
+    assert calls == 3 and retained["attempts"] == 3 and retained["state"] == "failed"
+    assert retained["id"] == item["id"] and retained["retry_at"] is None
+    assert subscription_scope.get("naver", title_id)["pending_initial"] == [3]
+
+    async def success(platforms, *, only_title):
+        assert subscription_scope.allowed_numbers("naver", only_title, [1, 3]) == {3}
+        subscription_scope.completed("naver", only_title, 3)
+
+    with patch.object(dj, "_run_download_job_impl", success):
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=main.app), base_url="http://test") as client:
+            reply = await client.post("/api/workflow/queue", json={"platform": "naver", "title_id": title_id})
+            assert reply.status_code == 200, reply.text
+            assert reply.json()["queue"][0]["id"] == item["id"]
+            await asyncio.wait_for(dj._queue_worker_task, 3)
+    assert not repository.list_download_queue()
+    assert subscription_scope.get("naver", title_id)["completed_numbers"] == [1, 3]
+
+
 atomic_registration()
 asyncio.run(concurrent_registration())
+asyncio.run(bounded_retries_and_manual_restart())
 print("atomic subscription, save-only while busy, stable two-platform snapshot, durable FIFO recovery, deduplication, scope protection and failure continuation passed")

@@ -80,7 +80,7 @@ def _matches(query: str, *values) -> bool:
 async def _search_naver(query: str) -> list[dict]:
     settings = get_settings()
     async with aiohttp.ClientSession() as session:
-        items = await naver_api.search_webtoons(session, query, settings.request_timeout_seconds)
+        items = await naver_api.search_webtoons(session, query, settings.request_timeout_seconds, raise_on_error=True)
         hidden = await daily_plus.current_ids(settings.request_timeout_seconds, session)
     tracked = {w.title_id: w for w in await asyncio.to_thread(repository.list_all)}
     return [{"platform": "naver", "title_id": str(item.title_id), "title": item.title_name,
@@ -91,7 +91,7 @@ async def _search_naver(query: str) -> list[dict]:
 
 async def _search_kakao(query: str) -> list[dict]:
     async with aiohttp.ClientSession() as session:
-        items = await kakao_api.search_series(session, query, get_settings().request_timeout_seconds)
+        items = await kakao_api.search_series(session, query, get_settings().request_timeout_seconds, raise_on_error=True)
     tracked = await asyncio.to_thread(repository.get_kakao_webtoons_map)
     return [{"platform": "kakao", "title_id": str(item["title_id"]), "title": item["title_name"],
              "thumbnail_url": item.get("thumbnail_url", ""), "subscription": (tracked.get(item["title_id"]) or {}).get("status"),

@@ -7,6 +7,7 @@ import shutil
 from pathlib import Path, PurePosixPath
 
 from app import rclone_client, repository
+from app.archiver import origin as archive_origin
 from app.file_utils import remove_forbidden_str, remove_forbidden_str_kakao
 from app.path_guard import resolve_under_root
 
@@ -138,7 +139,9 @@ def purge_empty_zip_files_local(dest_dir: Path | None) -> list[str]:
     return removed
 
 
-def move_file_with_conflict_policy(src: Path, dest_dir: Path, policy: str, dest_filename: str | None = None) -> tuple[str | None, bool]:
+def move_file_with_conflict_policy(
+    src: Path, dest_dir: Path, policy: str, dest_filename: str | None = None, *, origin: dict | None = None,
+) -> tuple[str | None, bool]:
     """src를 dest_dir로 옮긴다. dest_filename을 주면 원본 이름 대신 그 이름으로 저장한다
     (파일명 템플릿 적용용). 반환값은 (실제로 저장된 파일명(성공 시) 또는 None(건너뛴 경우),
     목적지에 이미 같은 이름 파일이 있어서 정책이 실제로 작동했는지 여부).
@@ -158,9 +161,33 @@ def move_file_with_conflict_policy(src: Path, dest_dir: Path, policy: str, dest_
                 counter += 1
         # overwrite는 dest_path 그대로 두고 shutil.move가 덮어쓰게 둔다
 
+    marker = archive_origin.marker_path(dest_path) if origin is not None else None
+    previous = None
+    if marker is not None:
+        if any(path.is_symlink() or (path.exists() and not path.is_file()) for path in (dest_path, marker)):
+            raise OSError("보관 파일이나 출처 기록 위치가 일반 파일 경로가 아닙니다.")
+        try:
+            with marker.open("rb") as stream:
+                previous = stream.read(8193)
+                if len(previous) > 8192:
+                    raise OSError("기존 보관 출처 기록 크기가 올바르지 않습니다.")
+        except FileNotFoundError:
+            pass
+        expected_stat = archive_origin.fingerprint(src)
+        archive_origin.write_marker(marker, archive_origin.encode_marker(origin, dest_path, expected_stat))
+
     try:
         shutil.move(str(src), str(dest_path))
     except Exception:
+        if marker is not None and src.exists():
+            try:
+                if previous is None:
+                    marker.unlink(missing_ok=True)
+                else:
+                    archive_origin.write_marker(marker, previous)
+            except OSError:
+                log.exception("보관 회차의 이전 출처 정보 복원 실패 (%s)", dest_path)
+
         # 옮기다 실패했다 — shutil.move는 복사가 끝난 뒤에만 원본을 지우므로 원본은 그대로다. 방금 목적지에 생긴 빈 파일만 정리하고(원본이 남아 있고 크기가 0일 때만) 오류는 그대로 올린다
         try:
             if src.exists() and dest_path.is_file() and dest_path.stat().st_size == 0:
@@ -168,6 +195,14 @@ def move_file_with_conflict_policy(src: Path, dest_dir: Path, policy: str, dest_
         except OSError:
             pass
         raise
+    if marker is not None:
+        try:
+            actual_stat = archive_origin.fingerprint(dest_path)
+            if actual_stat != expected_stat:
+                # A destination filesystem can preserve less mtime precision than the source.
+                archive_origin.write_marker(marker, archive_origin.encode_marker(origin, dest_path, actual_stat))
+        except OSError:
+            log.exception("파일은 이동했으나 보관 출처 정보를 확인하지 못했습니다 (%s)", dest_path)
     return dest_path.name, had_conflict
 
 
@@ -244,6 +279,7 @@ def _move_file_to_rclone_with_conflict_policy(
 def _move_episode_file(
     dest_type: str, src: Path, dest_filename: str | None, policy: str,
     rclone_config_path: str, remote: str, rclone_dest_path: str, local_dest_dir: Path | None,
+    *, origin: dict | None = None,
 ) -> tuple[str | None, bool]:
     """dest_type에 따라 로컬/rclone 이동 함수 중 맞는 쪽으로 그대로 위임한다.
     _archive_title이 로컬/rclone 분기마다 완전히 같은 반복문을 두 번 쓰지 않도록
@@ -251,6 +287,8 @@ def _move_episode_file(
     아무 로직도 새로 추가하지 않는다(순수 위임)."""
     if dest_type == "rclone":
         return _move_file_to_rclone_with_conflict_policy(rclone_config_path, src, remote, rclone_dest_path, policy, dest_filename)
+    if origin is not None:
+        return move_file_with_conflict_policy(src, local_dest_dir, policy, dest_filename, origin=origin)
     return move_file_with_conflict_policy(src, local_dest_dir, policy, dest_filename)
 
 

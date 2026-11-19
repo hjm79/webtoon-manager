@@ -68,14 +68,15 @@ def make_choice(platform: str, title_id: str | int, mode: str, episodes: list[di
     return value
 
 
-def allowed_numbers(platform: str, title_id: str | int, numbers: list[int]) -> set[int] | None:
+def allowed_numbers(platform: str, title_id: str | int, numbers: list[int], *, reopen=()) -> set[int] | None:
     """None preserves old subscriptions; explicit scopes retain failed initial episodes."""
     value = get(platform, title_id)
+    reopen = set(reopen)
     if value["mode"] == "all":
-        return set(numbers) - set(value["completed_numbers"]) if value["explicit"] else None
+        return set(numbers) - (set(value["completed_numbers"]) - reopen) if value["explicit"] else None
     pending = set(value["pending_initial"])
     if value["mode"] == "selected":
-        return set(numbers) & pending & set(value["episode_nos"])
+        return set(numbers) & (pending | reopen) & set(value["episode_nos"])
     return {n for n in numbers if n in pending or n > value["initial_cutoff"]}
 
 

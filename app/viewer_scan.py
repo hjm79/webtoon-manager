@@ -1,17 +1,13 @@
 """웹툰 뷰어 서버(webtoon-server)에 스캔을 시키는 공용 조정 장치 — 다운로드(수동 다운로드 포함)와 아카이빙(자동/수동/일괄 이동)이 새 파일을 만들면
 뷰어가 다시 훑게 해서, 뷰어 화면과 리포트의 "바로가기" 링크가 새 파일을 반영하게 한다.
 
-약속: "변경 시각 이후에 시작한 스캔이 끝나야 그 변경이 반영된다."
-- request(when): 스캔이 필요한 변경을 기록한다(연동이 켜져 있고 준비된 경우에만). 이미 그 변경 뒤에 시작한 스캔이 있으면 따로 요청하지 않는다(같은 변경에 스캔을 두 번 시키지 않음).
-- tick(): 1분마다(report_tick) 한 번 — 우리가 시작한 스캔은 끝났는지 상태만 확인하고(서버에는 가벼운 조회), 필요하면 새로 시작한다. 스캔 도중에 새 변경이 생기면 그 스캔이 끝난 뒤
-  다시 시작한다. 뷰어가 이미 스캔 중이면(자동 재스캔 등 우리가 시작하지 않은 스캔) 끝나기를 기다렸다가 시작한다(그 스캔은 우리 변경 전에 시작했을 수 있다).
-- 네트워크 드라이브는 스캔이 15~30분 걸릴 수 있어서 요청을 오래 붙잡지 않는다: 시작 요청(POST /api/integration/rescan)은 바로 돌아오고 이후 진행 상태(GET /api/integration/scan-status)만 본다.
-  최대 대기 시간(기본 45분)이 지나면 추적을 멈춘다. 뷰어가 이 연동을 지원하지 않거나(404) 토큰이 안 맞거나(401·403) 연결 오류면 그 요청은 버리고 다시 시도하지 않는다.
-- 뷰어는 로그인(PROFILES_ENABLED)이 켜져 있어도 쓸 수 있게 별도 토큰(뷰어의 INTEGRATION_TOKEN)으로 인증한다 — 토큰은 암호화해서 저장한다.
-상태는 설정 테이블에 JSON 한 덩어리로 저장해서 재시작해도 이어진다. 진행 로그는 리포트 상태 로그("report")에 남는다.
+시작 전에 처리할 변경 시각과 스캔 ID를 저장한다. 새 변경은 별도 요청으로 남고, 해당 ID의 성공 결과만 반영 완료로 기록한다.
+연결·스캔 실패는 시간을 두고 재시도한다. 재시작 후 같은 ID를 다시 확인할 수 있도록 상태는 DB에 저장한다.
 """
+import asyncio
 import logging
 from datetime import datetime, timedelta, timezone
+from uuid import uuid4
 
 from app import job_status, repository, viewer_connection, webtoon_server_client
 from app.json_setting import JsonSetting
@@ -67,16 +63,18 @@ def is_ready() -> bool:
 # ── 요청/진행 상태 ───────────────────────────────────────────────────
 
 STATE_KEY = "viewer_scan_state"
+_MAX_ATTEMPTS = 4
+_TICK_LOCK = asyncio.Lock()
 
 
 def _empty_state() -> dict:
     return {
-        "requested_at": None,  # 스캔이 필요한 가장 최근 변경 시각(아직 그 뒤에 시작한 스캔이 없음). None = 필요한 것 없음
-        "started_at": None,  # 마지막으로 시작한 스캔의 시작 시각
-        "finished": True,  # 그 스캔이 끝났는지(또는 추적을 멈췄는지)
-        "done_started_at": None,  # 끝까지 확인된 가장 최근 스캔의 시작 시각 — 이 시각 이전의 변경은 반영됐다
-        "foreign_wait": False,  # 뷰어가 이미 스캔 중이라(우리가 시작한 게 아님) 끝나기를 기다리는 중
-        "watermark": None,  # 다운로드 묶음을 여기까지는 스캔 대상으로 따졌다(같은 이력을 다시 따지지 않게)
+        "requested_at": None,  # 가장 최근의 아직 수락하지 않은 변경 시각
+        "active": None,  # 이미 배정한 변경 범위와 검증 대상 ID
+        "done_through": None,  # 성공을 확인한 마지막 변경 시각
+        "failed_through": None,
+        "failure": None,
+        "watermark": None,  # 리포트가 스캔 요청 여부를 확인한 시각
     }
 
 
@@ -90,12 +88,17 @@ def _iso(when: datetime) -> str:
     return when.astimezone(timezone.utc).isoformat()
 
 
+def _legacy_pending(state: dict) -> str | None:
+    # Earlier versions saved an in-flight start time without an identifiable result.
+    return state.get("started_at") if state.get("finished") is False else None
+
+
 def has_work() -> bool:
     """tick이 할 일이 있다: 스캔이 필요한 변경이 있거나, 우리가 시작한 스캔이 아직 도는 중이다(준비가 안 됐으면 없다)."""
     if not is_ready():
         return False
     state = load_state()
-    return bool(state["requested_at"]) or (bool(state["started_at"]) and not state["finished"])
+    return bool(state["requested_at"] or state["active"] or _legacy_pending(state))
 
 
 def request(when: datetime) -> None:
@@ -105,9 +108,9 @@ def request(when: datetime) -> None:
     with _STATE.lock:
         state = load_state()
         when_iso = _iso(when)
-        if state["started_at"] and state["started_at"] >= when_iso:
-            return  # 이미 그 변경 뒤에 시작한 스캔이 있다 — 그 스캔이 덮는다
-        if state["requested_at"] is None or state["requested_at"] < when_iso:
+        active = state["active"] or {}
+        latest = max(filter(None, (state["done_through"], active.get("through"), state["requested_at"])), default="")
+        if latest < when_iso:
             update_state(requested_at=when_iso)
 
 
@@ -132,56 +135,115 @@ def set_watermark(when: datetime) -> None:
 
 
 def covered_state(when: datetime) -> str:
-    """when 시각의 변경이 뷰어에 반영됐나: "done"(그 뒤에 시작한 스캔이 끝남) / "waiting"(스캔 중이거나 곧 시작) / "failed"(스캔을 시킬 수 없었거나 포기함)."""
+    """변경이 포함된 스캔의 성공 여부. 요청된 변경은 재시도 중에도 waiting이다."""
     state = load_state()
     when_iso = _iso(when)
-    if state["done_started_at"] and state["done_started_at"] >= when_iso:
+    if state["done_through"] and state["done_through"] >= when_iso:
         return "done"
-    if state["started_at"] and state["started_at"] >= when_iso and not state["finished"]:
-        return "waiting"
-    return "waiting" if state["requested_at"] else "failed"
+    active = state["active"] or {}
+    pending = max(filter(None, (active.get("through"), state["requested_at"], _legacy_pending(state))), default="")
+    return "waiting" if pending >= when_iso else "failed"
+
+
+def _claim(now: datetime) -> dict | None:
+    with _STATE.lock:
+        state = load_state()
+        if state["active"] is not None:
+            return state["active"]
+        through = max(filter(None, (state["requested_at"], _legacy_pending(state))), default=None)
+        if not through:
+            return None
+        active = {"id": uuid4().hex, "through": through, "attempt": 1, "phase": "start",
+                  "phase_at": _iso(now), "retry_at": None}
+        # A thread recording a new change after this checkpoint updates requested_at only.
+        update_state(active=active, requested_at=None, started_at=None, finished=True)
+        return active
+
+
+def _retain(active: dict, **fields) -> None:
+    with _STATE.lock:
+        if load_state()["active"] == active:
+            update_state(active={**active, **fields})
+
+
+def _complete(active: dict, reason: str | None = None) -> None:
+    with _STATE.lock:
+        state = load_state()
+        if state["active"] != active:
+            return
+        if reason is None:
+            done = max(state["done_through"] or "", active["through"])
+            update_state(active=None, done_through=done, failed_through=None, failure=None)
+            job_status.log_line("report", "뷰어 서버 스캔이 끝났습니다")
+        else:
+            update_state(active=None, failed_through=active["through"], failure=reason)
+            job_status.log_line("report", f"뷰어 서버 스캔 결과를 확인하지 못했습니다 ({reason})")
+
+
+def _retry(active: dict, now: datetime, reason: str, *, same_id: bool = False, phase: str = "start") -> None:
+    if active["attempt"] >= _MAX_ATTEMPTS:
+        _complete(active, reason)
+        return
+    delay = timedelta(minutes=2 ** (active["attempt"] - 1))
+    _retain(active, id=active["id"] if same_id else uuid4().hex, phase=phase, phase_at=_iso(now),
+            attempt=active["attempt"] + 1, retry_at=_iso(now + delay))
+    job_status.log_line("report", f"뷰어 서버 스캔을 다시 확인합니다 ({reason}, {delay.total_seconds() / 60:g}분 뒤)")
 
 
 async def tick(session, now: datetime, timeout_seconds: int) -> None:
-    """한 걸음: 우리가 시작한 스캔이 끝났는지 확인하고(끝나기 전에는 새로 시작하지 않는다), 필요하면 시작한다. 한 번에 상태 조회 한 번 + 시작 요청 한 번 이하."""
-    if not is_ready():
+    """1분 확인에서 현재 스캔 결과 조회와 새 시작 요청을 각각 최대 한 번 보낸다."""
+    if not is_ready() or _TICK_LOCK.locked():
         return
-    now = now.astimezone(timezone.utc)
-    state = load_state()
-    base_url, token, max_wait = viewer_connection.internal_base(repository.get_setting(_SERVER_URL_KEY)), get_token(), timedelta(minutes=get_max_wait_minutes())
-    if state["requested_at"] and state["started_at"] and state["started_at"] >= state["requested_at"]:
-        state = update_state(requested_at=None)  # 이미 덮인 요청
+    async with _TICK_LOCK:
+        await _tick(session, now.astimezone(timezone.utc), timeout_seconds)
 
-    if state["started_at"] and not state["finished"]:  # 우리가 시작한 스캔이 도는 중
-        if now - datetime.fromisoformat(state["started_at"]) >= max_wait:
-            job_status.log_line("report", f"뷰어 서버 스캔이 {get_max_wait_minutes()}분 안에 끝나지 않아 더 이상 추적하지 않습니다")
-            state = update_state(finished=True)
-        else:
-            status = await webtoon_server_client.scan_status(session, base_url, token, timeout_seconds)
-            if status is None or status.get("running"):
-                return  # 아직 도는 중 — 새 스캔은 끝난 뒤에
-            job_status.log_line("report", "뷰어 서버 스캔이 끝났습니다")
-            state = update_state(finished=True, done_started_at=state["started_at"])
 
-    if not state["requested_at"]:
+async def _tick(session, now: datetime, timeout_seconds: int) -> None:
+    active = _claim(now)
+    if active is None or (active["retry_at"] and _iso(now) < active["retry_at"]):
         return
-    if state["foreign_wait"]:  # 뷰어가 다른 이유로 스캔 중 — 끝나면 시작
-        if now - datetime.fromisoformat(state["requested_at"]) >= max_wait:
-            job_status.log_line("report", f"뷰어 서버의 스캔이 {get_max_wait_minutes()}분 안에 끝나지 않아 스캔 요청을 건너뜁니다")
-            update_state(requested_at=None, foreign_wait=False)
+    base_url = viewer_connection.internal_base(repository.get_setting(_SERVER_URL_KEY))
+    token = get_token()
+    phase = active["phase"]
+    if phase != "start":
+        status = await webtoon_server_client.scan_status(session, base_url, token, timeout_seconds, scan_id=active["id"])
+        identified = status is not None and status.get("scan_id") == active["id"]
+        outcome = status.get("outcome") if identified else None
+        if outcome == "success":
+            _complete(active)
+            active = _claim(now)
+            if active is not None:
+                await _start(session, base_url, token, timeout_seconds, active, now)
             return
-        status = await webtoon_server_client.scan_status(session, base_url, token, timeout_seconds)
-        if status is None or status.get("running"):
+        if outcome in ("partial", "failed", "cancelled") or (outcome == "unknown" and phase == "poll"):
+            _retry(active, now, outcome)
             return
-        state = update_state(foreign_wait=False)
-    result = await webtoon_server_client.start_scan(session, base_url, token, timeout_seconds)
+        if phase == "legacy" and not identified:
+            _retry(active, now, "스캔 ID 미지원", same_id=True, phase="legacy")
+            return
+        if phase == "poll" and status is not None and not identified:
+            _retry(active, now, "스캔 ID 확인 불가", same_id=True, phase="legacy")
+            return
+        if status is None or status["running"] or outcome == "running" or phase == "poll":
+            if now - datetime.fromisoformat(active["phase_at"]) >= timedelta(minutes=get_max_wait_minutes()):
+                _retry(active, now, "대기 시간 초과", same_id=phase != "poll")
+            return
+    await _start(session, base_url, token, timeout_seconds, active, now)
+
+
+async def _start(session, base_url: str, token: str, timeout_seconds: int, active: dict, now: datetime) -> None:
+    result = await webtoon_server_client.start_scan(session, base_url, token, timeout_seconds, request_id=active["id"])
     if result == "started":
         job_status.log_line("report", "뷰어 서버 스캔을 시작했습니다")
-        update_state(started_at=_iso(now), finished=False, requested_at=None)
+        _retain(active, phase="poll", phase_at=_iso(now), retry_at=None)
     elif result == "running":
         job_status.log_line("report", "뷰어 서버가 이미 스캔 중이라 그 스캔이 끝난 뒤에 시작합니다")
-        update_state(foreign_wait=True)
+        _retain(active, phase="foreign", phase_at=_iso(now), retry_at=None)
+    elif result == "legacy":
+        _retry(active, now, "스캔 ID 미지원", same_id=True, phase="legacy")
+    elif result == "unsupported":
+        _complete(active, "연동 미지원 또는 인증 실패")
     else:
-        job_status.log_line("report", "뷰어 서버 스캔을 시킬 수 없어서(연동 미지원/인증 실패/연결 오류) 건너뜁니다")
-        update_state(requested_at=None)
+        # The viewer may have started the scan before the connection broke.
+        _retry(active, now, "시작 응답 없음", same_id=True)
 

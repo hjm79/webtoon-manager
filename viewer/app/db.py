@@ -98,6 +98,16 @@ def init_schema() -> None:
             )
             """
         )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS archive_progress_imports (
+                series_id TEXT NOT NULL,
+                chapter_id TEXT NOT NULL,
+                source_chapter_id TEXT NOT NULL,
+                PRIMARY KEY (series_id, chapter_id, source_chapter_id)
+            )
+            """
+        )
         conn.commit()
     finally:
         conn.close()
@@ -297,6 +307,61 @@ def clear_profile_reading_state(profile_id: str) -> None:
     with db_connection() as conn:
         conn.execute("DELETE FROM profile_reading_sessions WHERE profile_id = ?", (profile_id,))
         conn.execute("DELETE FROM progress_write_intents WHERE actor_key = ?", (f"profile:{profile_id}",))
+        conn.commit()
+
+
+def archive_progress_imported(series_id: str) -> bool:
+    with db_connection() as conn:
+        return conn.execute("SELECT 1 FROM archive_progress_imports WHERE series_id = ? LIMIT 1", (series_id,)).fetchone() is not None
+
+
+def copy_archived_progress(series_id: str, mappings: list[tuple[str, str, str, int]]) -> None:
+    """Seed only exact new archive chapters, preserving source rows and account isolation.
+
+    Mark each import in the same transaction. Rescanning must not undo a reader's
+    later progress or an explicit mark-unread in the archive.
+    """
+    if not mappings:
+        return
+    with db_connection() as conn:
+        profiles = conn.execute("SELECT 1 FROM sqlite_master WHERE name = 'profile_progress'").fetchone() is not None
+        for source_series, source_chapter, chapter_id, index in mappings:
+            inserted = conn.execute(
+                "INSERT OR IGNORE INTO archive_progress_imports VALUES (?, ?, ?)",
+                (series_id, chapter_id, source_chapter),
+            )
+            if not inserted.rowcount:
+                continue
+            origin = (source_series, source_chapter)
+            conn.execute(
+                """INSERT OR IGNORE INTO read_chapters (series_id, chapter_id)
+                SELECT ?, ? FROM read_chapters WHERE series_id = ? AND chapter_id = ?""",
+                (series_id, chapter_id, *origin),
+            )
+            conn.execute(
+                """INSERT INTO progress (series_id, chapter_id, chapter_index, page_index, page_offset, updated_at)
+                SELECT ?, ?, ?, page_index, page_offset, updated_at FROM progress WHERE series_id = ? AND chapter_id = ?
+                ON CONFLICT (series_id) DO UPDATE SET chapter_id=excluded.chapter_id, chapter_index=excluded.chapter_index,
+                    page_index=excluded.page_index, page_offset=excluded.page_offset, updated_at=excluded.updated_at
+                WHERE progress.updated_at < excluded.updated_at""",
+                (series_id, chapter_id, index, *origin),
+            )
+            if profiles:
+                conn.execute(
+                    """INSERT OR IGNORE INTO profile_read_chapters (profile_id, series_id, chapter_id)
+                    SELECT profile_id, ?, ? FROM profile_read_chapters WHERE series_id = ? AND chapter_id = ?""",
+                    (series_id, chapter_id, *origin),
+                )
+                conn.execute(
+                    """INSERT INTO profile_progress (profile_id, series_id, chapter_id, chapter_index, page_index, page_offset, updated_at)
+                    SELECT profile_id, ?, ?, ?, page_index, page_offset, updated_at FROM profile_progress
+                    WHERE series_id = ? AND chapter_id = ?
+                    ON CONFLICT (profile_id, series_id) DO UPDATE SET chapter_id=excluded.chapter_id,
+                        chapter_index=excluded.chapter_index, page_index=excluded.page_index,
+                        page_offset=excluded.page_offset, updated_at=excluded.updated_at
+                    WHERE profile_progress.updated_at < excluded.updated_at""",
+                    (series_id, chapter_id, index, *origin),
+                )
         conn.commit()
 
 

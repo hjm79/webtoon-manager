@@ -17,6 +17,7 @@ sent = []; FAIL = {"on": False}
 async def fake_send(session, message):
     if FAIL["on"]: raise RuntimeError("웹훅 전송 실패")
     sent.append(message)
+    return True
 discord_notify.send_webhook_notification = fake_send
 NAVER = []; KAKAO = []
 async def fake_naver(session, settings): return list(NAVER)
