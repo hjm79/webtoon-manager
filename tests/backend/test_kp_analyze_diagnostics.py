@@ -29,7 +29,8 @@ class Sess:
     def __init__(self, *a, **k): pass
     async def __aenter__(self): return self
     async def __aexit__(self, *a): return False
-    def get(self, url, params=None, headers=None, timeout=None):
+    def get(self, url, params=None, headers=None, timeout=None, allow_redirects=False):
+        assert allow_redirects is False
         assert "product/list" in str(url), str(url)
         return R({"result": {"series_item": copy.deepcopy(SERIES), "list": STATE["items"], "has_next": False}})
 aiohttp.ClientSession = Sess

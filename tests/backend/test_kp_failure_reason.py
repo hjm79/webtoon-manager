@@ -31,7 +31,8 @@ class StatusSite(Site):
     """viewer/data(와 선택적으로 이미지)가 정해진 HTTP 상태로 오는 가짜 서버."""
     def __init__(self, items, viewer_status=200, image_status=200, **k):
         super().__init__(items, **k); self.viewer_status, self.image_status = viewer_status, image_status
-    def get(self, url, params=None, headers=None, timeout=None):
+    def get(self, url, params=None, headers=None, timeout=None, allow_redirects=False):
+        assert allow_redirects is False
         if "viewer/data" in str(url) and self.viewer_status != 200: return R(status=self.viewer_status)
         if "viewer/data" not in str(url) and "/api/" not in str(url) and self.image_status != 200: return TextR(status=self.image_status, body=b"nope")
         return super().get(url, params, headers, timeout)

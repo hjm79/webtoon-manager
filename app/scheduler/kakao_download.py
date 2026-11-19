@@ -20,11 +20,11 @@ _KAKAO_UNLIMITED_EPISODES = 100_000
 _KAKAO_MAX_BATCHES_PER_TITLE = 200
 
 
-def _authentication_failure(subscribed: list[dict], failures: list[dict], message: str) -> None:
+def _authentication_failure(subscribed: list[dict], failures: list[dict], message: str, *, state="blocked_auth") -> None:
     for webtoon in subscribed:
         failures.append({"title_name": webtoon["title"], "episode_no": None, "subtitle": message})
         workflow_progress.begin("kakao", webtoon["title_id"], webtoon["title"], 0)
-        workflow_progress.fail(message)
+        workflow_progress.update(state=state, error=message)
 
 
 def _kakao_remaining_free(result) -> int:
@@ -93,6 +93,8 @@ async def _download_kakao_title(client, settings, webtoon: dict, root: str, fail
                 use_rental_tickets=use_rental_tickets,
                 should_continue=lambda: _subscription_active(series_id),
             )
+        except kakao_page_auth.KakaoAuthPending:
+            raise
         except Exception as e:
             log.error("카카오페이지 웹툰(series_id=%s) 다운로드 중 예외 — 다음으로 진행: %s", series_id, e)
             job_status.log_line("download", f"[{title}] 처리 중 오류: {e}")
@@ -203,21 +205,50 @@ async def _download_kakao_subscriptions(
             if client is None:
                 job_status.log_line("download", "카카오페이지 로그인 쿠키가 없어서 건너뜁니다(설정에서 쿠키를 저장해주세요)")
                 _authentication_failure(subscribed, failures, "카카오페이지 로그인 쿠키가 필요합니다.")
-                return []
-            logged_in = await client.check_login()
+                raise kakao_page_auth.KakaoAuthPending('not_configured', 'missing_credentials')
+            health = kakao_page_auth.status()
+            login_problem = None
+            if health['state'] == 'reauth_required':
+                from app.kakao_session_refresh import refresh_saved_session
+
+                recovery = await refresh_saved_session(session=session, force=True)
+                if recovery['state'] == 'healthy':
+                    client._ensure_current()
+                    logged_in = True
+                elif recovery['state'] in ('credentials_changed', 'not_configured'):
+                    raise kakao_page_auth.KakaoAuthPending(recovery['state'], recovery['reason'], client.credential_version)
+                else:
+                    logged_in = False if recovery['state'] == 'reauth_required' else None
+                    login_problem = recovery['reason']
+            else:
+                logged_in = await client.check_login()
+            kakao_page_download.persist_refreshed_cookies(client)
             status = kakao_page_auth.cookie_status(kakao_page_auth.load_cookies())
             await kakao_page_auth.notify_if_needed(session, logged_in, status["days_left"])
             if logged_in is not True:
-                job_status.log_line("download", "카카오페이지 로그인이 풀려 있어서 건너뜁니다(쿠키를 다시 붙여넣어 주세요)")
-                _authentication_failure(subscribed, failures, "카카오페이지 로그인 확인이 필요합니다.")
-                return []
+                state = 'reauth_required' if logged_in is False else 'unknown'
+                message = kakao_page_auth.MESSAGES[state]
+                job_status.log_line('download', message)
+                _authentication_failure(subscribed, failures, message,
+                                        state='retry_wait' if logged_in is None else 'blocked_auth')
+                reason = login_problem or getattr(client, 'last_problem', None) or 'login_check_failed'
+                raise kakao_page_auth.KakaoAuthPending(state, reason, getattr(client, 'credential_version', None))
 
             use_rental_tickets = repository.is_kakao_rental_ticket_auto_use_enabled()
             if use_rental_tickets:
                 job_status.log_line("download", "대여권 자동 사용이 켜져 있습니다 — 기다무로 못 여는 회차는 작품의 보유 대여권으로 엽니다")
             results = []  # 작품별 결과(예외로 중단되면 None) — 끝에 요약 한 줄을 남긴다
             for webtoon in subscribed:
-                result = await _download_kakao_title(client, settings, webtoon, root, failures, use_rental_tickets=use_rental_tickets, session=session)
+                try:
+                    result = await _download_kakao_title(client, settings, webtoon, root, failures, use_rental_tickets=use_rental_tickets, session=session)
+                except kakao_page_auth.KakaoAuthPending as exc:
+                    if exc.state != 'unknown' or len(subscribed) == 1:
+                        raise
+                    job_status.log_line('download', f"[{webtoon['title']}] {exc} 다른 작품은 계속 확인합니다.")
+                    failures.append({'title_name': webtoon['title'], 'episode_no': None, 'subtitle': str(exc)})
+                    workflow_progress.fail(str(exc))
+                    results.append(None)
+                    continue
                 results.append(result)
                 # 쉬는 시간이 긴 이어받기 중에 쿠키가 갱신될 수 있어서 작품마다 저장한다(중간에 멈춰도 갱신분이 남도록)
                 kakao_page_download.persist_refreshed_cookies(client)

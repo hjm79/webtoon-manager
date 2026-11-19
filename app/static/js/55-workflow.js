@@ -558,14 +558,15 @@ document.getElementById("workflow-subscribe-form").addEventListener("submit", as
 
 function renderWorkflowStatus(data) {
   workflowStatusData = data;
+  if (typeof renderKakaoAuthBanner === "function") renderKakaoAuthBanner(data.kakao_auth, data.queue || []);
   const running = (data.queue || []).find((item) => item.state === "running");
-  const waiting = (data.queue || []).filter((item) => item.state === "queued");
+  const waiting = (data.queue || []).filter((item) => ["queued", "blocked_auth", "retry_wait"].includes(item.state));
   const progress = running && !["running", "resting"].includes(data.progress?.state)
     ? { state: running.rest_until ? "resting" : "running", title: running.title, rest_until: running.rest_until }
     : data.progress || {};
   document.getElementById("workflow-progress-heading").textContent = ["running", "resting"].includes(progress.state)
     ? "실행 중인 작업" : ["success", "error", "deferred"].includes(progress.state) ? "최근 실행 결과" : "현재 작업";
-  const labels = { idle: "실행 중인 다운로드가 없습니다.", queued: "다운로드 대기", running: "다운로드 중", resting: "묶음 다운로드 사이 휴식", success: "다운로드 완료", deferred: "구독 해제로 중단", error: "다운로드 실패" };
+  const labels = { idle: "실행 중인 다운로드가 없습니다.", queued: "다운로드 대기", blocked_auth: "카카오 재인증 대기", retry_wait: "연결 확인 후 재시도 대기", running: "다운로드 중", resting: "묶음 다운로드 사이 휴식", success: "다운로드 완료", deferred: "구독 해제로 중단", error: "다운로드 실패" };
   document.getElementById("workflow-state").textContent = labels[progress.state] || "실행 중인 다운로드가 없습니다.";
   document.getElementById("workflow-next-run").textContent = data.next_run_at ? `다음 다운로드 예약: ${formatKoreanTime(data.next_run_at)} (한국 시간)` : "등록된 다운로드 예약이 없습니다.";
   const details = [];
@@ -585,16 +586,17 @@ function renderWorkflowStatus(data) {
     const row = document.createElement("li");
     const content = document.createElement("div");
     const text = document.createElement("span");
-    text.textContent = `${item.title} · 다운로드 대기`;
+    const label = item.state === "blocked_auth" ? "카카오 재인증 대기" : item.state === "retry_wait" ? "연결 확인 후 재시도 대기" : "다운로드 대기";
+    text.textContent = `${item.title} · ${label}${item.reason ? ` · ${item.reason}` : ""}`;
     const cancel = makeButton("대기 취소", async () => {
       cancel.disabled = true;
       try {
         await apiCall("/api/workflow/queue/cancel", { method: "POST", body: JSON.stringify({ platform: item.platform, title_id: String(item.title_id) }) });
         await refreshWorkflowStatus();
-      } catch (e) { alert(e.message); cancel.disabled = item.state !== "queued"; }
+      } catch (e) { alert(e.message); cancel.disabled = item.state === "running"; }
     });
-    cancel.disabled = item.state !== "queued";
-    cancel.title = item.state === "queued" ? "구독과 받은 파일을 유지하고 이번 대기 작업만 취소" : "실행 중인 작업은 대기 취소할 수 없습니다.";
+    cancel.disabled = item.state === "running";
+    cancel.title = item.state !== "running" ? "구독과 받은 파일을 유지하고 이번 대기 작업만 취소" : "실행 중인 작업은 대기 취소할 수 없습니다.";
     content.append(text, cancel); row.appendChild(content); queue.appendChild(row);
   }
   if (!queue.children.length) queue.textContent = "다운로드 대기 작업이 없습니다.";
@@ -615,7 +617,7 @@ function renderWorkflowStatus(data) {
     const row = document.createElement("div");
     const text = document.createElement("span");
     const modeLabel = { all: "전체 공개 회차", latest: `최근 ${item.scope?.latest_count || 0}회차부터`, selected: "선택한 회차만", future: "새 회차만" }[item.scope?.mode] || "기존 구독 범위";
-    const stateLabel = { available: "받은 회차 있음", idle: "대기 중", scheduled: "예약 대기", queued: "다운로드 대기", running: "다운로드 중", resting: "휴식 중", success: "완료", deferred: "구독 해제로 중단", error: "실패" }[item.status] || "구독 중";
+    const stateLabel = { available: "받은 회차 있음", idle: "대기 중", scheduled: "예약 대기", queued: "다운로드 대기", blocked_auth: "카카오 재인증 대기", retry_wait: "연결 확인 후 재시도 대기", running: "다운로드 중", resting: "휴식 중", success: "완료", deferred: "구독 해제로 중단", error: "실패" }[item.status] || "구독 중";
     const waitingPosition = waiting.findIndex((row) => row.platform === item.platform && String(row.title_id) === String(item.title_id)) + 1;
     text.textContent = `${item.title} · ${stateLabel}${waitingPosition ? ` · 대기열 ${waitingPosition}번째` : ""} · 받은 회차 ${item.downloaded_count || 0}개 · ${modeLabel}`;
     const sourceLabel = item.added_source === "artist" ? "작가 자동 구독" : item.added_source === "tag" ? "태그 자동 구독" : null;

@@ -7,10 +7,14 @@
 """
 import logging
 import os
+from threading import Event
+from unittest.mock import patch
 
+from apscheduler.events import EVENT_JOB_ERROR
 from starlette.testclient import TestClient
 
 from app import config, db, job_status, kakao_catalog, kakao_records, report_dispatch, repository, waitfree_sync
+from app.scheduler import schedule
 db.get_connection()
 import app.main as main
 
@@ -89,4 +93,38 @@ try:
 finally:
     del os.environ[removed]
 print("4) 옛 환경변수 경고 OK")
+
+# An immediate refresh failure must stay within the scheduler and allow normal shutdown.
+refresh_failed = Event()
+queue_stopped = Event()
+
+
+async def fail_refresh():
+    raise RuntimeError("Simulated refresh failure")
+
+
+async def stop_queue():
+    queue_stopped.set()
+
+
+def scheduler_with_listener():
+    scheduler = create_scheduler()
+
+    def on_error(event):
+        if event.job_id == "kakao_session_refresh" and isinstance(event.exception, RuntimeError):
+            refresh_failed.set()
+
+    scheduler.add_listener(on_error, EVENT_JOB_ERROR)
+    return scheduler
+
+
+create_scheduler = main.create_scheduler
+with (patch.object(schedule, "run_auto_refresh_job", fail_refresh),
+      patch.object(main, "create_scheduler", scheduler_with_listener),
+      patch.object(main.download_job, "stop_queued_downloads", stop_queue)):
+    with startup() as client:
+        assert refresh_failed.wait(3), "Refresh should run immediately, including when its first attempt fails"
+        assert client.get("/api/settings").status_code == 200
+    assert queue_stopped.is_set() and calls["stop_bot"] == 1
+print("5) 시작 갱신 작업 실패에도 정상 응답과 대기열·봇 종료 OK")
 print("ALL OK")

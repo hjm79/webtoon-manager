@@ -86,8 +86,8 @@ class Sess:
     def __init__(self, *a, **k): pass
     async def __aenter__(self): return self
     async def __aexit__(self, *a): return False
-    def get(self, url, params=None, headers=None, timeout=None): return handler(str(url), dict(params or {}))
-    def post(self, url, data=None, headers=None, timeout=None): return handler(str(url), dict(data or {}))
+    def get(self, url, params=None, headers=None, timeout=None, allow_redirects=False): assert allow_redirects is False; return handler(str(url), dict(params or {}))
+    def post(self, url, data=None, headers=None, timeout=None, allow_redirects=False): assert allow_redirects is False; return handler(str(url), dict(data or {}))
 import aiohttp; aiohttp.ClientSession = Sess
 kakao_cover.fetch_official_cover_bytes = lambda sid, **k: b"\xff\xd8\xffcover"
 _o = asyncio.sleep

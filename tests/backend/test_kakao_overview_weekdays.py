@@ -31,7 +31,8 @@ print("2) 판매 상태 OK")
 # Scenario 3: 개요 요청 — result.content를 돌려주고(요일 포함), 못 받으면 None(실패/내용 없음)
 class Session:
     def __init__(self, outcome): self.outcome, self.calls = outcome, []
-    def get(self, url, params=None, headers=None, timeout=None):
+    def get(self, url, params=None, headers=None, timeout=None, allow_redirects=False):
+        assert allow_redirects is False
         self.calls.append((url, params))
         if isinstance(self.outcome, BaseException): raise self.outcome
         return self.outcome

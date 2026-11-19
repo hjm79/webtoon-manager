@@ -25,10 +25,12 @@ class FakeResp:
 
 class FakeSession:
     def __init__(self, handler): self.handler, self.calls = handler, []
-    def get(self, url, params=None, headers=None, timeout=None):
+    def get(self, url, params=None, headers=None, timeout=None, allow_redirects=False):
+        assert allow_redirects is False
         url = str(url)
         self.calls.append(("GET", url, dict(params or {}), dict(headers or {}))); return self.handler("GET", url, dict(params or {}), None)
-    def post(self, url, data=None, headers=None, timeout=None):
+    def post(self, url, data=None, headers=None, timeout=None, allow_redirects=False):
+        assert allow_redirects is False
         self.calls.append(("POST", url, dict(data or {}), dict(headers or {}))); return self.handler("POST", url, {}, dict(data or {}))
 
 async def _nosleep(x): return None
@@ -79,7 +81,7 @@ assert "만료" in auth.health_alert_message(False, 10) and "다시" in auth.hea
 assert "5" in (auth.health_alert_message(True, 4) or "") or "4" in (auth.health_alert_message(True, 4) or "")
 assert auth.health_alert_message(True, 6) is None
 sent = []
-fake_send = discord_fake(sent, result=None)
+fake_send = discord_fake(sent, result=True)
 auth.discord_notify.send_webhook_notification = fake_send
 auth.discord_config.set_webhook_url("https://discord.com/api/webhooks/1/test")   # 실제처럼 웹훅이 있어야 쿠키 알림이 나간다(없으면 보내지도 기록하지도 않음)
 async def t3():

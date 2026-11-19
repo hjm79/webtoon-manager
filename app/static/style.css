@@ -1304,3 +1304,8 @@ select {
   #page-settings .registry-add-row { flex-wrap: wrap; }
   #page-settings .registry-add-row input { min-width: 0; }
 }
+
+.kakao-auth-banner { margin: 12px 0; padding: 12px 16px; border: 1px solid #d7a33d; border-radius: 8px; background: #fff8e7; color: #624600; display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.kakao-auth-banner span { flex: 1 1 240px; overflow-wrap: anywhere; }
+.kakao-auth-banner button { flex-shrink: 0; }
+.kakao-auth-banner.hidden { display: none; }

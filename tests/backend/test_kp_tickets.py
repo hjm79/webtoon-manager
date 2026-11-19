@@ -36,7 +36,8 @@ class Site:
         self.items, self.waitfree, self.ticket_type, self.gift = items, waitfree, ticket_type, gift
         self.posts, self.opened = [], set()
     def series_item(self): return {"id": 1, "is_waitfree": True, "title": "작품", "authors": "가,나", "description": "d", "sub_category": "드라마", "age_grade": 0, "on_issue": "Y"}
-    def get(self, url, params=None, headers=None, timeout=None):
+    def get(self, url, params=None, headers=None, timeout=None, allow_redirects=False):
+        assert allow_redirects is False
         url = str(url)
         p = params or {}
         if "product/list" in url:
@@ -61,7 +62,8 @@ class Site:
             return R(data={"result_code": 0, "result": {"author_list": [{"name": "김용회", "role": "writer", "role_display_name": "글"}, {"name": "김용회", "role": "illustrator", "role_display_name": "그림"},
                                                                      {"name": "베르나르 베르베르", "role": "original_author", "role_display_name": "원작"}], "theme_keyword_list": [{"title": "추리물"}, {"title": "가족"}]}})
         return R(body=JPG, ctype="image/jpeg")
-    def post(self, url, data=None, headers=None, timeout=None):
+    def post(self, url, data=None, headers=None, timeout=None, allow_redirects=False):
+        assert allow_redirects is False
         self.posts.append((url.rsplit("/api/", 1)[-1], dict(data or {})))
         if url.endswith("/ticket/use"):
             self.opened.add(int(data["product_id"])); self.waitfree = False
@@ -98,7 +100,8 @@ async def main():
         def __init__(self, count, saved_sort):
             super().__init__([item(o, f"작품 {o}화", free=True) for o in range(1, count + 1)])
             self.saved_sort, self.requests = saved_sort, []
-        def get(self, url, params=None, headers=None, timeout=None):
+        def get(self, url, params=None, headers=None, timeout=None, allow_redirects=False):
+            assert allow_redirects is False
             url = str(url)
             if "product/list" not in url: return super().get(url, params, headers, timeout)
             p = params or {}; self.requests.append(dict(p))
@@ -163,7 +166,8 @@ async def main():
     # ── 5-2. 기다무 주기(3시간/1일/3일)를 이용권 응답에서 읽는다 ──
     class Period(Site):
         def __init__(self, minutes, **k): super().__init__(items, **k); self.minutes = minutes
-        def get(self, url, params=None, headers=None, timeout=None):
+        def get(self, url, params=None, headers=None, timeout=None, allow_redirects=False):
+            assert allow_redirects is False
             r = super().get(url, params, headers, timeout)
             if str(url).endswith("/ticket/my"): r._d["result"]["waitfree"]["charged_period_by_minute"] = self.minutes
             return r
@@ -176,7 +180,8 @@ async def main():
     tricky = "https://dw-img-page.kakao.com/sdownload/resource?token=eTd3c_Kiz-N%2BPF%3D%3D&x=a+b"       # 인코딩된 문자가 들어 있는 토큰 주소
     sent = []
     class Probe(Site):
-        def get(self, url, params=None, headers=None, timeout=None):
+        def get(self, url, params=None, headers=None, timeout=None, allow_redirects=False):
+            assert allow_redirects is False
             if "sdownload" in str(url): sent.append(url); return R(body=JPG, ctype="image/jpeg")
             return super().get(url, params, headers, timeout)
     cl = client(Probe(items)); assert await cl.download_image(tricky) is not None
@@ -185,7 +190,8 @@ async def main():
         """viewer/data 첫 응답의 주소는 무효(404), 두 번째 응답부터 유효 — 서명 주소가 만료/무효일 때의 복구."""
         def __init__(self, items, good_after):
             super().__init__(items); self.good_after, self.viewer_calls, self.image_calls = good_after, 0, []
-        def get(self, url, params=None, headers=None, timeout=None):
+        def get(self, url, params=None, headers=None, timeout=None, allow_redirects=False):
+            assert allow_redirects is False
             u = str(url)
             if "viewer/data" in u:
                 self.viewer_calls += 1; pid = int(params["product_id"])

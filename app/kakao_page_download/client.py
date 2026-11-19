@@ -5,7 +5,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from datetime import datetime
+import time
+from email.utils import parsedate_to_datetime
+from datetime import datetime, timezone
 
 import aiohttp
 from yarl import URL
@@ -69,7 +71,14 @@ class KakaoPageClient:
     것(aiohttp.DummyCookieJar)으로 만들어 쓴다 — 쿠키는 이 객체가 직접 관리하고, 서버가 새로 내려준
     쿠키는 cookies에 반영하며 cookies_changed로 표시한다(호출부가 끝나고 저장)."""
 
-    def __init__(self, session: aiohttp.ClientSession, cookies: dict[str, str], timeout_seconds: int):
+    def __init__(self, session: aiohttp.ClientSession, cookies: dict[str, str], timeout_seconds: int, *, cookie_entries=None, credential_version=None, cookie_revision=None):
+        self.credential_version = credential_version
+        self.cookie_entries = [dict(c) for c in cookie_entries] if cookie_entries is not None else [
+            {"name": name, "value": value, "domain": ".kakao.com", "path": "/", "secure": True} for name, value in cookies.items()]
+        self.persisted_cookie_entries = [dict(c) for c in self.cookie_entries]
+        self.cookie_revision = cookie_revision
+        self.last_problem = None
+        self._last_url = "https://bff-page.kakao.com/"
         self._session = session
         self._timeout = aiohttp.ClientTimeout(total=timeout_seconds)
         self.cookies = dict(cookies)
@@ -77,44 +86,192 @@ class KakaoPageClient:
         self.last_failure: str | None = None  # 가장 최근 받기 실패의 원인(화면 로그 한 줄에 붙인다). 새 회차를 받기 시작할 때 지운다
         self.last_waitfree_charged_at: str | None = None  # 가장 최근 기다무 사용 응답이 알려 준 다음 충전 시각(waitfree_charged_at)
 
-    def _headers(self, *, image: bool = False, post: bool = False) -> dict:
+    def _headers(self, *, image: bool = False, post: bool = False, url=None) -> dict:
         headers = dict(kakao_api.IMAGE_HEADERS if image else kakao_api.HEADERS)
-        headers["Cookie"] = "; ".join(f"{name}={value}" for name, value in self.cookies.items())
+        target = URL(url or self._last_url)
+        now = time.time()
+        matches = []
+        for cookie in self.cookie_entries:
+            domain = cookie['domain'].lower().lstrip('.')
+            host = target.host or ''
+            domain_ok = host == domain or (not cookie.get('hostOnly') and host.endswith('.' + domain))
+            path = cookie.get('path', '/')
+            path_ok = target.path == path or target.path.startswith(path.rstrip('/') + '/')
+            expiry = cookie.get('expirationDate')
+            if domain_ok and path_ok and (not cookie.get('secure') or target.scheme == 'https') and (expiry is None or expiry > now):
+                matches.append(cookie)
+        matches.sort(key=lambda c: len(c.get('path', '/')), reverse=True)
+        headers["Cookie"] = "; ".join(f"{c['name']}={c['value']}" for c in matches)
         if post:
             headers["Content-Type"] = "application/x-www-form-urlencoded"
         return headers
 
-    def _absorb_cookies(self, response) -> None:
+    def _ensure_current(self, *, refresh=True):
+        if self.credential_version is None:
+            return
+        if refresh:
+            cookies, generation, revision = kakao_page_auth.load_state()
+        else:
+            generation, revision, cookies = kakao_page_auth.version(), self.cookie_revision, None
+        if generation != self.credential_version:
+            raise kakao_page_auth.KakaoAuthPending('credentials_changed', 'credential_version_changed', self.credential_version)
+        if refresh and not self.cookies_changed and revision != self.cookie_revision:
+            self.cookie_entries = [dict(c) for c in cookies or []]
+            self.persisted_cookie_entries = [dict(c) for c in self.cookie_entries]
+            self.cookies = kakao_page_auth.cookie_map(self.cookie_entries)
+            self.cookie_revision = revision
+
+    def _record_health(self, logged_in, expected_cookies):
+        accepted = kakao_page_auth.record_health(logged_in, self.credential_version, self.last_problem,
+                                                expected_cookies=expected_cookies)
+        if self.credential_version is not None and not accepted:
+            raise kakao_page_auth.KakaoAuthPending('credentials_changed', 'credential_version_changed', self.credential_version)
+
+    def _absorb_cookies(self, response, *, request_url=None) -> None:
+        source = URL(str(getattr(response, 'url', None) or request_url or self._last_url))
+        host = source.host or ''
+        if host != 'kakao.com' and not host.endswith('.kakao.com'):
+            return
         for name, morsel in response.cookies.items():
-            if morsel.value and self.cookies.get(name) != morsel.value:
-                self.cookies[name] = morsel.value
+            domain = (morsel['domain'] or host).lower().lstrip('.')
+            if host != domain and not host.endswith('.' + domain):
+                continue
+            if domain != 'kakao.com' and not domain.endswith('.kakao.com'):
+                continue
+            path = morsel['path'] or source.path.rpartition('/')[0] or '/'
+            expiry = None
+            try:
+                if morsel['max-age']:
+                    expiry = time.time() + int(morsel['max-age'])
+                elif morsel['expires']:
+                    date = parsedate_to_datetime(morsel['expires'])
+                    expiry = date.replace(tzinfo=date.tzinfo or timezone.utc).timestamp()
+            except (ValueError, TypeError, OverflowError):
+                continue
+            identity = (name, domain, path)
+            old = [c for c in self.cookie_entries if (c['name'], c['domain'].lstrip('.').lower(), c.get('path', '/')) == identity]
+            kept = [c for c in self.cookie_entries if c not in old]
+            if (morsel.value or name not in kakao_page_auth.REQUIRED_COOKIES) and (expiry is None or expiry > time.time()):
+                entry = {'name': name, 'value': morsel.value, 'domain': morsel['domain'] or host, 'path': path,
+                         'expirationDate': expiry, 'secure': bool(morsel['secure']), 'hostOnly': not bool(morsel['domain'])}
+                try:
+                    kakao_page_auth.validate_cookies([entry], require_all=False)
+                except ValueError:
+                    continue
+                kept.append(entry)
+            if kept != self.cookie_entries:
+                self.cookie_entries = kept
+                self.cookies = kakao_page_auth.cookie_map(kept)
                 self.cookies_changed = True
 
-    async def _request_json(self, method: str, url: str, *, params: dict | None = None, label: str, data: dict | None = None):
-        """(HTTP 상태, JSON 또는 None). 요청 자체가 실패하면 (None, None)."""
+    async def _request_json(self, method: str, url: str, *, params: dict | None = None, label: str,
+                            data: dict | None = None, auth_check=False, _retried=False):
+        self._ensure_current()
+        request_revision = self.cookie_revision
+        request_cookies = self.cookie_entries
+        self._last_url = url
+        status, payload, response, problem = None, None, None, None
         try:
-            if method == "POST":
-                request = self._session.post(url, data=data or {}, headers=self._headers(post=True), timeout=self._timeout)
+            if method == 'POST':
+                request = self._session.post(url, data=data or {}, headers=self._headers(post=True, url=url), timeout=self._timeout, allow_redirects=False)
             else:
-                request = self._session.get(url, params=params, headers=self._headers(), timeout=self._timeout)
+                request = self._session.get(url, params=params, headers=self._headers(url=url), timeout=self._timeout, allow_redirects=False)
             async with request as response:
-                self._absorb_cookies(response)
-                data = await response.json(content_type=None) if response.status == 200 else None
-                return response.status, data
-        except Exception as e:
-            log.warning("카카오페이지 요청 실패 (%s): %s", label, e)
-            return None, None
+                self._ensure_current(refresh=False)
+                status = response.status
+                payload = await response.json(content_type=None) if status == 200 else None
+        except kakao_page_auth.KakaoAuthPending:
+            raise
+        except Exception as exc:
+            log.warning('카카오페이지 요청 실패 (%s): %s', label, type(exc).__name__)
+            problem = 'network_error'
+        self._ensure_current(refresh=False)
+        code = str(payload.get('result_code')) if isinstance(payload, dict) and 'result_code' in payload else None
+        rejected = status == 401 or code in ('401', '-401', 'UNAUTHORIZED', 'LOGIN_REQUIRED') or (
+            code == '-100' and isinstance(payload, dict) and payload.get('message_key') == 'api_user_authorize_not_found')
+        if rejected:
+            problem = 'session_rejected'
+        elif status == 429:
+            problem = 'rate_limited'
+        elif status == 403:
+            problem = 'access_blocked'
+        elif status is None or status >= 500:
+            problem = problem or 'server_error'
+        elif status != 200 or not isinstance(payload, dict):
+            problem = problem or 'invalid_response'
+        elif code is not None and code != '0':
+            problem = 'api_error'
+        self.last_problem = problem
+        logged_in = None
+        if auth_check:
+            if rejected:
+                logged_in = False
+            elif problem is None and code == '0' and isinstance(payload.get('profile'), dict):
+                logged_in = bool(payload['profile'].get('uid'))
+        if problem is None and (not auth_check or logged_in is True) and self.cookie_revision == request_revision:
+            # Error responses can clear or replace cookies still usable for refresh.
+            self._absorb_cookies(response, request_url=url)
+            request_cookies = self.cookie_entries
+            persist_refreshed_cookies(self, strict_auth=True)
+        if auth_check:
+            self._record_health(logged_in, request_cookies)
+            return logged_in
+        if problem:
+            if rejected:
+                if _retried and self.credential_version is not None:
+                    raise kakao_page_auth.KakaoAuthPending('unknown', 'request_rejected_after_refresh', self.credential_version)
+                self._record_health(False, request_cookies)
+                if self.credential_version is not None and not _retried:
+                    recovered = await self._recover_session()
+                    if recovered is True:
+                        if method == 'GET':
+                            return await self._request_json(method, url, params=params, label=label,
+                                                            data=data, _retried=True)
+                        # Mutating requests are never replayed; the durable queue rechecks availability.
+                        if kakao_page_auth._auth_snapshot(self.cookie_entries) == kakao_page_auth._auth_snapshot(request_cookies):
+                            raise kakao_page_auth.KakaoAuthPending('unknown', 'request_rejected_after_refresh', self.credential_version)
+                        raise kakao_page_auth.KakaoAuthPending('credentials_changed', 'session_refreshed', self.credential_version)
+                    if recovered is None:
+                        raise kakao_page_auth.KakaoAuthPending('unknown', 'refresh_pending', self.credential_version)
+                raise kakao_page_auth.KakaoAuthPending(credential_version=self.credential_version)
+            if self.credential_version is not None and problem != 'api_error':
+                self._record_health(None, request_cookies)
+            return status, payload if problem == 'api_error' else None
+        return status, payload
+
+    async def _recover_session(self) -> bool | None:
+        from app.kakao_session_refresh import refresh_saved_session
+
+        result = await refresh_saved_session(session=self._session, force=True)
+        if result['state'] == 'credentials_changed':
+            raise kakao_page_auth.KakaoAuthPending('credentials_changed', result['reason'], self.credential_version)
+        self.cookies_changed = False
+        self._ensure_current()
+        if result['state'] == 'healthy':
+            self.last_problem = None
+            return True
+        if result['state'] in ('unknown', 'deferred'):
+            return None
+        return False
 
     async def check_login(self) -> bool | None:
-        """True=로그인됨, False=로그인 풀림, None=모름(네트워크 문제/차단/서버 오류 — 로그아웃으로 단정하지 않는다)."""
-        status, data = await self._request_json("POST", PROFILE_URL, label="로그인 확인")
-        if status is None:
-            return None
-        if status == 401:
-            return False
-        if status != 200:
-            return None
-        return bool(data and data.get("result_code") == 0 and (data.get("profile") or {}).get("uid"))
+        logged_in = await self._request_json('POST', PROFILE_URL, label='로그인 확인', auth_check=True)
+        if logged_in is False and self.credential_version is not None:
+            return await self._recover_session()
+        return logged_in
+
+    def raise_if_unavailable(self):
+        if self.credential_version is not None and self.last_problem in (
+                'network_error', 'server_error', 'rate_limited', 'access_blocked', 'invalid_response'):
+            raise kakao_page_auth.KakaoAuthPending('unknown', self.last_problem, self.credential_version)
+
+    async def require_login(self):
+        logged_in = await self.check_login()
+        persist_refreshed_cookies(self)
+        if logged_in is not True:
+            raise kakao_page_auth.KakaoAuthPending('reauth_required' if logged_in is False else 'unknown',
+                                                 self.last_problem or 'invalid_response', self.credential_version)
+        return True
 
     async def list_episodes(self, series_id: int) -> tuple[dict, list[Episode]] | None:
         """(작품 정보, 회차 목록(번호 오름차순))를 돌려준다. 중간에 하나라도 실패하면 None — 일부만 본 목록으로
@@ -130,7 +287,7 @@ class KakaoPageClient:
                 "sort_type": "asc",  # 계정에 저장된 정렬과 무관하게 항상 첫화부터
             }
             _, data = await self._request_json("GET", PRODUCT_LIST_URL, params=params, label=f"회차 목록 series_id={series_id}")
-            if data is None:
+            if data is None or ('result_code' in data and data['result_code'] != 0):
                 return None
             result = data.get("result") or {}
             if not series_item:
@@ -164,6 +321,7 @@ class KakaoPageClient:
         """회차 하나의 이용권 사용 가능 정보(ticket/ready_to_use의 result). 못 받았거나 result_code가 0이 아니면 None."""
         _, ready = await self._request_json("GET", TICKET_READY_URL, params={"product_id": product_id, "include_series": "true"}, label=f"{label} product_id={product_id}")
         if not ready or ready.get("result_code") != 0:
+            self.raise_if_unavailable()
             return None
         return ready.get("result") or {}
 
@@ -268,22 +426,30 @@ class KakaoPageClient:
     async def download_image(self, url: str) -> tuple[bytes, str] | None:
         """이미지 하나를 (바이트, Content-Type)으로. 실패하면 잠깐 쉬고 몇 번 더 시도하고, 그래도 안 되면 None.
         서명된 주소(token/signature)는 한 글자만 달라져도 404가 되어서, 주소를 다시 인코딩하지 않고 받은 그대로 보낸다."""
+        self._ensure_current()
         target = URL(url, encoded=True)
         for attempt in range(_IMAGE_RETRIES):
+            self._ensure_current()
+            request_revision = self.cookie_revision
             try:
-                async with self._session.get(target, headers=self._headers(image=True), timeout=self._timeout) as response:
-                    self._absorb_cookies(response)
+                async with self._session.get(target, headers=self._headers(image=True, url=url), timeout=self._timeout,
+                                             allow_redirects=False) as response:
+                    self._ensure_current(refresh=False)
                     if response.status == 200:
                         body = await response.read()
+                        self._ensure_current(refresh=False)
                         if body:
+                            if self.cookie_revision == request_revision:
+                                self._absorb_cookies(response, request_url=url)
+                                persist_refreshed_cookies(self, strict_auth=True)
                             return body, response.headers.get("Content-Type", "")
                     else:
-                        # 토큰/서명은 남기지 않고, 어느 서버의 어느 경로가 어떤 응답이었는지만 기록한다(원인 파악용)
-                        snippet = (await response.text(errors="replace"))[:120].replace("\n", " ") if response.status != 200 else ""
-                        log.warning("카카오페이지 이미지 받기 실패: HTTP %s (%s%s) %s", response.status, target.host, target.path, snippet)
+                        log.warning("카카오페이지 이미지 받기 실패: HTTP %s (%s)", response.status, target.host)
                         self.last_failure = f"이미지 받기 실패(HTTP {response.status})"
+            except kakao_page_auth.KakaoAuthPending:
+                raise
             except Exception as e:
-                log.warning("카카오페이지 이미지 받기 예외: %s", e)
+                log.warning("카카오페이지 이미지 받기 예외: %s", type(e).__name__)
                 self.last_failure = f"이미지 받기 실패({type(e).__name__})"
             if attempt < _IMAGE_RETRIES - 1:
                 await asyncio.sleep(1.5 * (attempt + 1))
@@ -292,10 +458,10 @@ class KakaoPageClient:
 
 def client_from_saved_cookies(session: aiohttp.ClientSession, timeout_seconds: int) -> KakaoPageClient | None:
     """저장된 로그인 쿠키로 클라이언트를 만든다. 저장된 쿠키가 없으면 None."""
-    cookies = kakao_page_auth.load_cookies()
+    cookies, generation, revision = kakao_page_auth.load_state()
     if not cookies:
         return None
-    return KakaoPageClient(session, kakao_page_auth.cookie_map(cookies), timeout_seconds)
+    return KakaoPageClient(session, kakao_page_auth.cookie_map(cookies), timeout_seconds, cookie_entries=cookies, credential_version=generation, cookie_revision=revision)
 
 
 def new_session() -> aiohttp.ClientSession:
@@ -308,8 +474,18 @@ def client_or_anonymous(session: aiohttp.ClientSession, timeout_seconds: int) ->
     return client_from_saved_cookies(session, timeout_seconds) or KakaoPageClient(session, {}, timeout_seconds)
 
 
-def persist_refreshed_cookies(client: KakaoPageClient) -> None:
+def persist_refreshed_cookies(client: KakaoPageClient, *, strict_auth=False) -> None:
     """서버가 로그인 유지를 위해 새로 내려준 쿠키가 있으면 저장해서, 다음 실행에도 이어지게 한다."""
     if client.cookies_changed:
-        kakao_page_auth.update_cookie_values(client.cookies)
+        if client.credential_version is None:
+            return
+        result = kakao_page_auth.update_cookies(client.cookie_entries, client.credential_version,
+                                               base_cookies=client.persisted_cookie_entries, strict_auth=strict_auth)
+        if result is None:
+            raise kakao_page_auth.KakaoAuthPending('credentials_changed', 'credential_version_changed', client.credential_version)
+        cookies, revision = result
+        client.cookie_entries = [dict(c) for c in cookies]
+        client.persisted_cookie_entries = [dict(c) for c in cookies]
+        client.cookies = kakao_page_auth.cookie_map(cookies)
+        client.cookie_revision = revision
         client.cookies_changed = False

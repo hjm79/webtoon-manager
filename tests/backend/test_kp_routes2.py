@@ -26,6 +26,8 @@ def ep(order, title, free=True, rent=False, hidden=False):
     return {"cursor_index": order, "item": {"product_id": 7000 + order, "title": title, "is_free": free, "order_value": order, "page_count": 2, "hidden": hidden, "service_property": {"purchase_info": pi}}}
 def default_eps(): return [ep(1, "프롤로그"), ep(2, f"{SERIES} 1화"), ep(3, f"{SERIES} 2화"), ep(4, f"{SERIES} 3화", free=False, rent=True), ep(5, f"{SERIES} 4화", free=False)]
 def handler(method, url, params, data):
+    if url.endswith("/api/refresh_token"):
+        return FakeResp(401)
     if url.endswith("/user/get_profile"):
         return FakeResp(200, {"result_code": 0, "profile": {"uid": 1}}) if S["profile"] == "ok" else (FakeResp(200, {"result_code": 401}) if S["profile"] == "out" else FakeResp(403))
     if "product/list" in url:
@@ -48,9 +50,10 @@ class FakeSession:
     def __init__(self, *a, **k): pass
     async def __aenter__(self): return self
     async def __aexit__(self, *a): return False
-    def get(self, url, params=None, headers=None, cookies=None, timeout=None):
+    def get(self, url, params=None, headers=None, cookies=None, timeout=None, allow_redirects=False):
+        assert allow_redirects is False
         url = str(url); return handler("GET", url, dict(params or {}), None)
-    def post(self, url, data=None, headers=None, timeout=None): return handler("POST", url, {}, data)
+    def post(self, url, data=None, headers=None, timeout=None, allow_redirects=False): assert allow_redirects is False; return handler("POST", url, {}, data)
 aiohttp.ClientSession = FakeSession
 kakao_cover.fetch_official_cover_bytes = lambda sid, **k: b"\xff\xd8\xffcover"
 _orig_sleep = asyncio.sleep
@@ -219,7 +222,7 @@ async def main():
         assert st["status"] == "error" and not list(folder.glob("*.zip")) and not list(folder.glob("*.part"))
         S["fail_images"] = False; S["profile"] = "out"
         await c.post("/api/kakao-manual/run", json={"series_id": 111, "numbers": [1]}); st = await wait_manual(c)
-        assert "로그인이 풀려" in "\n".join(st["log"]) and not list(folder.glob("*.zip"))
+        assert "재인증" in "\n".join(st["log"]) and not list(folder.glob("*.zip"))
         S["profile"] = "ok"
         gate = asyncio.Event(); original = kp.download_selected
         async def slow(*a, **k): await gate.wait(); return await original(*a, **k)

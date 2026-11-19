@@ -36,8 +36,8 @@ class FakeSession:
     def __init__(self, *a, **k): pass
     async def __aenter__(self): return self
     async def __aexit__(self, *a): return False
-    def get(self, url, params=None, headers=None, timeout=None): return handler("GET", str(url), dict(params or {}), None)
-    def post(self, url, data=None, headers=None, timeout=None): return handler("POST", str(url), {}, data)
+    def get(self, url, params=None, headers=None, timeout=None, allow_redirects=False): assert allow_redirects is False; return handler("GET", str(url), dict(params or {}), None)
+    def post(self, url, data=None, headers=None, timeout=None, allow_redirects=False): assert allow_redirects is False; return handler("POST", str(url), {}, data)
 aiohttp.ClientSession = FakeSession
 _o = asyncio.sleep
 async def _ns(x): await _o(0)

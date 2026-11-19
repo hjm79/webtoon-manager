@@ -18,7 +18,8 @@ kakao_status.LOOKUP_PAUSE_SECONDS = 0                                           
 # Scenario 1: 클라이언트 — 작품 기본 정보 요청에서 (HTTP 상태, 작품 정보)를 돌려준다. 정보가 없으면 (상태, None), 요청 자체가 실패하면 (None, None)
 class Session:
     def __init__(self, outcome): self.outcome, self.calls = outcome, []
-    def get(self, url, params=None, headers=None, timeout=None):
+    def get(self, url, params=None, headers=None, timeout=None, allow_redirects=False):
+        assert allow_redirects is False
         self.calls.append(params)
         if isinstance(self.outcome, BaseException): raise self.outcome
         return self.outcome

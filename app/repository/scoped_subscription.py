@@ -1,5 +1,6 @@
 """Commit a newly activated subscription and its explicit scope together."""
 import json
+from contextlib import nullcontext
 import uuid
 
 from app.db import read_lock, write_transaction
@@ -46,18 +47,31 @@ def enqueue_download(platform: str, title_id: str, title: str) -> list[dict]:
         return _append_queue(conn, platform, title_id, title)
 
 
-def update_download_queue(item_id: str | None = None, *, state: str | None = None, recover: bool = False) -> None:
-    with write_transaction() as conn:
+def update_download_queue(item_id: str | None = None, *, state: str | None = None, recover: bool = False,
+                          reason: str | None = None, retry_at: float | None = None, connection=None) -> None:
+    with (write_transaction() if connection is None else nullcontext(connection)) as conn:
         items = _queue(conn)
         if recover:
             for item in items:
-                item["state"] = "queued"
+                if item["state"] == "running":
+                    item["state"] = "queued"
         elif state:
             for item in items:
                 if item["id"] == item_id:
                     item["state"] = state
+                    item["reason"] = reason
+                    item["retry_at"] = retry_at
         else:
             items = [item for item in items if item["id"] != item_id]
+        _save_queue(conn, items)
+
+
+def resume_kakao_auth_queue(*, connection=None) -> None:
+    with (write_transaction() if connection is None else nullcontext(connection)) as conn:
+        items = _queue(conn)
+        for item in items:
+            if item['platform'] == 'kakao' and item['state'] in ('blocked_auth', 'retry_wait'):
+                item.update(state='queued', reason=None, retry_at=None)
         _save_queue(conn, items)
 
 
@@ -67,7 +81,7 @@ def cancel_queued_download(platform: str, title_id: str) -> bool:
         selected = [row for row in items if row["platform"] == platform and row["title_id"] == str(title_id)]
         if not selected:
             return False
-        if any(row["state"] != "queued" for row in selected):
+        if any(row["state"] == "running" for row in selected):
             raise ValueError("이미 실행 중인 작업은 대기 취소할 수 없습니다.")
         _save_queue(conn, [row for row in items if row not in selected])
         return True

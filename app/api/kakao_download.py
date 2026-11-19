@@ -39,7 +39,7 @@ _kakao_manual_task: asyncio.Task | None = None  # 진행 중 작업이 중간에
 
 @router.get("/settings/kakao-page-login")
 async def get_kakao_page_login():
-    return kakao_page_auth.cookie_status(await asyncio.to_thread(kakao_page_auth.load_cookies))
+    return await asyncio.to_thread(kakao_page_auth.status)
 
 
 @router.post("/settings/kakao-page-login")
@@ -48,14 +48,32 @@ async def set_kakao_page_login(payload: KakaoPageLoginIn):
         cookies = kakao_page_auth.parse_cookie_export(payload.cookies_json)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
-    await asyncio.to_thread(kakao_page_auth.save_cookies, cookies)
-    return kakao_page_auth.cookie_status(cookies)
+    expected = kakao_page_auth.version()
+    settings = get_settings()
+    async with kakao_page_download.new_session() as session:
+        client = kakao_page_download.KakaoPageClient(session, kakao_page_auth.cookie_map(cookies),
+            settings.request_timeout_seconds, cookie_entries=cookies)
+        logged_in = await client.check_login()
+        if logged_in is not True:
+            raise HTTPException(401 if logged_in is False else 503,
+                "새 쿠키로 로그인하지 못했습니다. 기존 인증은 유지합니다." if logged_in is False else
+                "카카오페이지 연결을 확인하지 못했습니다. 기존 인증은 유지합니다. 잠시 뒤 다시 시도해주세요.")
+    try:
+        revision = await asyncio.to_thread(kakao_page_auth.save_cookies, client.cookie_entries,
+            expected_version=expected, verified=True)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    if revision is None:
+        raise HTTPException(409, "확인 중 인증 정보가 변경되었습니다. 다시 확인해주세요. 기존 인증은 유지합니다.")
+    from app.scheduler import download_job
+    download_job.start_queued_downloads()
+    return await asyncio.to_thread(kakao_page_auth.status)
 
 
 @router.delete("/settings/kakao-page-login")
 async def delete_kakao_page_login():
     await asyncio.to_thread(kakao_page_auth.delete_cookies)
-    return kakao_page_auth.cookie_status(None)
+    return kakao_page_auth.status()
 
 
 _KAKAO_LOGIN_CHECK_MESSAGES = {
@@ -77,7 +95,14 @@ async def check_kakao_page_login():
         kakao_page_download.persist_refreshed_cookies(client)
         status = kakao_page_auth.cookie_status(kakao_page_auth.load_cookies())
         await kakao_page_auth.notify_if_needed(session, logged_in, status["days_left"])
-    return {**status, "logged_in": logged_in, "message": _KAKAO_LOGIN_CHECK_MESSAGES[logged_in]}
+    if logged_in is True:
+        from app.scheduler import download_job
+        resumed = await asyncio.to_thread(kakao_page_auth.resume_verified_queue, client.credential_version,
+                                          expected_cookies=client.cookie_entries)
+        if not resumed:
+            raise kakao_page_auth.KakaoAuthPending('credentials_changed')
+        download_job.start_queued_downloads()
+    return {**kakao_page_auth.status(), "logged_in": logged_in, "message": _KAKAO_LOGIN_CHECK_MESSAGES[logged_in]}
 
 
 class KakaoManualRunIn(BaseModel):
@@ -151,9 +176,11 @@ async def _load_analysis_inputs(settings, series_id: int):
             logged_in = await client.check_login()
             status = kakao_page_auth.cookie_status(kakao_page_auth.load_cookies())
             await kakao_page_auth.notify_if_needed(session, logged_in, status["days_left"])
+        if cookie_saved and logged_in is not True:
+            client = kakao_page_download.KakaoPageClient(session, {}, settings.request_timeout_seconds)
         listing = await client.list_episodes(series_id)
         # 대여권/소장권/기다무 현황(작품 화면의 "대여권 N장 | 소장권 N장 | 기다무"와 같은 값) — 로그인돼 있을 때만 의미가 있다
-        tickets = await client.ticket_info(series_id) if cookie_saved and logged_in is not False else None
+        tickets = await client.ticket_info(series_id) if cookie_saved and logged_in is True else None
         kakao_page_download.persist_refreshed_cookies(client)
     return listing, tickets, cookie_saved, logged_in
 
@@ -258,8 +285,9 @@ async def _run_kakao_manual_download(series_id: int, numbers: list[int], use_ren
                 logged_in = await client.check_login()
                 status = kakao_page_auth.cookie_status(kakao_page_auth.load_cookies())
                 await kakao_page_auth.notify_if_needed(session, logged_in, status["days_left"])
-                if logged_in is False:
-                    log_line("카카오페이지 로그인이 풀려 있어서 받지 않았습니다. 쿠키를 다시 export해서 붙여넣어 주세요.")
+                kakao_page_download.persist_refreshed_cookies(client)
+                if logged_in is not True:
+                    log_line(kakao_page_auth.MESSAGES['reauth_required' if logged_in is False else 'unknown'])
                     return
                 log_line(f"{len(numbers)}개 회차 다운로드 시작 (저장 폴더: {root})")
                 result = await kakao_page_download.download_selected(

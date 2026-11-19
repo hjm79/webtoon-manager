@@ -6,7 +6,10 @@ db.get_connection()
 
 sent = []
 async def fake_send(session, message):
-    if discord_config.get_webhook_url(): sent.append(message)
+    if discord_config.get_webhook_url():
+        sent.append(message)
+        return True
+    return False
 discord_notify.send_webhook_notification = fake_send
 
 async def main():

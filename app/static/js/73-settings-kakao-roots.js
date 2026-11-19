@@ -2,19 +2,67 @@
 // (index.html에서 파일 이름 순서대로 로드된다 — 클래식 스크립트라 최상위 선언은 전역으로 공유된다)
 // ── 카카오페이지 로그인 쿠키 (설정) ─────────────────────────────
 
+function kakaoAuthMessage(st) {
+  if (st.state === "reauth_required") {
+    if (st.auto_refresh?.state === "running") return "카카오페이지 세션 갱신 중입니다.";
+    if (st.auto_refresh?.state === "unknown" && st.enabled) return "카카오페이지 자동 갱신 재시도 대기 중입니다.";
+  }
+  return st.message;
+}
+
 function renderKakaoPageCookieStatus(st) {
   const el = document.getElementById("kp-cookie-status");
   if (!st.saved) {
-    el.textContent = "저장된 쿠키가 없습니다.";
+    el.textContent = st.message || "저장된 쿠키가 없습니다.";
     return;
   }
   const parts = ["쿠키 저장됨"];
   if (st.missing && st.missing.length) parts.push(`필수 쿠키 누락: ${st.missing.join(", ")}`);
   if (st.days_left !== null && st.days_left !== undefined) {
-    parts.push(st.days_left < 0 ? "만료됨(다시 export해서 붙여넣어 주세요)" : `만료까지 약 ${st.days_left}일`);
+    parts.push(st.days_left < 0 ? "쿠키 만료 예상일 지남" : `쿠키 만료 예상일까지 약 ${st.days_left}일`);
+  }
+  const message = kakaoAuthMessage(st);
+  if (message) parts.push(message);
+  if (st.checked_at) parts.push(`마지막 확인: ${formatKoreanTime(st.checked_at)}`);
+  if (st.auto_refresh) {
+    const refresh = st.auto_refresh;
+    parts.push(st.enabled ? "세션 자동 갱신 30분 주기" : "정기 세션 자동 갱신 꺼짐");
+    if (refresh.last_success_at) parts.push(`마지막 갱신 성공: ${formatKoreanTime(refresh.last_success_at)}`);
+    if (refresh.state === "running" && st.state !== "reauth_required") parts.push("세션 갱신 중");
+    if (refresh.state === "reauth_required" && st.state === "reauth_required") {
+      parts.push("자동 갱신도 거절되어 새 쿠키 등록 필요");
+    } else if (refresh.reason === "refresh_rejected_session_valid" && st.state === "healthy") {
+      parts.push("자동 갱신 거절 · 확인된 기존 로그인 사용 중");
+    }
+    if (refresh.state === "unknown" && (st.state !== "reauth_required" || !st.enabled)) {
+      parts.push(st.enabled ? "자동 갱신 일시 실패 · 재시도 예정" : "자동 갱신 일시 실패");
+    }
   }
   el.textContent = parts.join(" · ");
 }
+
+function renderKakaoAuthBanner(st, queue = []) {
+  const banner = document.getElementById("kakao-auth-banner");
+  if (!banner || !st) return;
+  const blocked = queue.filter((item) => item.platform === "kakao" && ["blocked_auth", "retry_wait"].includes(item.state)).length;
+  const warning = st.state === "healthy" && st.days_left != null && st.days_left <= 5;
+  const visible = (st.enabled || blocked > 0) && (warning || st.state !== "healthy");
+  banner.classList.toggle("hidden", !visible);
+  if (!visible) return;
+  const text = warning
+    ? (st.days_left < 0 ? "카카오 쿠키 만료 예상일이 지났습니다. 최근 로그인 확인은 정상입니다."
+      : `카카오 쿠키 만료 예상일까지 약 ${st.days_left}일입니다.`)
+    : kakaoAuthMessage(st);
+  const details = [text, blocked ? `다운로드 ${blocked}개 대기 · 선택 범위와 받은 파일 유지` : ""];
+  if (st.checked_at) details.push(`마지막 확인: ${formatKoreanTime(st.checked_at)}`);
+  document.getElementById("kakao-auth-banner-text").textContent = details.filter(Boolean).join(" · ");
+}
+
+document.getElementById("kakao-auth-settings").addEventListener("click", () => {
+  document.getElementById("workspace-collection").click();
+  document.querySelector('.main-tab[data-page="settings"]').click();
+  activateSettingsSection("kakao", { focus: true });
+});
 
 async function loadKakaoPageCookieStatus() {
   try {
@@ -137,13 +185,18 @@ setInterval(() => {
 
 document.getElementById("btn-kp-cookie-save").addEventListener("click", async () => {
   const box = document.getElementById("kp-cookie-json");
+  const button = document.getElementById("btn-kp-cookie-save");
+  button.disabled = true;
   const statusEl = document.getElementById("kp-cookie-status");
   try {
     const st = await apiCall("/api/settings/kakao-page-login", { method: "POST", body: JSON.stringify({ cookies_json: box.value }) });
     box.value = ""; // 저장했으면 화면에 쿠키가 남아 있지 않게 비운다
     renderKakaoPageCookieStatus(st);
+    await refreshWorkflowStatus();
   } catch (e) {
     statusEl.textContent = e.message;
+  } finally {
+    button.disabled = false;
   }
 });
 
@@ -155,7 +208,7 @@ document.getElementById("btn-kp-cookie-check").addEventListener("click", async (
   try {
     const r = await apiCall("/api/settings/kakao-page-login/check", { method: "POST" });
     renderKakaoPageCookieStatus(r);
-    statusEl.textContent = `${r.message} (${statusEl.textContent})`;
+    await refreshWorkflowStatus();
   } catch (e) {
     statusEl.textContent = e.message;
   } finally {
@@ -167,6 +220,7 @@ document.getElementById("btn-kp-cookie-delete").addEventListener("click", async 
   if (!confirm("저장된 카카오페이지 로그인 쿠키를 삭제할까요? 삭제하면 카카오페이지 다운로드를 할 수 없습니다.")) return;
   try {
     renderKakaoPageCookieStatus(await apiCall("/api/settings/kakao-page-login", { method: "DELETE" }));
+    await refreshWorkflowStatus();
   } catch (e) {
     document.getElementById("kp-cookie-status").textContent = e.message;
   }

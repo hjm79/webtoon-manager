@@ -32,7 +32,8 @@ class Site:
         self.ticket_period, self.series_period = ticket_period, series_period   # 기다무 충전 주기(분): 이용권 응답의 값 / 작품 정보의 값(0이면 필드 값이 0)
         self.posts, self.gets, self.opened = [], [], set()
     def _item(self, pid): return next(e["item"] for e in self.items if e["item"]["product_id"] == pid)
-    def get(self, url, params=None, headers=None, timeout=None):
+    def get(self, url, params=None, headers=None, timeout=None, allow_redirects=False):
+        assert allow_redirects is False
         url = str(url); p = params or {}; self.gets.append(url.rsplit("/api/", 1)[-1])
         if "product/list" in url:
             L = []
@@ -63,7 +64,8 @@ class Site:
             return R(data={"viewer_data": {"imageDownloadData": {"files": [{"no": i, "secureUrl": f"https://img/{pid}/{i}"} for i in (1, 2)]}}})
         if "content/about" in url: return R(data={"result_code": 0, "result": {"author_list": [], "theme_keyword_list": []}})
         return R(body=JPG, ctype="image/jpeg")
-    def post(self, url, data=None, headers=None, timeout=None):
+    def post(self, url, data=None, headers=None, timeout=None, allow_redirects=False):
+        assert allow_redirects is False
         data = dict(data or {}); self.posts.append((url.rsplit("/api/", 1)[-1], data))
         pid = int(data.get("product_id", 0))
         if pid in self.lose_without_effect: raise RuntimeError("네트워크 끊김(서버는 처리 못 함)")
@@ -82,10 +84,12 @@ class FakeSession:
     def __init__(self, *a, **k): pass
     async def __aenter__(self): return self
     async def __aexit__(self, *a): return False
-    def get(self, url, params=None, headers=None, timeout=None):
+    def get(self, url, params=None, headers=None, timeout=None, allow_redirects=False):
+        assert allow_redirects is False
         if str(url).endswith("/user/get_profile"): return _Profile()
         return SITE["site"].get(url, params, headers, timeout)
-    def post(self, url, data=None, headers=None, timeout=None):
+    def post(self, url, data=None, headers=None, timeout=None, allow_redirects=False):
+        assert allow_redirects is False
         if str(url).endswith("/user/get_profile"): return _Profile()
         return SITE["site"].post(url, data, headers, timeout)
 

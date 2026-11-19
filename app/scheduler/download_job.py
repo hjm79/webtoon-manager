@@ -3,10 +3,11 @@
 
 import asyncio
 import logging
+import time
 
 import aiohttp
 
-from app import cookie_health, daily_plus, job_status, repository, retention, waitfree_sync, workflow_progress
+from app import cookie_health, daily_plus, job_status, kakao_page_auth, repository, retention, waitfree_sync, workflow_progress
 from app.config import get_settings
 
 from app.scheduler.kakao_download import (
@@ -48,6 +49,7 @@ def start_queued_downloads(*, recover: bool = False) -> None:
     global _queue_worker_task
     if recover:
         repository.update_download_queue(recover=True)
+        kakao_page_auth.resume_verified_queue()
     if _queue_worker_task is not None and not _queue_worker_task.done():
         return
     if not repository.list_download_queue():
@@ -71,13 +73,24 @@ async def _run_queued_downloads() -> None:
         if download_busy() or kakao_page_download.download_lock.locked():
             await asyncio.sleep(1)
             continue
-        item = items[0]
+        eligible = [row for row in items if row['state'] == 'queued' or
+                    (row['state'] == 'retry_wait' and (row.get('retry_at') or 0) <= time.time())]
+        if not eligible:
+            if any(row['state'] == 'retry_wait' for row in items):
+                await asyncio.sleep(1)
+                continue
+            return
+        item = eligible[0]
         platform, title_id = item["platform"], item["title_id"]
         reserve_title_download(platform)
         try:
             repository.update_download_queue(item["id"], state="running")
             async with _download_job_lock:
                 await _run_download_job_impl({platform}, only_title=title_id)
+        except kakao_page_auth.KakaoAuthPending as exc:
+            state, message = kakao_page_auth.defer_download(item['id'], exc)
+            workflow_progress.update(state=state, error=message, rest_until=None)
+            continue
         except asyncio.CancelledError:
             workflow_progress.fail("다운로드가 중단되었습니다. 다음 실행에서 이어받습니다.")
             job_status.finish("download", success=False)
@@ -208,6 +221,12 @@ async def _run_download_job_impl(platforms: set[str], scheduled: bool = False, p
             if "kakao" in platforms:
                 await _download_kakao_subscriptions(settings, failures, only=active_kakao_webtoons,
                     skip_waiting=scheduled and waitfree_sync.is_enabled())
+        except kakao_page_auth.KakaoAuthPending as exc:
+            workflow_progress.update(state='retry_wait' if exc.state in ('unknown', 'credentials_changed') else 'blocked_auth', error=str(exc))
+            if only_title is not None:
+                job_status.finish('download', success=False)
+                raise
+            had_error = True
         except Exception as e:
             had_error = True
             log.error("카카오페이지 자동 다운로드 중 예외: %s", e)

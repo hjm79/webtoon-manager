@@ -17,7 +17,8 @@ BACKUP_FORMAT_VERSION = 2
 #     복원해도 **지금 쓰는 값을 지우지 않고**(같은 컨테이너에서 복원했다고 웹훅/로그인이 날아가면 안 된다), 백업 파일 안에 들어 있어도 무시한다.
 #  ② 캐시: 크고 언제든 다시 채워진다(카카오 전체목록). 복원해도 그대로 둔다.
 #  ③ 알림 기록: "하루에 한 번만 알림"을 위한 시각들. 복원하면 초기화해서, 환경이 바뀐 뒤에 다시 알릴 수 있게 한다.
-_SECRET_SETTING_KEYS = {"discord_webhook_url", "discord_bot_token", "discord_notify_channel_id", "kakao_page_cookies"}
+_SECRET_SETTING_KEYS = {"discord_webhook_url", "discord_bot_token", "discord_notify_channel_id", "kakao_page_cookies",
+                        "kakao_page_cookie_version", "kakao_page_cookie_revision", "kakao_page_auth_health", "kakao_page_auto_refresh"}
 
 
 _CACHE_SETTING_KEYS = {"kakao_catalog_snapshot"}

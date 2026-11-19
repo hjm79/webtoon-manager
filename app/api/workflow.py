@@ -10,7 +10,7 @@ from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel, Field, field_validator
 
 from app import auto_subscribe, daily_plus, download_cooldown, download_roots, job_status, kakao_api, kakao_catalog, kakao_page_download
-from app import manual_download, naver_api, repository, subscription_scope, workflow_progress
+from app import kakao_page_auth, manual_download, naver_api, repository, subscription_scope, workflow_progress
 from app.api import kakao_webtoons, webtoons
 from app.config import get_settings
 from app.cookie_loader import get_adult_cookies
@@ -399,5 +399,5 @@ async def status(request: Request):
         else:
             row["scope_edit_reason"] = "다른 다운로드가 실행 중입니다. 완료 후 범위를 변경해주세요." if busy else None
     return {"next_run_at": next_run_at(request), "jobs": job_status.snapshot(), "progress": workflow_progress.snapshot(),
-            "subscriptions": subscriptions, "queue": queue, "download_busy": busy,
+            "subscriptions": subscriptions, "queue": queue, "download_busy": busy, "kakao_auth": await asyncio.to_thread(kakao_page_auth.status),
             "checked_at": datetime.now(timezone.utc).isoformat()}

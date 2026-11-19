@@ -26,6 +26,8 @@ def eps_for(spec, series_title):  # [(order, 부제목, free)] — 실제처럼 
              "service_property": {"purchase_info": {"purchase_type": "not_purchased"}}}} for o, sub, free in spec]
 def handler(method, url, params, data):
     S["calls"] += 1
+    if url.endswith("/api/refresh_token"):
+        return FakeResp(401)
     if url.endswith("/user/get_profile"):
         return FakeResp(200, {"result_code": 0, "profile": {"uid": 1}}) if S["profile"] == "ok" else FakeResp(200, {"result_code": 401})
     if "product/list" in url:
@@ -43,9 +45,10 @@ class FakeSession:
     def __init__(self, *a, **k): pass
     async def __aenter__(self): return self
     async def __aexit__(self, *a): return False
-    def get(self, url, params=None, headers=None, timeout=None):
+    def get(self, url, params=None, headers=None, timeout=None, allow_redirects=False):
+        assert allow_redirects is False
         url = str(url); return handler("GET", url, dict(params or {}), None)
-    def post(self, url, data=None, headers=None, timeout=None): return handler("POST", url, {}, data)
+    def post(self, url, data=None, headers=None, timeout=None, allow_redirects=False): assert allow_redirects is False; return handler("POST", url, {}, data)
 aiohttp.ClientSession = FakeSession
 _orig = asyncio.sleep
 async def _nosleep(x): await _orig(0)
@@ -71,14 +74,20 @@ async def main():
 
     repository.set_setting(kp.DOWNLOAD_ROOT_SETTING_KEY, str(KROOT))
     # 1. 쿠키 없음 → 건너뜀
-    failures = []; await scheduler._download_kakao_subscriptions(settings, failures)
+    failures = []
+    try: await scheduler._download_kakao_subscriptions(settings, failures)
+    except auth.KakaoAuthPending as exc: assert exc.state == 'not_configured'
+    else: raise AssertionError('Missing credentials did not pause')
     assert S["calls"] == 0 and "쿠키가 없어서" in log_text()
     auth.save_cookies(auth.parse_cookie_export(export()))
     # 3. 로그인 풀림 → 받지 않고 알림
     S["profile"] = "out"
-    await scheduler._download_kakao_subscriptions(settings, failures)
-    assert not list(KROOT.rglob("*.zip")) and len(alerts) == 1 and "로그인이 풀려" in log_text()
+    try: await scheduler._download_kakao_subscriptions(settings, failures)
+    except auth.KakaoAuthPending as exc: assert exc.state == 'reauth_required'
+    else: raise AssertionError('Expired credentials did not pause')
+    assert not list(KROOT.rglob("*.zip")) and len(alerts) == 1 and "재인증" in log_text()
     S["profile"] = "ok"; S["fail_images_for"] = {444}
+    auth.save_cookies(auth.parse_cookie_export(export()), verified=True)
     print("1) 쿠키/로그인 풀림 OK (쿠키 없음·풀림이면 아무것도 안 받고, 풀림은 알림)")
 
     # 4. 정상 실행 — 폴더 규칙 적용
@@ -95,7 +104,7 @@ async def main():
     rows, total = repository.list_episode_history(status="success"); done = {(r["title_name"], r["episode_no"]) for r in rows}
     assert ("작품A", 3) in done and ("작품B", 3) in done and ("작품B", 5) in done and ("작품C", 25) in done and ("작품B", 2) not in done and ("작품B", 4) not in done and total == 3 + 2 + 25
     rows, total = repository.list_episode_history(status="failed"); assert total == 1 and rows[0]["title_name"] == "작품D"
-    assert "[작품A]" in log_text() and "작품E" in log_text() and "회차 목록을 가져오지 못했습니다" in log_text()
+    assert "[작품A]" in log_text() and "작품E" in log_text() and "연결 상태를 확인하지 못했습니다" in log_text()
     print("2) 정상 실행 OK (폴더 없음→전부, 표식 폴더→그 이후, 상한 넘으면 쉬었다 이어받기, 무료는 바로/잠긴 회차는 대기, 실패 격리, 이력 기록)")
 
     # 5. 다시 실행 — 남은 것만

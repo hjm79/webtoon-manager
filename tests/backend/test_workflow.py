@@ -319,9 +319,14 @@ async def authentication_and_shared_admission():
                 assert response.status_code == 400 and repository.get_kakao_webtoon(900) is None
                 assert repository.get_setting("subscription_scope:kakao:900") is None
                 failures = []
-                await kd._download_kakao_subscriptions(get_settings(), failures,
-                                                       only=[{"title_id": 900, "title": "카카오 인증 검증"}])
-                assert failures and workflow_progress.snapshot()["state"] == "error"
+                try:
+                    await kd._download_kakao_subscriptions(get_settings(), failures,
+                                                         only=[{"title_id": 900, "title": "카카오 인증 검증"}])
+                except kd.kakao_page_auth.KakaoAuthPending:
+                    pass
+                else:
+                    raise AssertionError("Authentication failure did not pause")
+                assert failures and workflow_progress.snapshot()["state"] == "blocked_auth"
             with patch.object(kd.kakao_page_download, "client_from_saved_cookies", lambda *_: NS(check_login=expired)), \
                  patch.object(kd.kakao_page_auth, "load_cookies", lambda: {}), \
                  patch.object(kd.kakao_page_auth, "notify_if_needed", no_notification):
@@ -329,9 +334,14 @@ async def authentication_and_shared_admission():
                 assert response.status_code == 401 and repository.get_kakao_webtoon(900) is None
                 assert repository.get_setting("subscription_scope:kakao:900") is None
                 failures = []
-                await kd._download_kakao_subscriptions(get_settings(), failures,
-                                                       only=[{"title_id": 900, "title": "카카오 인증 검증"}])
-                assert failures and workflow_progress.snapshot()["state"] == "error"
+                try:
+                    await kd._download_kakao_subscriptions(get_settings(), failures,
+                                                         only=[{"title_id": 900, "title": "카카오 인증 검증"}])
+                except kd.kakao_page_auth.KakaoAuthPending:
+                    pass
+                else:
+                    raise AssertionError("Authentication failure did not pause")
+                assert failures and workflow_progress.snapshot()["state"] == "blocked_auth"
             with patch.object(ka.kakao_page_auth, "load_cookies", lambda: {"fake": "not-a-real-cookie"}):
                 dj.reserve_title_download("naver")
                 try:

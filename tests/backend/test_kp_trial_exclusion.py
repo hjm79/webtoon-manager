@@ -26,7 +26,8 @@ def item(order, title, slide="SD03"):
 
 class Site:
     def __init__(self, items): self.items = items
-    def get(self, url, params=None, headers=None, timeout=None):
+    def get(self, url, params=None, headers=None, timeout=None, allow_redirects=False):
+        assert allow_redirects is False
         return R({"result": {"series_item": {"id": 1, "title": "작품"}, "list": json.loads(json.dumps(self.items)), "has_next": False}})
 
 

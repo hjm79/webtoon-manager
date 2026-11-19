@@ -16,7 +16,7 @@ from app.repository.common import (
 )
 from app.repository.scoped_subscription import (
     AlreadySubscribedError, activate_scoped_subscription, cancel_queued_download, download_subscription_snapshot,
-    enqueue_download, list_download_queue, set_scoped_subscription_status, update_download_queue,
+    enqueue_download, list_download_queue, set_scoped_subscription_status, update_download_queue, resume_kakao_auth_queue,
 )
 from app.repository.naver_webtoons import (
     acknowledge_finish,
@@ -164,6 +164,7 @@ __all__ = [
     "download_subscription_snapshot",
     "enqueue_download",
     "list_download_queue",
+    "resume_kakao_auth_queue",
     "set_scoped_subscription_status",
     "update_download_queue",
     "AUTHOR_ADDED",

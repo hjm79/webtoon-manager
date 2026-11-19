@@ -80,7 +80,8 @@ async def main():
         SITE["site"] = Site([item(i, title=f"작품 {i}화", free=True) for i in range(1, 7)]); results["파일 하나(표식)"] = await analyze(c, series_id=3)
         # 6. 목록을 못 읽으면 502
         class Broken(Site):
-            def get(self, url, params=None, headers=None, timeout=None):
+            def get(self, url, params=None, headers=None, timeout=None, allow_redirects=False):
+                assert allow_redirects is False
                 r = super().get(url, params=params, headers=headers, timeout=timeout)
                 if "product/list" in url: r.status = 500
                 return r

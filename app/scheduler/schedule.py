@@ -1,6 +1,8 @@
 """스케줄 구성 — 작업별 트리거를 만들고 APScheduler에 올린다. 다시 올리기(reschedule_all)도 여기서 한다.
 """
 
+from datetime import datetime, timezone
+
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.combining import OrTrigger
 from apscheduler.triggers.cron import CronTrigger
@@ -25,6 +27,7 @@ from app.scheduler.download_job import (
     run_download_job,
 )
 from app.scheduler.report_tick import run_report_tick
+from app.kakao_session_refresh import run_auto_refresh_job
 
 _JOB_FUNCS = {
     "discovery_job": run_discovery_job,
@@ -99,6 +102,9 @@ def create_scheduler() -> AsyncIOScheduler:
     apply_waitfree_job(scheduler)
     # 다운로드 리포트 발송 확인(1분마다, 저장된 상태만 봄) — 다운로드 후 모으기/발송하지 않는 시간/뷰어 스캔을 처리한다(report_tick.run_report_tick)
     scheduler.add_job(run_report_tick, trigger=IntervalTrigger(minutes=1), id="report_tick", max_instances=1)
+    scheduler.add_job(run_auto_refresh_job, trigger=IntervalTrigger(minutes=1),
+                      id="kakao_session_refresh", max_instances=1, coalesce=True,
+                      next_run_time=datetime.now(timezone.utc))
     # 사용자가 설정하는 스케줄이 아니라 고정된 내부 작업 — 설정 화면의 스케줄 저장/재등록과 무관하게 항상 돈다
     # 매일 새벽 0시 30분(한국시간)에 빠른 상태 스캔 — 시간이 지나면서 바뀌는 완결/휴재/요일을 요일별 목록에서 빠진 작품까지 매일 확인한다(설정 화면에는 따로 두지 않는다)
     scheduler.add_job(run_quick_scan_nightly, trigger=CronTrigger(hour=0, minute=30, timezone="Asia/Seoul"), id="quick_scan_nightly", max_instances=1)

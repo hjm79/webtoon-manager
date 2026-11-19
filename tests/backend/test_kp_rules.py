@@ -23,9 +23,10 @@ class FakeResp:
     async def __aexit__(self, *a): return False
 class FakeSession:
     def __init__(self, handler): self.handler, self.calls = handler, []
-    def get(self, url, params=None, headers=None, timeout=None):
+    def get(self, url, params=None, headers=None, timeout=None, allow_redirects=False):
+        assert allow_redirects is False
         url = str(url); self.calls.append(("GET", url, dict(params or {}))); return self.handler("GET", url, dict(params or {}))
-    def post(self, url, data=None, headers=None, timeout=None): return self.handler("POST", url, {})
+    def post(self, url, data=None, headers=None, timeout=None, allow_redirects=False): assert allow_redirects is False; return self.handler("POST", url, {})
 _orig_sleep = asyncio.sleep
 async def _nosleep(x): await _orig_sleep(0)
 asyncio.sleep = _nosleep
@@ -152,7 +153,8 @@ async def t6():
     # 실패하면 거기서 멈추고 흔적을 안 남긴다
     root2 = Path(tempfile.mkdtemp())
     class Bad(FakeSession):
-        def get(self, url, params=None, headers=None, timeout=None):
+        def get(self, url, params=None, headers=None, timeout=None, allow_redirects=False):
+            assert allow_redirects is False
             url = str(url)
             if "sdownload" in url and "k9002_" in url: return FakeResp(500)
             return super().get(url, params=params, headers=headers, timeout=timeout)
@@ -179,7 +181,8 @@ async def t7():
     assert (folder / "0003_3화#9.zip").read_bytes() == b"old"                                                    # 고르지 않은 회차는 그대로
     # 다시 받다가 실패하면 원래 파일이 그대로 남는다
     class Bad(FakeSession):
-        def get(self, url, params=None, headers=None, timeout=None):
+        def get(self, url, params=None, headers=None, timeout=None, allow_redirects=False):
+            assert allow_redirects is False
             url = str(url)
             if "sdownload" in url and "k9003_" in url: return FakeResp(500)
             return super().get(url, params=params, headers=headers, timeout=timeout)

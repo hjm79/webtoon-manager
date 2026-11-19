@@ -53,6 +53,8 @@ async def download_episode(client: KakaoPageClient, series_id: int, episode: Epi
     client.last_failure = None
     urls = await client.viewer_image_urls(series_id, episode.product_id)
     if not urls:
+        if hasattr(client, 'raise_if_unavailable'):
+            client.raise_if_unavailable()
         return None
 
     # 첫 이미지로 먼저 확인한다. 서명된 주소가 안 먹으면(만료/무효) 주소를 새로 받아서 한 번 더 해 보고, 그래도 안 되면 나머지 수백
@@ -70,7 +72,15 @@ async def download_episode(client: KakaoPageClient, series_id: int, episode: Epi
         async with semaphore:
             return await client.download_image(url)
 
-    images = [first, *await asyncio.gather(*[_one(u) for u in urls[1:]])]
+    tasks = [asyncio.create_task(_one(url)) for url in urls[1:]]
+    try:
+        images = [first, *await asyncio.gather(*tasks)]
+    finally:
+        pending = [task for task in tasks if not task.done()]
+        for task in pending:
+            task.cancel()
+        if pending:
+            await asyncio.gather(*pending, return_exceptions=True)
     if any(image is None for image in images):
         return None
 
@@ -194,6 +204,8 @@ async def run_download(
         return RunResult([], [], None, DownloadPlan(mode="new_folder"), stopped_reason=stopped_reason)
     listing = await client.list_episodes(series_id)
     if listing is None:
+        if hasattr(client, 'raise_if_unavailable'):
+            client.raise_if_unavailable()
         return RunResult([], [], None, DownloadPlan(mode="new_folder"), "회차 목록을 가져오지 못했습니다.")
     series_item, episodes = listing
     if is_excluded_title(series_item.get("title")):  # 제목에 "단행본"이 있는 작품은 받지 않는다(kakao_filters)
@@ -231,6 +243,8 @@ async def _download_first_locked_with_waitfree(client, series_id, episode, folde
         return None, None
     info = await client.ticket_info(series_id)
     if info is None:
+        if hasattr(client, 'raise_if_unavailable'):
+            client.raise_if_unavailable()
         return None, None
     if not info.waitfree_ready:
         waitfree_sync.remember(series_id, info.waitfree_available_at)  # 아직 충전 전 — 서버가 알려 준 다음 충전 시각을 저장해 둔다(그 시각에 맞춰 받기/정기 다운로드 건너뛰기에 쓴다)
@@ -348,7 +362,10 @@ class _LockedEpisodeOpener:
             return False, "이 작품은 기다무가 없습니다"
         if row.episode.waitfree_blocked:
             return False, "기다무로 열 수 없는 회차입니다"
-        self.ticket = self.ticket or await self.client.ticket_info(self.series_id) or TicketInfo()
+        self.ticket = self.ticket or await self.client.ticket_info(self.series_id)
+        if self.ticket is None and hasattr(self.client, 'raise_if_unavailable'):
+            self.client.raise_if_unavailable()
+        self.ticket = self.ticket or TicketInfo()
         if not self.ticket.waitfree_ready:
             return False, "잠김(대여권 필요)"
         opened, reason = await self.client.use_waitfree_ticket(row.episode.product_id)

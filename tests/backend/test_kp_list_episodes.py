@@ -29,7 +29,8 @@ class Site:
     """페이지 목록(각 페이지 = (항목들, has_next))을 순서대로 준다. fail_at 번째 요청(0부터)은 서버 오류."""
     def __init__(self, pages, fail_at=None, series_title="작품"):
         self.pages, self.fail_at, self.series_title, self.calls = pages, fail_at, series_title, []
-    def get(self, url, params=None, headers=None, timeout=None):
+    def get(self, url, params=None, headers=None, timeout=None, allow_redirects=False):
+        assert allow_redirects is False
         n = len(self.calls); self.calls.append(dict(params))
         if self.fail_at == n:
             r = R({}); r.status = 500; return r

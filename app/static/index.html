@@ -32,6 +32,11 @@
     <button class="main-tab" data-page="help">도움말</button>
   </nav>
 
+  <aside id="kakao-auth-banner" class="kakao-auth-banner hidden" role="status" aria-live="polite">
+    <span id="kakao-auth-banner-text"></span>
+    <button id="kakao-auth-settings" type="button">카카오 인증 설정</button>
+  </aside>
+
   <section id="page-downloads" class="page hidden" aria-labelledby="downloads-heading">
     <h2 id="downloads-heading">다운로드 현황</h2>
     <aside id="workflow-overview" class="workflow-overview hidden" aria-label="다운로드 현황" aria-live="polite">
@@ -504,7 +509,7 @@
       </div>
       <div class="field-group">
         <label for="kp-cookie-json">카카오페이지 로그인 쿠키 (다운로드용)</label>
-        <p class="field-hint">카카오페이지 작품을 받으려면 로그인 쿠키가 필요합니다. 크롬에서 page.kakao.com에 로그인한 뒤 <strong>Cookie-Editor</strong> 확장에서 Export → JSON으로 복사해서 아래에 그대로 붙여넣으세요. 필수 쿠키: _kau, _kpwtkn, _kahai, _kawlt, _kpdid (선택: _karmt, _T_ANO — 있으면 같이 쓰고, 없어도 됩니다). 보통 약 30일 유지되고, 로그인이 풀리거나 만료가 가까워지면 디스코드로 알려드립니다. 쿠키는 암호화해서 저장하며 백업에는 포함되지 않습니다(복원한 뒤에는 다시 붙여넣어야 합니다).</p>
+        <p class="field-hint">카카오페이지 작품을 받으려면 로그인 쿠키가 필요합니다. 크롬에서 page.kakao.com에 로그인한 뒤 <strong>Cookie-Editor</strong> 확장에서 Export → JSON으로 복사해서 아래에 그대로 붙여넣으세요. 필수 쿠키: _kau, _kpwtkn, _kahai, _kawlt, _kpdid (선택: _karmt, _T_ANO — 있으면 같이 쓰고, 없어도 됩니다). 저장 전에 실제 로그인을 확인합니다. 만료 예상일과 실제 로그인 상태는 다를 수 있습니다. 재인증이 필요하면 상단에 표시하며 대기열을 보존하고, 새 쿠키가 확인되면 기존 범위부터 이어받습니다. 디스코드 알림은 선택 사항입니다. 쿠키는 암호화해서 저장하며 백업에는 포함되지 않습니다(복원한 뒤에는 다시 붙여넣어야 합니다).</p>
         <textarea id="kp-cookie-json" rows="4" spellcheck="false" placeholder='[{"domain": ".kakao.com", "name": "_kau", ...}, ...]'></textarea>
         <div class="registry-add-row">
           <button id="btn-kp-cookie-save">쿠키 저장</button>
