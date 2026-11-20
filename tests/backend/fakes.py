@@ -59,3 +59,13 @@ def capture_discord(sent, **options):
     fake_send = discord_fake(sent, **options)
     discord_notify.send_webhook_notification = fake_send
     return fake_send
+
+
+def image_bytes(image_format: str) -> bytes:
+    from io import BytesIO
+
+    from PIL import Image
+
+    output = BytesIO()
+    Image.new("RGB", (2, 2)).save(output, format=image_format)
+    return output.getvalue()

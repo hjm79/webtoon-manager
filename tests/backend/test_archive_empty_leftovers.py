@@ -1,7 +1,7 @@
 """아카이빙 실패 뒤 목적지에 남는 0KB 찌꺼기 처리 + **원본은 어떤 경우에도 지우지 않는다**.
 배경: OneDrive는 업로드를 시작하면 0KB 빈 파일부터 만들고, 업로드가 401 등으로 실패하면 그 빈 파일을 지우는 요청도 같이 실패해서 0KB가 남는다. 앱은 "같은 이름이 이미 있다"고만 보고
 충돌 정책(이름 바꿔 저장이면 "(2)", "(3)")을 적용해서 새 이름으로 또 올리고 또 실패하면서 0KB가 쌓였다(건너뜀 정책이면 그 회차가 영원히 안 옮겨졌다).
-규칙: ① 크기가 0인 목적지 파일은 파일로 치지 않는다(충돌 아님, 그 이름으로 다시 올린다) ② 업로드가 실패하면 방금 남은 0KB 찌꺼기를 지운다(실패해도 이동은 그대로 실패로 처리) ③ 이동을 시작할 때 보관 폴더의 0KB .zip을 정리한다
+규칙: ① 크기가 0인 목적지 파일은 파일로 치지 않는다(충돌 아님, 그 이름으로 다시 올린다) ② 업로드가 실패하면 해당 시도의 임시 파일만 지운다 ③ 이동을 시작할 때 보관 폴더의 과거 0KB .zip을 정리한다
 ④ 로컬 보관 폴더도 같다. **안전 규칙**: 로컬 원본은 업로드가 확인되기 전에는 지우지 않는다 / 지우는 것은 크기가 정확히 0인 목적지 파일뿐이다(크기가 있는 파일, .zip이 아닌 파일, 원본은 절대 아님) / 크기를 확인하지 못하면 아무것도 지우지 않는다."""
 import tempfile
 from pathlib import Path
@@ -44,23 +44,23 @@ assert moved == 1 and (src / "0001_1화.zip").read_bytes() == b"zip1" * 10 and n
 assert fail and fail[0][:2] == ("묵향", "0001_1화.zip"), fail
 assert any("이동 실패: 0001_1화.zip — 업로드 실패: 0001_1화.zip" in m_ for m_ in prog), prog                                         # 실행 로그에는 오류 전문이 그대로 남는다(알림은 한 줄 사유로 줄여 나간다)
 assert "웹툰/묵향/0001_1화.zip" not in remote("") and remote("웹툰/묵향/").get("0002_2화.zip") == 40, remote("")                        # 0KB 찌꺼기는 지워졌고 2화는 올라갔다
-assert fake.deleted == ["웹툰/묵향/0001_1화.zip"], fake.deleted
+assert fake.deleted == ["웹툰/묵향/.webtoon-archive-fixture-0001_1화.zip.part"], fake.deleted
 print("1) 실패 뒤 0KB 찌꺼기 정리 OK (원본 그대로)")
 
 # Scenario 2: 지우기도 실패하면(401) 0KB가 남지만 — 이동이 망가지지 않고 원본은 그대로, 예외 없이 실패로만 기록된다
 reset(); src = make("묵향", [1, 2, 3]); fake.fail_move_names.add("0001_1화.zip"); fake.leave_empty_on_fail = True; fake.fail_delete = True
 moved, prog, conf, fail = call("묵향")
 assert moved == 1 and (src / "0001_1화.zip").exists() and fail and fail[0][1] == "0001_1화.zip", (local_names(src), fail)
-assert remote("웹툰/묵향/").get("0001_1화.zip") == 0, "지우지 못한 찌꺼기는 남아 있다(다음 실행에서 정리)"
+staging_name = ".webtoon-archive-fixture-0001_1화.zip.part"
+assert remote("웹툰/묵향/").get(staging_name) == 0 and "0001_1화.zip" not in remote("웹툰/묵향/")
 print("2) 정리 실패도 안전 OK")
 
 # Scenario 3: 다음 실행 — 남아 있는 0KB 때문에 "(2)" 같은 새 이름을 만들지 않고, 정리한 뒤 같은 이름으로 올린다. 원본은 올라간 뒤에만 사라진다
 fake.fail_move_names.clear(); fake.leave_empty_on_fail = False; fake.fail_delete = False; fake.deleted.clear()
 moved, prog, conf, fail = call("묵향")
 r = remote("웹툰/묵향/")
-assert moved == 1 and r == {"0001_1화.zip": 40, "0002_2화.zip": 40}, r                                                              # (2)/(3) 없이 같은 이름, 내용이 있다
+assert moved == 1 and r == {"0001_1화.zip": 40, "0002_2화.zip": 40, staging_name: 0}, r
 assert conf == [] and fail == [] and not (src / "0001_1화.zip").exists() and (src / "0003_3화.zip").exists(), (conf, fail, local_names(src))
-assert any("0KB" in m and "1개" in m for m in prog), prog
 print("3) 재실행은 같은 이름으로 OK")
 
 # Scenario 4: 이미 쌓인 0KB 찌꺼기("(2)", "(3)")는 이동 시작할 때 정리한다 — 크기가 있는 파일, .zip이 아닌 0KB 파일은 건드리지 않는다

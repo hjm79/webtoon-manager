@@ -1,10 +1,9 @@
 """
-백업/복원에 공유 프로필 전체(프로필 자체·토큰·허용 시리즈·둘러보기 필터·진행률·
-읽음기록·설정·접속 시간대·요청 내역)가 실제로 포함되는지 확인하는 종단 회귀 테스트.
-프로필 기능이 추가된 뒤에도 이 부분이 백업 범위에 안 들어가 있던 문제가 있었다.
+휴대용 백업에서 현재 서버의 로그인 정보는 지키고 공유 프로필 데이터를 복원한다.
 """
 
 import importlib
+from datetime import datetime
 
 import pytest
 from fastapi.testclient import TestClient
@@ -12,6 +11,7 @@ from fastapi.testclient import TestClient
 from app import (
     access_requests,
     auth,
+    db,
     profile_progress,
     profile_settings,
     profile_time_restrictions,
@@ -73,7 +73,7 @@ def admin_client_with_profile_data(library, monkeypatch):
     importlib.reload(main_module)
 
 
-def test_backup_includes_all_profile_related_data(admin_client_with_profile_data):
+def test_backup_includes_profile_data_without_credentials(admin_client_with_profile_data):
     ctx = admin_client_with_profile_data
     client = ctx["client"]
 
@@ -82,7 +82,8 @@ def test_backup_includes_all_profile_related_data(admin_client_with_profile_data
 
     """THEN 프로필 관련 데이터가 전부 포함되어 있다"""
     assert len(backup["profiles"]) == 1
-    assert backup["profiles"][0]["token"] == ctx["original_token"]
+    assert backup["profiles"][0]["id"] == ctx["profile_id"]
+    assert "token" not in backup["profiles"][0]
     assert len(backup["profile_allowed_series"]) == 1
     assert len(backup["profile_browse_filters"]) == 1
     assert len(backup["profile_time_windows"]) == 1
@@ -91,8 +92,7 @@ def test_backup_includes_all_profile_related_data(admin_client_with_profile_data
     assert len(backup["access_requests"]) == 1
 
 
-def test_restore_brings_back_profile_token_and_all_related_data(admin_client_with_profile_data):
-    """GIVEN 백업을 받아둔 뒤, 프로필을 완전히 삭제했을 때(예: DB 손상 후 재설치를 흉내)"""
+def test_restore_issues_new_profile_link_and_brings_back_related_data(admin_client_with_profile_data):
     ctx = admin_client_with_profile_data
     client = ctx["client"]
 
@@ -106,24 +106,27 @@ def test_restore_brings_back_profile_token_and_all_related_data(admin_client_wit
     body = r.json()
     assert body["profiles_count"] == 1
     assert body["profile_progress_count"] == 1
+    assert body["new_profile_links_count"] == 1
+    assert body["warnings"]
 
-    """THEN 프로필이 원래 토큰(공유 링크) 그대로 복원되고"""
     restored = client.get("/api/admin/profiles").json()
     assert len(restored) == 1
-    assert restored[0]["token"] == ctx["original_token"]
+    restored_token = restored[0]["token"]
+    assert restored_token != ctx["original_token"]
     restored_id = restored[0]["id"]
+    assert restored_id == ctx["profile_id"]
 
     """AND 허용 시리즈/둘러보기 필터/접속 시간대/요청 내역도 그대로 복원된다"""
     assert client.get(f"/api/admin/profiles/{restored_id}/allowed-series").json() == [ctx["series_id"]]
     assert len(client.get(f"/api/admin/profiles/{restored_id}/browse-filters").json()) == 1
     assert len(client.get(f"/api/admin/profiles/{restored_id}/time-windows").json()) == 1
 
-    """AND 예전 공유 링크(토큰)로 접속해도 이어보기 진행률이 그대로 남아있다"""
-    continue_info = client.get(f"/p/{ctx['original_token']}/api/series/{ctx['series_id']}/continue").json()
+    assert client.get(f"/p/{ctx['original_token']}/api/series").status_code == 404
+    continue_info = client.get(f"/p/{restored_token}/api/series/{ctx['series_id']}/continue").json()
     assert continue_info["chapter_id"] == ctx["chapter_id"]
 
     """AND 검색/정렬 설정도 프로필 쪽에 그대로 복원된다"""
-    sort_setting = client.get(f"/p/{ctx['original_token']}/api/settings/sort_mode").json()
+    sort_setting = client.get(f"/p/{restored_token}/api/settings/sort_mode").json()
     assert sort_setting["value"] == "title"
 
 
@@ -141,37 +144,124 @@ def test_export_import_helpers_work_even_when_tables_were_never_created(library,
     assert access_requests.export_all() == []
 
 
-def test_backup_includes_admin_and_profile_devices(admin_client_with_profile_data):
-    """GIVEN 관리자가 로그인해서 기억된 기기가 있고, 프로필 쪽에도 접속 기기가 등록된 상태일 때"""
+def test_backup_never_exports_admin_or_profile_device_credentials(admin_client_with_profile_data):
     ctx = admin_client_with_profile_data
     client = ctx["client"]
     client.get(f"/p/{ctx['original_token']}/api/series")  # 프로필 기기 1대 자동 등록됨
 
-    """WHEN 백업을 받으면"""
-    backup = client.get("/api/backup").json()
+    response = client.get("/api/backup")
+    backup = response.json()
+    assert response.headers["cache-control"] == "no-store"
 
-    """THEN 관리자의 기억된 기기와 프로필의 등록 기기가 둘 다 포함된다"""
-    assert len(backup["remembered_devices"]) >= 1
-    assert len(backup["profile_devices"]) >= 1
+    assert {"remembered_devices", "profile_devices", "profile_device_requests"}.isdisjoint(backup)
+    assert ctx["original_token"] not in response.text
+    assert client.cookies["webtoon_device"] not in response.text
+    assert client.cookies["webtoon_profile_device"] not in response.text
 
 
-def test_restore_brings_back_devices_so_no_reapproval_needed(admin_client_with_profile_data):
-    """GIVEN 관리자 기기 1대, 프로필 기기 1대가 등록된 상태에서 백업을 받아둔 뒤"""
+def test_restore_keeps_active_devices_and_share_link(admin_client_with_profile_data):
     ctx = admin_client_with_profile_data
     client = ctx["client"]
     client.get(f"/p/{ctx['original_token']}/api/series")
 
     backup = client.get("/api/backup").json()
-    admin_devices_before = len(backup["remembered_devices"])
-    profile_devices_before = len(backup["profile_devices"])
-    assert admin_devices_before >= 1
-    assert profile_devices_before >= 1
+    admin_device = client.cookies["webtoon_device"]
+    profile_device = client.cookies["webtoon_profile_device"]
 
     """WHEN 그 백업으로 복원하면(같은 내용을 다시 써도 안전해야 함)"""
     r = client.post("/api/restore", json=backup)
     assert r.status_code == 200
-    body = r.json()
+    assert r.json()["new_profile_links_count"] == 0
+    assert auth.is_device_remembered(admin_device)
+    assert client.get("/api/admin/profiles").json()[0]["token"] == ctx["original_token"]
+    assert client.get(f"/p/{ctx['original_token']}/api/series").status_code == 200
+    assert client.cookies["webtoon_profile_device"] == profile_device
 
-    """THEN 관리자/프로필 기기 등록 건수가 백업에 있던 그대로 복원된다(다시 승인받을 필요 없음)"""
-    assert body["remembered_devices_count"] == admin_devices_before
-    assert body["profile_devices_count"] == profile_devices_before
+
+def test_legacy_omissions_preserve_profile_and_rejects_old_credentials(admin_client_with_profile_data):
+    ctx = admin_client_with_profile_data
+    client = ctx["client"]
+    original = client.get("/api/backup").json()
+    legacy = {"version": 1, "progress": []}
+    assert client.post("/api/restore", json=legacy).status_code == 200
+    assert client.get("/api/admin/profiles").json()[0]["token"] == ctx["original_token"]
+    assert client.get("/api/backup").json()["profile_progress"] == original["profile_progress"]
+
+    legacy["version"] = 3
+    legacy["profiles"] = [{**original["profiles"][0], "token": "old-share-token"}]
+    legacy["remembered_devices"] = [
+        {"device_id": "old-admin-device", "label": "Old", "created_at": "old", "last_seen_at": "old"},
+    ]
+    assert client.post("/api/restore", json=legacy).status_code == 200
+    assert not auth.is_device_remembered("old-admin-device")
+    assert client.get("/api/admin/profiles").json()[0]["token"] == ctx["original_token"]
+    assert client.get("/api/backup").json()["profile_progress"] == original["profile_progress"]
+
+
+def test_profile_delete_clears_child_rows_and_backup_roundtrips(admin_client_with_profile_data):
+    ctx = admin_client_with_profile_data
+    client = ctx["client"]
+    profile_id = ctx["profile_id"]
+    actor_key = f"profile:{profile_id}"
+    tables = (
+        "profile_browse_filters", "profile_allowed_series", "profile_progress",
+        "profile_read_chapters", "profile_settings", "profile_time_windows", "access_requests",
+        "profile_devices", "profile_device_requests", "profile_reading_sessions",
+    )
+    with db.db_connection() as conn, conn:
+        conn.execute("INSERT OR REPLACE INTO profile_reading_sessions VALUES (?, ?, ?)",
+                     (profile_id, ctx["series_id"], ctx["chapter_id"]))
+        conn.execute("INSERT INTO reading_coverage VALUES (?, ?, ?, ?, ?, ?)",
+                     (actor_key, ctx["series_id"], ctx["chapter_id"], "f" * 32, 0, 1.0))
+    assert client.delete(f"/api/admin/profiles/{profile_id}").status_code == 200
+    with db.db_connection() as conn:
+        for table in tables:
+            assert conn.execute(f"SELECT COUNT(*) FROM {table} WHERE profile_id = ?", (profile_id,)).fetchone()[0] == 0
+        for table in ("reading_coverage", "progress_write_intents"):
+            assert conn.execute(f"SELECT COUNT(*) FROM {table} WHERE actor_key = ?", (actor_key,)).fetchone()[0] == 0
+
+    snapshot = client.get("/api/backup").json()
+    assert snapshot["profiles"] == [] and snapshot["reading_coverage"] == []
+    restored = client.post("/api/restore", json=snapshot)
+    assert restored.status_code == 200, restored.text
+
+
+def test_backup_roundtrip_preserves_coverage_and_legacy_cursor_restore_clears_it(admin_client_with_profile_data):
+    ctx = admin_client_with_profile_data
+    client = ctx["client"]
+    profile_actor = f"profile:{ctx['profile_id']}"
+    with db.db_connection() as conn, conn:
+        conn.executemany("INSERT INTO reading_coverage VALUES (?, ?, ?, ?, ?, ?)",
+                         [(actor, ctx["series_id"], ctx["chapter_id"], "f" * 32, 1, 0.5)
+                          for actor in ("admin", profile_actor, "profile:deleted")])
+
+    snapshot = client.get("/api/backup").json()
+    assert {row["actor_key"] for row in snapshot["reading_coverage"]} == {"admin", profile_actor}
+    with db.db_connection() as conn, conn:
+        conn.execute("DELETE FROM reading_coverage")
+    assert client.post("/api/restore", json=snapshot).status_code == 200
+    assert client.get("/api/backup").json()["reading_coverage"] == snapshot["reading_coverage"]
+    assert client.post("/api/restore", json={"version": 1, "progress": []}).status_code == 200
+    assert {row["actor_key"] for row in client.get("/api/backup").json()["reading_coverage"]} == {profile_actor}
+
+
+def test_backup_omits_legacy_orphans_and_preserves_legacy_time_restriction(admin_client_with_profile_data):
+    ctx = admin_client_with_profile_data
+    client = ctx["client"]
+    profile_id = ctx["profile_id"]
+    legacy_window = {"day_of_week": 0, "start_minute": 120, "end_minute": 60}
+    profile_time_restrictions.set_time_windows(profile_id, [legacy_window])
+    with db.db_connection() as conn, conn:
+        conn.execute("INSERT INTO profile_settings VALUES (?, ?, ?)", ("deleted-id", "sort_mode", "title"))
+
+    snapshot = client.get("/api/backup").json()
+    assert all(row["profile_id"] == profile_id for row in snapshot["profile_settings"])
+    snapshot["profile_settings"].append({"profile_id": "deleted-id", "key": "sort_mode", "value": "title"})
+    restored = client.post("/api/restore", json=snapshot)
+    assert restored.status_code == 200, restored.text
+    assert restored.json()["ignored_orphan_rows_count"] == 1
+    assert restored.json()["warnings"]
+    assert profile_time_restrictions.get_time_windows(profile_id) == [legacy_window]
+    assert not profile_time_restrictions.is_within_allowed_time(profile_id, datetime(2026, 11, 23, 1, 30))
+    assert client.put(f"/api/admin/profiles/{profile_id}/time-windows", json={"windows": [legacy_window]}).status_code == 422
+    assert profile_time_restrictions.get_time_windows(profile_id) == [legacy_window]

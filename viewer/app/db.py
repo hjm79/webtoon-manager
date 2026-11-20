@@ -42,13 +42,16 @@ def init_schema() -> None:
                 chapter_index INTEGER NOT NULL,
                 page_index INTEGER NOT NULL DEFAULT 0,
                 page_offset REAL NOT NULL DEFAULT 0,
-                updated_at TEXT NOT NULL
+                updated_at TEXT NOT NULL,
+                explicit_read_state INTEGER NOT NULL DEFAULT 0
             )
             """
         )
         columns = {row[1] for row in conn.execute("PRAGMA table_info(progress)")}
         if "page_offset" not in columns:
             conn.execute("ALTER TABLE progress ADD COLUMN page_offset REAL NOT NULL DEFAULT 0")
+        if "explicit_read_state" not in columns:
+            conn.execute("ALTER TABLE progress ADD COLUMN explicit_read_state INTEGER NOT NULL DEFAULT 0")
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS app_settings (
@@ -85,6 +88,19 @@ def init_schema() -> None:
                 client_sequence INTEGER NOT NULL,
                 generation INTEGER NOT NULL,
                 PRIMARY KEY (actor_key, series_id, client_session_id)
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS reading_coverage (
+                actor_key TEXT NOT NULL,
+                series_id TEXT NOT NULL,
+                chapter_id TEXT NOT NULL,
+                zip_generation TEXT NOT NULL,
+                page_index INTEGER NOT NULL,
+                page_offset REAL NOT NULL,
+                PRIMARY KEY (actor_key, series_id, chapter_id)
             )
             """
         )
@@ -165,9 +181,21 @@ def register_progress_intent(actor_key: str, series_id: str, client_session_id: 
     return generation
 
 
+def get_reading_coverage(actor_key: str, series_id: str, chapter_id: str, zip_generation: str) -> dict | None:
+    with db_connection() as conn:
+        row = conn.execute(
+            "SELECT page_index, page_offset FROM reading_coverage "
+            "WHERE actor_key = ? AND series_id = ? AND chapter_id = ? AND zip_generation = ?",
+            (actor_key, series_id, chapter_id, zip_generation),
+        ).fetchone()
+    return {"page_index": row[0], "page_offset": row[1]} if row else None
+
+
 def commit_progress_intent(actor_key: str, series_id: str, generation: int, *, profile_id: str | None,
                            chapter_id: str, chapter_index: int, page_index: int, page_offset: float,
-                           read_chapter_ids: list[str], allow_reading_session: bool = False) -> bool:
+                           read_chapter_ids: list[str], allow_reading_session: bool = False,
+                           explicit_read_state: bool = False,
+                           reading_coverage: tuple[tuple[str, str, int, float], ...] = ()) -> bool:
     offset = normalize_page_offset(page_offset) if page_index < PAGE_FINISHED_SENTINEL else 0.0
     with db_connection() as conn:
         conn.execute("BEGIN IMMEDIATE")
@@ -177,7 +205,19 @@ def commit_progress_intent(actor_key: str, series_id: str, generation: int, *, p
         ).fetchone()[0]
         if generation != latest:
             return False
-        _write_progress(conn, profile_id, series_id, chapter_id, chapter_index, page_index, offset)
+        _write_progress(conn, profile_id, series_id, chapter_id, chapter_index, page_index, offset,
+                        explicit_read_state=explicit_read_state)
+        conn.executemany(
+            """INSERT INTO reading_coverage (actor_key, series_id, chapter_id, zip_generation, page_index, page_offset)
+            VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(actor_key, series_id, chapter_id) DO UPDATE SET
+                zip_generation = excluded.zip_generation, page_index = excluded.page_index, page_offset = excluded.page_offset
+            WHERE reading_coverage.zip_generation != excluded.zip_generation
+                OR (reading_coverage.page_index, reading_coverage.page_offset) < (excluded.page_index, excluded.page_offset)""",
+            [(actor_key, series_id, *item) for item in reading_coverage],
+        )
+        conn.executemany("DELETE FROM reading_coverage WHERE actor_key = ? AND series_id = ? AND chapter_id = ?",
+                         [(actor_key, series_id, item) for item in read_chapter_ids])
         if profile_id is None:
             conn.executemany("INSERT OR IGNORE INTO read_chapters VALUES (?, ?)",
                              [(series_id, item) for item in read_chapter_ids])
@@ -195,14 +235,16 @@ def commit_progress_intent(actor_key: str, series_id: str, generation: int, *, p
 
 
 def _write_progress(conn, profile_id: str | None, series_id: str, chapter_id: str,
-                    chapter_index: int, page_index: int, page_offset: float = 0.0) -> None:
+                    chapter_index: int, page_index: int, page_offset: float = 0.0, *,
+                    explicit_read_state: bool = False) -> None:
     if profile_id is None:
         conn.execute(
-            "INSERT INTO progress (series_id, chapter_id, chapter_index, page_index, page_offset, updated_at) "
-            "VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(series_id) DO UPDATE SET "
+            "INSERT INTO progress (series_id, chapter_id, chapter_index, page_index, page_offset, updated_at, explicit_read_state) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT(series_id) DO UPDATE SET "
             "chapter_id = excluded.chapter_id, chapter_index = excluded.chapter_index, "
-            "page_index = excluded.page_index, page_offset = excluded.page_offset, updated_at = excluded.updated_at",
-            (series_id, chapter_id, chapter_index, page_index, page_offset, _utc_now_iso()),
+            "page_index = excluded.page_index, page_offset = excluded.page_offset, updated_at = excluded.updated_at, "
+            "explicit_read_state = MAX(progress.explicit_read_state, excluded.explicit_read_state)",
+            (series_id, chapter_id, chapter_index, page_index, page_offset, _utc_now_iso(), int(explicit_read_state)),
         )
     else:
         conn.execute(
@@ -243,6 +285,7 @@ def commit_read_state_intent(actor_key: str, series_id: str, generation: int, *,
                 position = (chapter_ids[-1], len(chapter_ids) - 1, PAGE_FINISHED_SENTINEL)
             else:
                 conn.execute(f"DELETE FROM {read_table} WHERE {where}", params)
+            conn.execute("DELETE FROM reading_coverage WHERE actor_key = ? AND series_id = ?", (actor_key, series_id))
             update_position = True
         elif scope == "toggle":
             chapter_id = chapter_ids[selected_index]
@@ -268,6 +311,9 @@ def commit_read_state_intent(actor_key: str, series_id: str, generation: int, *,
         placeholders = ", ".join("?" for _ in range(len(params) + 1))
         conn.executemany(f"INSERT OR IGNORE INTO {read_table} VALUES ({placeholders})", [(*params, item) for item in add])
         conn.executemany(f"DELETE FROM {read_table} WHERE {where} AND chapter_id = ?", [(*params, item) for item in remove])
+        if scope != "all":
+            conn.executemany("DELETE FROM reading_coverage WHERE actor_key = ? AND series_id = ? AND chapter_id = ?",
+                             [(actor_key, series_id, item) for item in add + remove])
         if update_position:
             if position is None:
                 conn.execute(f"DELETE FROM {progress_table} WHERE {where}", params)
@@ -368,7 +414,7 @@ def copy_archived_progress(series_id: str, mappings: list[tuple[str, str, str, i
 def get_progress(series_id: str) -> dict | None:
     with db_connection() as conn:
         row = conn.execute(
-            "SELECT chapter_id, chapter_index, page_index, page_offset FROM progress WHERE series_id = ?",
+            "SELECT chapter_id, chapter_index, page_index, page_offset, explicit_read_state FROM progress WHERE series_id = ?",
             (series_id,),
         ).fetchone()
     if not row:
@@ -377,6 +423,8 @@ def get_progress(series_id: str) -> dict | None:
     offset = normalize_page_offset(row[3])
     if offset > 0:
         result["page_offset"] = offset
+    if row[4]:
+        result["explicit_read_state"] = True
     return result
 
 
@@ -436,6 +484,29 @@ def mark_chapters_read(series_id: str, chapter_ids: list[str]) -> None:
     if not chapter_ids:
         return
     with db_connection() as conn:
+        conn.executemany(
+            "INSERT OR IGNORE INTO read_chapters (series_id, chapter_id) VALUES (?, ?)",
+            [(series_id, chapter_id) for chapter_id in chapter_ids],
+        )
+        conn.commit()
+
+
+def migrate_read_chapters(series_id: str, progress: dict, chapter_ids: list[str]) -> None:
+    if not chapter_ids:
+        return
+    with db_connection() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        # A scoped save may have replaced the cursor after the caller read it.
+        legacy_cursor = conn.execute(
+            """SELECT 1 FROM progress
+            WHERE series_id = ? AND chapter_id = ? AND chapter_index = ? AND page_index = ?
+              AND explicit_read_state = 0
+              AND NOT EXISTS (SELECT 1 FROM read_chapters WHERE series_id = progress.series_id)
+              AND NOT EXISTS (SELECT 1 FROM archive_progress_imports WHERE series_id = progress.series_id)""",
+            (series_id, progress["chapter_id"], progress["chapter_index"], progress["page_index"]),
+        ).fetchone()
+        if legacy_cursor is None:
+            return
         conn.executemany(
             "INSERT OR IGNORE INTO read_chapters (series_id, chapter_id) VALUES (?, ?)",
             [(series_id, chapter_id) for chapter_id in chapter_ids],
@@ -561,7 +632,7 @@ def set_cached_overlap(next_chapter_id: str, prev_chapter_id: str, skip_pages: i
 def export_backup_data() -> dict:
     with db_connection() as conn:
         progress_rows = conn.execute(
-            "SELECT series_id, chapter_id, chapter_index, page_index, updated_at, page_offset FROM progress"
+            "SELECT series_id, chapter_id, chapter_index, page_index, updated_at, page_offset, explicit_read_state FROM progress"
         ).fetchall()
         settings_rows = conn.execute("SELECT key, value FROM app_settings").fetchall()
         read_rows = conn.execute("SELECT series_id, chapter_id FROM read_chapters").fetchall()
@@ -574,6 +645,7 @@ def export_backup_data() -> dict:
                 "page_index": row[3],
                 "updated_at": row[4],
                 "page_offset": normalize_page_offset(row[5]),
+                **({"explicit_read_state": True} if row[6] else {}),
             }
             for row in progress_rows
         ],
@@ -603,8 +675,8 @@ def import_backup_data(progress_rows: list, settings_rows: list, read_chapter_ro
                 continue
             conn.execute(
                 """
-                INSERT INTO progress (series_id, chapter_id, chapter_index, page_index, updated_at, page_offset)
-                VALUES (?, ?, ?, ?, ?, ?)
+                INSERT INTO progress (series_id, chapter_id, chapter_index, page_index, updated_at, page_offset, explicit_read_state)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     series_id,
@@ -613,6 +685,7 @@ def import_backup_data(progress_rows: list, settings_rows: list, read_chapter_ro
                     int(row.get("page_index", 0)),
                     row.get("updated_at") or _utc_now_iso(),
                     normalize_page_offset(row.get("page_offset", 0)),
+                    int(row.get("explicit_read_state") is True),
                 ),
             )
             progress_count += 1

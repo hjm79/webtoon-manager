@@ -1,5 +1,6 @@
 """네이버 자동 다운로드(한 작품) 특성 테스트 — 건너뛰는 조건, 성인 쿠키, 폴더 기준 갱신, 순서/이력, 실패 시 중단, 배치 휴식."""
 import asyncio
+from pathlib import Path
 from types import SimpleNamespace as NS
 
 from app import db, repository, scheduler, job_status, comicinfo, naver_api, cookie_health
@@ -15,12 +16,15 @@ async def fake_info(session, title_id, timeout): return state["info"]
 async def fake_all(session, title_id, cookies, timeout): state["cookies_used"] = cookies; return state["episodes"]
 async def fake_single(**kw):
     state["attempts"].append(kw["episode"].episode_no); state["download_kw"] = kw
-    return kw["episode"].episode_no not in state["fail"], None
+    return kw["episode"].episode_no not in state["fail"], Path(DL) / "[0001]"
 async def fake_cover(session, d, info, t): state["cover"] += 1
 sleeps = []
 async def fake_sleep(x): sleeps.append(x)
 naver_api.fetch_title_info = fake_info; naver_api.fetch_all_episodes = fake_all; naver_api.free_episodes_only = lambda eps: list(eps)
-scheduler.naver_download.download_single_episode = fake_single; scheduler.naver_download.zip_episode_folders = lambda d: state["zips"].append(str(d))
+def fake_zip(d, **options):
+    state["zips"].append(str(d))
+    return ["episode.zip"]
+scheduler.naver_download.download_single_episode = fake_single; scheduler.naver_download.zip_episode_folders = fake_zip
 scheduler.naver_download.find_last_downloaded_episode_no = lambda d, eps: state["folder_last"]
 scheduler.naver_download.get_adult_cookies = lambda path: state["adult_cookies"]
 comicinfo.write_comicinfo_file = lambda d, info: state["xml"].append(info.title_name)

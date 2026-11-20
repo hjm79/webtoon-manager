@@ -70,6 +70,18 @@ def _latest_chapter(chapters: list) -> dict | None:
             "date_source": "file_modified" if date else "unknown"}
 
 
+def _resume_chapter(chapters: list, prog: dict | None, read_ids: set[str]) -> tuple[dict, bool]:
+    reading = services.reading_chapter(chapters, prog)
+    if reading is not None:
+        return reading, True
+    completed_index = services.resolve_read_index(chapters, prog)
+    # Prefer continuing forward. Once there are no later unread chapters, offer any earlier gaps.
+    for chapter in chapters[completed_index + 1:] + chapters[:completed_index + 1]:
+        if chapter["id"] not in read_ids:
+            return chapter, False
+    return chapters[max(completed_index, 0)], completed_index >= 0
+
+
 @router.get("/api/series")
 def list_series(request: Request):
     profile = access_control.get_profile(request)
@@ -106,12 +118,8 @@ def list_series(request: Request):
         elif reading is None and unread == 0:
             progress_display = "완독"
         else:
-            # 카드에 적는 회차: 지금 읽고 있는 회차가 있으면 그 회차, 없으면 아직 안 읽은 회차 중 가장 앞선 것
-            # (중간에 빠졌던 회차일 수도 있음). 읽고 있는 회차를 우선하는 이유: 카드를 누르면 그 회차가 열리고
-            # 사이드바에도 "읽는 중"으로 표시되는데, 카드만 "안 읽은 첫 회차"를 적으면 어긋난다 - 예를 들어
-            # 8화까지 갔다가 7화로 돌아와 읽는 중이면(7화는 이미 읽음 기록에 있음) 안 읽은 첫 회차는 8화다.
-            # 전부 읽음 처리된 웹툰의 회차를 다시 열어 읽는 중일 때도 같은 규칙으로 그 회차가 적힌다.
-            current = reading or next(chapter for chapter in chapters if chapter["id"] not in read_ids)
+            # Use the same chapter that opens when the card is selected.
+            current, _ = _resume_chapter(chapters, prog, read_ids)
             current_label = services.chapter_number_part(current["label"])
             last_label = services.chapter_number_part(chapters[-1]["label"])
             progress_display = f"{current_label}/{last_label}"
@@ -232,33 +240,43 @@ async def continue_reading(series_id: str, request: Request):
     if not series["chapters"]:
         raise HTTPException(404, "no chapters")
 
+    chapters = series["chapters"]
     prog = access_control.get_progress(profile, series_id)
-    if prog:
-        idx = next((i for i, ch in enumerate(series["chapters"]) if ch["id"] == prog["chapter_id"]), None)
-        if idx is not None:
-            # zip을 열어 페이지 수를 세는 건 네트워크 드라이브(원드라이브 등)에서 캐시가
-            # 안 되어 있으면 느릴 수 있는 블로킹 작업이다. run_platform_io로 넘겨서,
-            # 이 플랫폼이 네트워크 드라이브면 격리된 전용 스레드풀로 보내(로컬 작업까지
-            # 덩달아 느려지지 않게), 그게 아니면 평소처럼 기본 스레드풀로 보낸다.
-            page_count = len(await services.run_platform_io(series["platform"], scan.list_zip_image_names, series["chapters"][idx]["path"]))
-            # 저장된 page_index가 실제 페이지 수 이상이면 "이 회차는 다 읽음" 신호 ->
-            # 다음 화가 있으면 그쪽으로, 없으면(마지막 화) 마지막 페이지로 보정
-            if prog["page_index"] >= page_count and idx + 1 < len(series["chapters"]):
-                next_chapter = series["chapters"][idx + 1]
-                return {"chapter_id": next_chapter["id"], "page_index": 0}
-            clamped_page = min(max(prog["page_index"], 0), max(page_count - 1, 0))
-            result = {"chapter_id": prog["chapter_id"], "page_index": clamped_page}
-            offset = db.normalize_page_offset(prog.get("page_offset", 0))
-            if offset > 0 and clamped_page == prog["page_index"]:
-                result["page_offset"] = offset
-            return result
+    if profile is None:
+        services.migrate_legacy_progress_if_needed(series_id, chapters, prog)
+    read_ids = access_control.get_read_chapter_ids(profile, series_id)
+    chapter, use_saved_page = _resume_chapter(chapters, prog, read_ids)
+    if not use_saved_page:
+        return {"chapter_id": chapter["id"], "page_index": 0}
 
-    first_chapter = series["chapters"][0]
-    return {"chapter_id": first_chapter["id"], "page_index": 0}
+    page_count = len(await services.run_platform_io(series["platform"], scan.list_zip_image_names, chapter["path"]))
+    clamped_page = min(max(prog["page_index"], 0), max(page_count - 1, 0))
+    result = {"chapter_id": chapter["id"], "page_index": clamped_page}
+    offset = db.normalize_page_offset(prog.get("page_offset", 0))
+    if offset > 0 and clamped_page == prog["page_index"]:
+        result["page_offset"] = offset
+    return result
+
+
+class ReadingCoverageIn(BaseModel):
+    chapter_id: str = Field(min_length=1, max_length=128, strict=True)
+    zip_generation: str = Field(pattern=r"^[0-9a-f]{32}$", strict=True)
+    page_index: int = Field(ge=0, lt=db.PAGE_FINISHED_SENTINEL, strict=True)
+    page_offset: float = Field(ge=0, le=1, allow_inf_nan=False, strict=True)
+
+    @field_validator("page_offset", mode="before")
+    @classmethod
+    def finite_offset(cls, value):
+        if isinstance(value, float) and not math.isfinite(value):
+            raise HTTPException(422, "reading_coverage page_offset must be finite")
+        return value
 
 
 class ProgressIn(BaseModel):
     chapter_id: str
+    reading_from_chapter_id: str | None = None
+    read_chapter_ids: list[str] | None = Field(default=None, max_length=500)
+    reading_coverage: list[ReadingCoverageIn] = Field(default_factory=list, max_length=8)
     page_index: int = Field(default=0, ge=0, lt=db.PAGE_FINISHED_SENTINEL, strict=True)
     page_offset: float = Field(default=0.0, ge=0, le=1, allow_inf_nan=False, strict=True)
     completed: bool | None = Field(default=None, strict=True)
@@ -298,6 +316,19 @@ async def save_progress(series_id: str, body: ProgressIn, request: Request):
     idx = next((i for i, ch in enumerate(chapters) if ch["id"] == body.chapter_id), None)
     if idx is None:
         raise HTTPException(404, "chapter not found in series")
+    scoped = body.reading_from_chapter_id is not None
+    start_idx = 0
+    if scoped:
+        start_idx = next((i for i, ch in enumerate(chapters[:idx + 1]) if ch["id"] == body.reading_from_chapter_id), None)
+        if start_idx is None:
+            raise HTTPException(422, "reading_from_chapter_id must identify the current or an earlier chapter in the series")
+    explicit_read_ids = None
+    if body.read_chapter_ids is not None:
+        valid_read_ids = {chapter["id"] for chapter in chapters}
+        valid_read_ids.discard(body.chapter_id)
+        explicit_read_ids = set(body.read_chapter_ids)
+        if not scoped or not explicit_read_ids <= valid_read_ids:
+            raise HTTPException(422, "read_chapter_ids must identify other chapters in this series")
 
     allow_reading_session = access_control.ensure_reading_time_allowed(profile, series_id, body.chapter_id)
     actor_key = access_control.progress_actor_key(profile)
@@ -309,22 +340,52 @@ async def save_progress(series_id: str, body: ProgressIn, request: Request):
     if page_count == 0 or body.page_index >= page_count:
         raise HTTPException(422, "page_index must identify an existing page")
 
+    coverage_rows = []
+    if body.reading_coverage:
+        paths = {chapter["id"]: chapter["path"] for chapter in chapters}
+        seen = set()
+        for item in body.reading_coverage:
+            path = paths.get(item.chapter_id)
+            if not path or item.chapter_id in seen or not scoped:
+                raise HTTPException(422, "reading_coverage must identify distinct chapters in this series")
+            seen.add(item.chapter_id)
+            actual_count = page_count if item.chapter_id == body.chapter_id else len(
+                await services.run_platform_io(series["platform"], scan.list_zip_image_names, path)
+            )
+            zip_generation = await services.run_platform_io(series["platform"], services.chapter_zip_generation, path)
+            if item.zip_generation != zip_generation:
+                raise HTTPException(409, "chapter file changed; reload the chapter")
+            if item.page_index >= actual_count:
+                raise HTTPException(422, "reading_coverage must identify an existing page")
+            coverage_rows.append((item.chapter_id, zip_generation, item.page_index, item.page_offset))
+
     is_last_chapter = idx == len(chapters) - 1
-    legacy_completion = body.completed is None and "page_offset" not in body.model_fields_set
+    legacy_completion = not scoped and body.completed is None and "page_offset" not in body.model_fields_set
     completed = False
     if body.completed is True or (is_last_chapter and legacy_completion):
-        if not is_last_chapter:
+        if not scoped and not is_last_chapter:
             raise HTTPException(422, "completed is only valid at the end of the last chapter")
-        if body.completed is True and (page_count == 0 or body.page_index != page_count - 1):
-            raise HTTPException(422, "completed requires the last page of the last chapter")
+        if body.completed is True and body.page_index != page_count - 1:
+            raise HTTPException(422, "completed requires the last page of the chapter")
         completed = page_count > 0 and body.page_index >= page_count - 1
 
+    if explicit_read_ids is not None:
+        if completed:
+            explicit_read_ids.add(body.chapter_id)
+        read_chapter_ids = list(explicit_read_ids)
+    else:
+        read_chapter_ids = [ch["id"] for ch in chapters[start_idx:idx + int(completed)]]
+
+    if scoped and profile is None:
+        services.migrate_legacy_progress_if_needed(series_id, chapters, db.get_progress(series_id))
     saved = db.commit_progress_intent(
         actor_key, series_id, generation, profile_id=profile["id"] if profile else None,
         chapter_id=body.chapter_id, chapter_index=idx,
         page_index=db.PAGE_FINISHED_SENTINEL if completed else body.page_index, page_offset=body.page_offset,
-        read_chapter_ids=[ch["id"] for ch in chapters[:idx + int(completed)]],
+        read_chapter_ids=read_chapter_ids,
         allow_reading_session=allow_reading_session,
+        explicit_read_state=scoped,
+        reading_coverage=tuple(coverage_rows),
     )
     return {"ok": True, "saved": saved, **({"reason": "stale_progress"} if not saved else {})}
 
@@ -391,13 +452,14 @@ def list_chapters(series_id: str, request: Request):
         # 다시 열어봄), 그 회차는 "읽음" 기록이 있어도 지금 보는 중이라는 게 더 중요한
         # 정보이므로 "읽는 중"으로 표시해야 한다. 예전에는 "이미 읽음"이 우선이라 다시
         # 펴봐도 "읽는 중"이 뜰 자리가 없는 문제가 있었다.
-        is_read = (chapter["id"] in read_ids) and not is_reading
+        has_read = chapter["id"] in read_ids
         chapters_out.append(
             {
                 "id": chapter["id"],
                 "label": chapter["label"],
                 "sort_key": chapter["sort_key"],
-                "read": is_read,
+                "read": has_read and not is_reading,
+                "has_read": has_read,
                 "reading": is_reading,
             }
         )

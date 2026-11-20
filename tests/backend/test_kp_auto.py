@@ -9,6 +9,7 @@ import aiohttp
 
 from app import db, repository, kakao_page_auth as auth, kakao_page_download as kp, job_status, scheduler
 from app import kakao_cover
+from fakes import image_bytes
 from app.config import get_settings
 db.get_connection()
 
@@ -39,7 +40,7 @@ def handler(method, url, params, data):
         return FakeResp(200, {"item": {}, "viewer_data": {"imageDownloadData": {"files": files}}})
     if "sdownload" in url:
         sid = int(url.split("kid=s")[1].split("_")[0])
-        return FakeResp(500) if sid in S["fail_images_for"] else FakeResp(200, body=b"\xff\xd8\xffx", ctype="image/jpeg")
+        return FakeResp(500) if sid in S["fail_images_for"] else FakeResp(200, body=image_bytes("JPEG"), ctype="image/jpeg")
     raise AssertionError(url)
 class FakeSession:
     def __init__(self, *a, **k): pass

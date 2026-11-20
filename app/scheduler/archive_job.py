@@ -7,7 +7,7 @@ import logging
 
 import aiohttp
 
-from app import archiver, discord_notify, download_roots, job_status, rclone_updater, repository, retention, viewer_connection, viewer_scan, webtoon_server_client
+from app import archiver, discord_notify, download_roots, job_status, repository, retention, viewer_connection, viewer_scan, webtoon_server_client
 from app.archiver import cancel
 from app.archiver.failure_reason import summarize as summarize_failure
 from app.archiver.title_archive import ReadNumbersProvider
@@ -28,7 +28,9 @@ def _build_read_numbers_provider(
     def provider(title_name: str, kakao: bool) -> frozenset[int] | None:
         folder_name = (remove_forbidden_str_kakao if kakao else remove_forbidden_str)(title_name)
         future = asyncio.run_coroutine_threadsafe(
-            webtoon_server_client.fetch_read_numbers(session, server_url, folder_name, timeout_seconds), loop
+            webtoon_server_client.fetch_read_numbers(
+                session, server_url, folder_name, timeout_seconds, platform="kakao" if kakao else "naver"
+            ), loop,
         )
         return future.result()
     return provider
@@ -99,20 +101,35 @@ async def _notify_archive_issues(
     await discord_notify.send_webhook_notification(session, build_archive_issue_message(conflicts, failures))
 
 
+def archive_job_running() -> bool:
+    statuses = job_status.snapshot()
+    return any(statuses[name]["status"] == "running" for name in ("archive", "bulk_move"))
+
+
+def finish_archive_job(moved: int, conflicts: list, failures: list, *, job_name: str = "archive") -> None:
+    if job_name == "archive" and cancel.is_requested():
+        job_status.log_line("archive", f"사용자 요청으로 중단했습니다 (이동 완료 {moved}개)")
+        job_status.finish("archive", success=False, outcome="cancelled")
+        return
+    skipped = sum(policy == "skip" for _, _, policy in conflicts)
+    if skipped or failures:
+        job_status.log_line(job_name, f"이동 {moved}개, 충돌로 건너뜀 {skipped}개, 실패 {len(failures)}건")
+    if failures and moved == 0:
+        job_status.finish(job_name, success=False)
+    elif failures or skipped:
+        job_status.finish(job_name, success=False, outcome="partial")
+    else:
+        job_status.finish(job_name, success=True)
+
+
 async def run_archive_job() -> None:
-    if _archive_job_lock.locked():
+    if _archive_job_lock.locked() or archive_job_running():
         job_status.log_line("archive", "이미 실행 중이라 건너뜁니다 (중복 실행 방지)")
         return
     async with _archive_job_lock:
         settings = get_settings()
         cancel.reset()  # 지난 중단 요청을 이어받지 않는다
         job_status.start("archive")
-        try:
-            update_result = await rclone_updater.check_and_update()
-            job_status.log_line("archive", update_result)
-        except Exception as e:
-            log.error("rclone 자동 업데이트 확인 중 예외: %s", e)
-            job_status.log_line("archive", f"rclone 업데이트 확인 중 오류(무시하고 계속): {e}")
         conflicts: list[tuple[str, str, str]] = []
         failures: list[tuple[str, str, str]] = []
         try:
@@ -130,8 +147,6 @@ async def run_archive_job() -> None:
                 lambda msg: job_status.log_line("archive", msg), conflicts, failures, download_roots.kakao_root(settings),
             )
             job_status.log_line("archive", f"완결 구독해제 대기열 {pending_moved}개 파일 이동 완료")
-            if cancel.is_requested():
-                job_status.log_line("archive", f"사용자 요청으로 중단했습니다 (이미 옮긴 {moved + pending_moved}개 파일은 그대로, 남은 파일은 다음 실행에서 이어서 옮깁니다)")
             viewer_scan.note_library_changed(moved + pending_moved)  # 파일을 옮겼으면 뷰어 서버가 다시 훑게 한다(연동이 켜져 있을 때만)
             _cleanup_old_archive_history()
 
@@ -139,7 +154,7 @@ async def run_archive_job() -> None:
                 async with aiohttp.ClientSession() as session:
                     await _notify_archive_issues(session, conflicts, failures)
 
-            job_status.finish("archive", success=True)
+            finish_archive_job(moved + pending_moved, conflicts, failures)
         except Exception as e:
             log.error("아카이빙 잡 중 예외: %s", e)
             job_status.log_line("archive", f"오류: {e}")

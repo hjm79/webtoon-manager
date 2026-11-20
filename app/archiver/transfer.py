@@ -25,7 +25,7 @@ def _find_metadata_files(title_dir: Path) -> list[Path]:
     return found
 
 
-def _archive_metadata_files_local(metadata_files: list[Path], dest_dir: Path, *, keep_last: bool) -> None:
+def _archive_metadata_files_local(metadata_files: list[Path], dest_dir: Path, *, keep_last: bool) -> list[tuple[str, str]]:
     """info.xml/커버를 로컬 목적지로 옮긴다.
     keep_last=True(주기/수동): 원본은 남기고 복사. info.xml은 작은 텍스트 파일이라
     매번 새로 복사하는 비용이 거의 없어서 항상 덮어쓴다(오래된 정보가 보관 폴더에
@@ -33,6 +33,7 @@ def _archive_metadata_files_local(metadata_files: list[Path], dest_dir: Path, *,
     목적지에 이미 있으면 건너뛴다.
     keep_last=False(완결 전체이동): 원본을 옮기고, 목적지에 있어도 무조건 덮어쓴다
     (zip과 달리 충돌 정책의 영향을 받지 않음 — 사용자와 논의 확정)."""
+    failures = []
     for src in metadata_files:
         dest_path = dest_dir / src.name
         try:
@@ -44,11 +45,14 @@ def _archive_metadata_files_local(metadata_files: list[Path], dest_dir: Path, *,
                 shutil.move(str(src), str(dest_path))
         except OSError as e:
             log.error("메타데이터 파일 이동 실패 (%s): %s", src, e)
+            failures.append((src.name, str(e)))
+    return failures
 
 
 def _archive_metadata_files_rclone(
     rclone_config_path: str, metadata_files: list[Path], remote: str, dest_path: str, *, keep_last: bool
-) -> None:
+) -> list[tuple[str, str]]:
+    failures = []
     for src in metadata_files:
         dest_spec = f"{remote}:{dest_path}/{src.name}" if dest_path else f"{remote}:{src.name}"
         try:
@@ -57,9 +61,11 @@ def _archive_metadata_files_rclone(
                     continue
                 rclone_client.copyto(rclone_config_path, str(src), dest_spec)
             else:
-                rclone_client.moveto(rclone_config_path, str(src), dest_spec)
-        except rclone_client.RcloneError as e:
+                rclone_client.move_file_to_remote(rclone_config_path, str(src), remote, dest_path, src.name)
+        except (OSError, rclone_client.RcloneError) as e:
             log.error("메타데이터 파일 원격 이동 실패 (%s): %s", src, e)
+            failures.append((src.name, str(e)))
+    return failures
 
 
 def _cleanup_empty_dirs(root: Path) -> None:
@@ -236,7 +242,7 @@ def _move_file_to_rclone_with_conflict_policy(
     rclone_config_path: str, src: Path, remote: str, dest_path: str, policy: str, dest_filename: str | None = None
 ) -> tuple[str | None, bool]:
     dest_name = dest_filename or src.name
-    had_conflict = rclone_client.file_exists(rclone_config_path, remote, dest_path, dest_name, ignore_empty=True)  # 0KB 찌꺼기는 충돌이 아니다
+    had_conflict = rclone_client.file_exists(rclone_config_path, remote, dest_path, dest_name, ignore_empty=True, strict=True)
     if had_conflict:
         if policy == "skip":
             log.info("아카이빙 건너뜀 (원격에 이미 존재): %s:%s/%s", remote, dest_path, dest_name)
@@ -245,34 +251,11 @@ def _move_file_to_rclone_with_conflict_policy(
             stem = Path(dest_name).stem
             suffix = Path(dest_name).suffix
             counter = 2
-            while rclone_client.file_exists(rclone_config_path, remote, dest_path, dest_name, ignore_empty=True):
+            while rclone_client.file_exists(rclone_config_path, remote, dest_path, dest_name, ignore_empty=True, strict=True):
                 dest_name = f"{stem} ({counter}){suffix}"
                 counter += 1
-        # overwrite: 그대로 진행, rclone moveto가 덮어씀
 
-    try:
-        rclone_client.move_file_to_remote(rclone_config_path, str(src), remote, dest_path, dest_name)
-    except rclone_client.RcloneError as e:
-        if not src.exists():
-            # moveto는 목적지 복사가 성공적으로 끝난 걸 확인한 뒤에만 원본을 지운다.
-            # 그러니 시간초과 에러가 나도 로컬 원본이 이미 없어졌다면, 실제로는
-            # 업로드까지 다 끝나고 rclone이 마지막 정리 단계에서 응답이 늦어졌을
-            # 가능성이 높다 — 이걸 그냥 "실패"로 처리하면 파일이 어디로도 기록 안
-            # 남고 사라진 것처럼 보이는 문제가 실제로 있었다. 성공으로 간주하되
-            # 불확실하다는 걸 로그에 명확히 남긴다.
-            log.warning(
-                "rclone 응답 시간초과(%s)가 났지만 로컬 원본이 이미 사라짐 — 실제로는 "
-                "업로드가 성공했을 가능성이 높습니다. 원격(%s:%s/%s)에서 직접 확인해보세요.",
-                e, remote, dest_path, dest_name,
-            )
-        else:
-            # 올리기가 실패했다 — 원본은 그대로 남아 있다(move_file_to_remote는 올라간 크기를 확인하기 전에는 지우지 않는다). 업로드를 시작하면서 목적지에 생긴 0KB 빈 파일만
-            # 정리한다(크기가 정확히 0이라고 확인될 때만, 못 지워도 무시) — 남겨 두면 다음 실행이 "같은 이름이 있다"고 보고 새 이름을 만든다
-            try:
-                rclone_client.delete_empty_file(rclone_config_path, remote, dest_path, dest_name)
-            except Exception as cleanup_error:  # 정리가 실패해도 원래의 업로드 실패를 그대로 알린다(정리 오류로 가리지 않는다)
-                log.warning("0KB 찌꺼기 정리 중 오류(무시): %s", cleanup_error)
-            raise
+    rclone_client.move_file_to_remote(rclone_config_path, str(src), remote, dest_path, dest_name)
     return dest_name, had_conflict
 
 

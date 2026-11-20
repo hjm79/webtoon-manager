@@ -1,6 +1,7 @@
 """rclone 래퍼(app/rclone_client.py) — rclone 프로그램을 부르는 경계에서 "어떤 명령줄을 만드는지, 결과를 어떻게 읽는지, 실패를 어떻게 다루는지"를 고정한다.
 subprocess.run을 가짜로 바꿔서 실제 rclone 없이 확인한다(archiver 쪽 테스트는 이 래퍼 위의 FakeRclone을 쓰므로, 명령줄 자체는 여기서만 확인된다).
 """
+import hashlib
 import json
 import subprocess
 import tempfile
@@ -12,7 +13,7 @@ CONFIG = "/cfg/rclone.conf"
 calls = []; outcome = {"stdout": "", "stderr": "", "code": 0, "raise": None}
 class Done:
     def __init__(self): self.stdout, self.stderr, self.returncode = outcome["stdout"], outcome["stderr"], outcome["code"]
-script = []   # 비어 있지 않으면 명령 하나마다 (stdout, stderr, code, 예외)를 차례로 쓴다 — 여러 명령이 이어지는 동작(복사 → 크기 확인 → 원본 삭제)을 본다
+script = []   # 비어 있지 않으면 명령 하나마다 (stdout, stderr, code, 예외)를 차례로 쓴다 — 여러 명령이 이어지는 동작(복사 → 내용 확인 → 원본 삭제)을 본다
 class ScriptDone:
     def __init__(self, stdout, stderr, code): self.stdout, self.stderr, self.returncode = stdout, stderr, code
 def fake_run(cmd, **kwargs):
@@ -64,8 +65,8 @@ print("4) 폴더 비었는지 OK")
 
 # Scenario 5: 폴더 만들기/파일 올리기 — mkdir remote:경로, moveto는 업로드용 긴 제한(1800초). 경로가 없으면 remote:파일명
 respond(); rc.create_folder(CONFIG, "od", "a/b"); assert last()[0][3:] == ["mkdir", "od:a/b"]
-# (파일 올리기는 복사 → 올라간 크기 확인 → 원본 삭제 순서다 — 아래 Scenario 8에서 본다. rclone moveto로 한 번에 옮기지 않는다)
-respond(); rc.moveto(CONFIG, "od:a.zip", "/work/a.zip"); cmd, kw = last(); assert cmd[3:] == ["moveto", "od:a.zip", "/work/a.zip"] and kw["timeout"] == 1800
+# (파일 올리기는 복사 → 내용 확인 → 원본 삭제 순서다 — 아래 Scenario 8에서 본다. rclone moveto로 한 번에 옮기지 않는다)
+respond(); rc.moveto(CONFIG, "od:a.zip", "/work/a.zip"); cmd, kw = last(); assert cmd[3:] == ["moveto", "od:a.zip", "/work/a.zip", "--ignore-times"] and kw["timeout"] == 1800
 respond(); rc.copyto(CONFIG, "/work/i.xml", "od:a/i.xml"); cmd, kw = last(); assert cmd[3:] == ["copyto", "/work/i.xml", "od:a/i.xml"] and kw["timeout"] == 1800        # 복사는 원본을 지우지 않는다
 respond(); rc.delete_file(CONFIG, "od", "a", "cover.jpg"); assert last()[0][3:] == ["deletefile", "od:a/cover.jpg"]
 respond(); rc.delete_file(CONFIG, "od", "", "cover.jpg"); assert last()[0][-1] == "od:cover.jpg"
@@ -95,27 +96,86 @@ script[:] = [bad_("denied")]; assert "denied" in raises(rc.file_size, CONFIG, "o
 script[:] = [ok_(json.dumps([{"Name": "a.zip"}]))]; assert rc.file_size(CONFIG, "od", "x", "a.zip") is None                                       # 크기 정보가 없으면 모른다(0으로 보지 않는다)
 print("8) 파일 크기 OK")
 
-# Scenario 9: **원본 보호** — 올리기는 복사만 하고(moveto 금지), 올라간 파일의 크기가 원본과 같다는 것을 확인한 뒤에만 원본을 지운다. 어떤 실패에서도 원본은 그대로다
-work = Path(tempfile.mkdtemp()); data = b"x" * 10
+# Scenario 9: 업로드 성공과 실제 내용 확인이 모두 필요하다.
+work = Path(tempfile.mkdtemp())
+data = b"x" * 10
+
 def make_local(content=data):
-    f = work / "1.zip"; f.write_bytes(content); return f
-def upload(f): rc.move_file_to_remote(CONFIG, str(f), "od", "웹툰/작품", "0001.zip")
-def names_of(): return [c[0][3] for c in calls]
-f = make_local(); script[:] = [ok_(), listing(("0001.zip", 10))]; calls.clear(); upload(f)                                         # 성공: 복사 → 크기 확인 → 원본 삭제
-assert names_of() == ["copyto", "lsjson"] and calls[0][0][3:] == ["copyto", str(f), "od:웹툰/작품/0001.zip"] and calls[0][1]["timeout"] == 1800 and calls[1][0][3:] == ["lsjson", "od:웹툰/작품"], calls
-assert not f.exists(), "확인된 뒤에는 원본이 지워진다(이동)"
-f = make_local(); script[:] = [ok_(), listing(("0001.zip", 10))]; rc.move_file_to_remote(CONFIG, str(f), "od", "", "0001.zip"); assert calls[-2][0][-1] == "od:0001.zip" and calls[-1][0][3:] == ["lsjson", "od:"]   # 경로 없으면 루트
-f = make_local(); script[:] = [bad_("401 Unauthorized"), listing(("0001.zip", 0))]; calls.clear()                                  # 복사 실패(0KB 자리표시 파일만 남음) → 실패, 원본 그대로
-assert "401" in raises(upload, f) and f.read_bytes() == data and "moveto" not in names_of(), (names_of(), f.exists())
-f = make_local(); script[:] = [bad_("timeout"), listing()]; assert "timeout" in raises(upload, f) and f.read_bytes() == data                # 복사 실패 + 목적지에 없음 → 실패, 원본 그대로
-f = make_local(); script[:] = [bad_("late timeout"), listing(("0001.zip", 10))]; upload(f); assert not f.exists(), "복사는 실패로 끝났지만 올라간 크기가 같으면 올라간 것이다(응답만 늦은 경우) — 성공 처리"
-f = make_local(); script[:] = [bad_("late timeout"), bad_("denied")]; assert "late timeout" in raises(upload, f) and f.read_bytes() == data     # 복사 실패 + 확인도 못 함 → 실패, 원본 그대로
-f = make_local(); script[:] = [ok_(), listing(("0001.zip", 7))]; message = raises(upload, f); assert "크기" in message and f.read_bytes() == data      # 크기가 다르면 → 실패, 원본 그대로
-f = make_local(); script[:] = [ok_(), listing(("0001.zip", 0))]; assert "크기" in raises(upload, f) and f.read_bytes() == data                     # 0KB로 올라갔다면 → 실패
-f = make_local(); script[:] = [ok_(), bad_("denied")]; assert "denied" in raises(upload, f) and f.read_bytes() == data                            # 올라간 파일을 확인하지 못하면 → 실패, 원본 그대로
-f = make_local(); script[:] = [ok_(), listing()]; assert "크기" in raises(upload, f) and f.read_bytes() == data                                  # 복사는 끝났다는데 목적지에 없으면 → 실패
-f = make_local(b""); script[:] = [ok_()]; calls.clear(); assert "0KB" in raises(upload, f) and calls == [] and f.exists(), "원본이 0KB면 아무것도 하지 않고 거절"     # 깨진 다운로드를 옮겨서 원본까지 없애지 않는다
-f = work / "없는파일.zip"; script[:] = [ok_()]; calls.clear(); assert "원본" in raises(upload, f) and calls == []
+    f = work / "1.zip"
+    f.write_bytes(content)
+    return f
+
+def upload(f):
+    rc.move_file_to_remote(CONFIG, str(f), "od", "웹툰/작품", "0001.zip")
+
+def names_of():
+    return [c[0][3] for c in calls]
+
+def hash_answer(content):
+    return ok_(f"{hashlib.sha256(content).hexdigest()}  0001.zip\n")
+
+f = make_local()
+script[:] = [ok_(), hash_answer(data), ok_()]
+calls.clear()
+upload(f)
+assert names_of() == ["copyto", "hashsum", "moveto"] and not f.exists()
+stage = calls[0][0][-2]
+assert stage.startswith("od:웹툰/작품/.webtoon-archive-") and stage.endswith(".part")
+assert calls[0][0][3:] == ["copyto", str(f), stage, "--ignore-times"]
+assert calls[1][0][3:] == ["hashsum", "sha256", stage, "--download"]
+assert calls[2][0][3:] == ["moveto", stage, "od:웹툰/작품/0001.zip", "--ignore-times"]
+assert all(kwargs["timeout"] == 1800 for _, kwargs in calls)
+
+f = make_local()
+script[:] = [ok_(), hash_answer(data), ok_()]
+rc.move_file_to_remote(CONFIG, str(f), "od", "", "0001.zip")
+assert calls[-2][0][-2].startswith("od:.webtoon-archive-") and calls[-1][0][-2] == "od:0001.zip"
+
+for error in ("401 Unauthorized", "late timeout"):
+    f = make_local()
+    script[:] = [bad_(error), ok_()]
+    calls.clear()
+    assert error in raises(upload, f) and f.read_bytes() == data
+    assert names_of() == ["copyto", "deletefile"] and calls[-1][0][-1] == calls[0][0][-2], calls
+
+for result in (hash_answer(b"y" * len(data)), hash_answer(b""), listing(("0001.zip", len(data))), ok_()):
+    f = make_local()
+    script[:] = [ok_(), result, ok_()]
+    calls.clear()
+    assert "내용" in raises(upload, f) and f.read_bytes() == data
+    assert names_of() == ["copyto", "hashsum", "deletefile"]
+    assert all("od:웹툰/작품/0001.zip" not in cmd for cmd, _ in calls)
+
+f = make_local()
+script[:] = [ok_(), bad_("denied"), ok_()]
+assert "denied" in raises(upload, f) and f.read_bytes() == data
+f = make_local()
+script[:] = [ok_(), hash_answer(data), bad_("unknown publication result"), hash_answer(b"old copy"), ok_()]
+assert "최종 위치" in raises(upload, f) and f.read_bytes() == data
+f = make_local()
+script[:] = [ok_(), hash_answer(data), bad_("failed after publication"), hash_answer(data), ok_()]
+upload(f)
+assert not f.exists()
+f = make_local()
+def replace_during_verification(cmd, **kwargs):
+    if cmd[3] == "hashsum":
+        replacement = f.with_suffix(".new")
+        replacement.write_bytes(b"z" * len(data))
+        replacement.replace(f)
+    return fake_run(cmd, **kwargs)
+
+script[:] = [ok_(), hash_answer(data), ok_()]
+rc.subprocess.run = replace_during_verification
+try:
+    assert "변경" in raises(upload, f) and f.read_bytes() == b"z" * len(data)
+finally:
+    rc.subprocess.run = fake_run
+
+f = make_local(b"")
+calls.clear()
+assert "0KB" in raises(upload, f) and calls == [] and f.exists()
+f = work / "없는파일.zip"
+assert "원본" in raises(upload, f) and calls == []
 script.clear()
 print("9) 원본 보호 OK")
 
@@ -145,6 +205,15 @@ script[:] = [listing(("a.zip", 0))]; assert rc.file_exists(CONFIG, "od", "x", "a
 script[:] = [listing(("a.zip", 0))]; assert rc.file_exists(CONFIG, "od", "x", "a.zip", ignore_empty=True) is False
 script[:] = [listing(("a.zip", 3))]; assert rc.file_exists(CONFIG, "od", "x", "a.zip", ignore_empty=True) is True
 script[:] = [ok_(json.dumps([{"Name": "a.zip"}]))]; assert rc.file_exists(CONFIG, "od", "x", "a.zip", ignore_empty=True) is True
+script[:] = [("", "directory not found", 3, None)]
+assert rc.file_exists(CONFIG, "od", "x/new", "a.zip", strict=True) is False
+script[:] = [bad_("denied")]
+try:
+    rc.file_exists(CONFIG, "od", "x", "a.zip", strict=True)
+except rc.RcloneError as error:
+    assert "denied" in str(error)
+else:
+    raise AssertionError("원격 목록 조회 오류가 충돌 검사에서 누락됐습니다")
 script.clear()
 print("12) 존재 확인 0KB 제외 OK")
 print("ALL OK")

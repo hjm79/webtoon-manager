@@ -8,10 +8,14 @@ Docker Desktop이 WinFsp 가상 드라이브를 못 읽는 문제 자체를 우�
 표기법과 동일) — archiver.py가 로컬 Path와 나란히 다루기 쉽게 하기 위함.
 """
 
+import hashlib
 import json
 import logging
+import stat
 import subprocess
+from os import stat_result
 from pathlib import Path
+from uuid import uuid4
 
 log = logging.getLogger(__name__)
 
@@ -24,7 +28,9 @@ _UPLOAD_TIMEOUT_SECONDS = 1800
 
 
 class RcloneError(Exception):
-    pass
+    def __init__(self, message: str, *, returncode: int | None = None):
+        super().__init__(message)
+        self.returncode = returncode
 
 
 def _run(config_path: str, args: list[str], timeout: int = _TIMEOUT_SECONDS) -> str:
@@ -38,7 +44,7 @@ def _run(config_path: str, args: list[str], timeout: int = _TIMEOUT_SECONDS) -> 
     except subprocess.TimeoutExpired as e:
         raise RcloneError(f"rclone 응답이 {timeout}초 내에 오지 않았습니다 (원격 저장소 연결 상태를 확인하세요).") from e
     if result.returncode != 0:
-        raise RcloneError(result.stderr.strip() or f"rclone 명령 실패 (종료코드 {result.returncode})")
+        raise RcloneError(result.stderr.strip() or f"rclone 명령 실패 (종료코드 {result.returncode})", returncode=result.returncode)
     return result.stdout
 
 
@@ -88,35 +94,70 @@ def create_folder(config_path: str, remote: str, path: str) -> None:
     _run(config_path, ["mkdir", target])
 
 
+def _remote_spec(remote: str, path: str, filename: str) -> str:
+    return f"{remote}:{path}/{filename}" if path else f"{remote}:{filename}"
+
+
+def _has_sha256(config_path: str, target: str, expected_hash: str) -> bool:
+    lines = _run(config_path, ["hashsum", "sha256", target, "--download"], timeout=_UPLOAD_TIMEOUT_SECONDS).splitlines()
+    return len(lines) == 1 and lines[0].startswith(f"{expected_hash}  ")
+
+
+def _assert_source_unchanged(local: Path, before: stat_result) -> None:
+    after = local.lstat()
+    if (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns, after.st_ctime_ns) != (
+        before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns, before.st_ctime_ns
+    ):
+        raise RcloneError(f"이동 중 원본 파일이 변경되었습니다: {local.name} — 원본을 그대로 둡니다")
+
+
 def move_file_to_remote(config_path: str, local_file_path: str, remote: str, dest_path: str, dest_file_name: str) -> None:
-    """로컬 파일 하나를 원격의 지정한 파일명으로 올리고, **올라간 파일의 크기가 원본과 같다는 것을 확인한 뒤에만** 로컬 원본을 지운다.
-    rclone moveto에 맡기지 않고 직접 한다 — 복사(copyto)만 시키고, 원격에 올라간 크기를 읽어서 확인하고, 그다음에 원본을 지운다. 그래서 업로드가 어떤 이유로 실패해도
-    (인증 오류, 시간초과, 올라간 크기가 다름, 확인 실패) 원본은 절대 지워지지 않는다. 복사가 실패로 끝났어도 올라간 크기가 같으면(응답만 늦은 경우) 올라간 것으로 본다.
-    원본이 0KB면(다운로드가 깨졌을 수 있다) 아무것도 하지 않고 거절한다 — 깨진 파일을 보관하고 원본까지 없애지 않게. 충돌 정책(덮어쓰기/건너뛰기/이름변경)은 호출부(archiver)가 정해서 최종 파일명을 넘겨준다."""
+    """Verify a staging object before touching the final path or deleting the local file."""
     local = Path(local_file_path)
     try:
-        expected = local.stat().st_size
+        before = local.lstat()
+        if not stat.S_ISREG(before.st_mode) or before.st_size == 0:
+            raise RcloneError(f"원본이 일반 파일이 아니거나 0KB입니다: {local.name} — 원본을 그대로 둡니다")
+        with local.open("rb") as source:
+            expected_hash = hashlib.file_digest(source, "sha256").hexdigest()
     except OSError as e:
         raise RcloneError(f"원본 파일을 읽을 수 없습니다: {local_file_path} ({e}) — 아무것도 옮기지 않았습니다") from e
-    if expected == 0:
-        raise RcloneError(f"원본 파일이 0KB입니다(다운로드가 깨졌을 수 있습니다): {local.name} — 옮기지 않고 원본을 그대로 둡니다")
-    target = f"{remote}:{dest_path}/{dest_file_name}" if dest_path else f"{remote}:{dest_file_name}"
-    copy_error: RcloneError | None = None
+
+    target = _remote_spec(remote, dest_path, dest_file_name)
+    staged_name = f".webtoon-archive-{uuid4().hex}.part"
+    staged = _remote_spec(remote, dest_path, staged_name)
+    published = False
     try:
-        _run(config_path, ["copyto", local_file_path, target], timeout=_UPLOAD_TIMEOUT_SECONDS)  # 복사만 — 원본은 아직 그대로
-    except RcloneError as e:
-        copy_error = e
-    try:
-        actual = file_size(config_path, remote, dest_path, dest_file_name)
-    except RcloneError as check_error:
-        raise RcloneError(str(copy_error) if copy_error else f"올라간 파일을 확인하지 못했습니다: {check_error} — 원본을 그대로 둡니다") from check_error
-    if actual != expected:
-        if copy_error:
-            raise copy_error
-        raise RcloneError(f"올라간 파일의 크기가 원본과 다릅니다(원격 {actual if actual is not None else '없음'}, 원본 {expected}바이트): {local.name} — 원본을 그대로 둡니다")
-    if copy_error:
-        log.warning("rclone 복사가 오류로 끝났지만 올라간 크기가 원본과 같아 올라간 것으로 봅니다(%s): %s", copy_error, target)
-    local.unlink()  # 올라간 것이 확인된 뒤에만 원본을 지운다
+        _run(config_path, ["copyto", local_file_path, staged, "--ignore-times"], timeout=_UPLOAD_TIMEOUT_SECONDS)
+        try:
+            verified = _has_sha256(config_path, staged, expected_hash)
+        except RcloneError as e:
+            raise RcloneError(f"올라간 임시 파일을 확인하지 못했습니다: {e} — 원본을 그대로 둡니다") from e
+        if not verified:
+            raise RcloneError(f"올라간 임시 파일의 내용이 원본과 일치하지 않습니다: {local.name} — 원본을 그대로 둡니다")
+        _assert_source_unchanged(local, before)
+
+        try:
+            moveto(config_path, staged, target)
+            published = True
+        except RcloneError as e:
+            # A timed-out remote move may already have committed the verified bytes.
+            try:
+                committed = _has_sha256(config_path, target, expected_hash)
+            except RcloneError:
+                committed = False
+            if not committed:
+                raise RcloneError(f"검증한 파일을 최종 위치에 확정하지 못했습니다: {e} — 원본을 그대로 둡니다") from e
+    finally:
+        if not published:
+            try:
+                delete_file(config_path, remote, dest_path, staged_name)
+            except RcloneError as cleanup_error:
+                if cleanup_error.returncode not in (3, 4):  # rclone reports a missing directory/file with 3/4.
+                    log.warning("원격 임시 파일 정리 실패 (%s): %s", staged, cleanup_error)
+
+    _assert_source_unchanged(local, before)
+    local.unlink()
 
 
 def file_size(config_path: str, remote: str, path: str, file_name: str) -> int | None:
@@ -165,12 +206,14 @@ def purge_empty_zip_files(config_path: str, remote: str, path: str) -> list[str]
     return removed
 
 
-def file_exists(config_path: str, remote: str, path: str, file_name: str, *, ignore_empty: bool = False) -> bool:
+def file_exists(config_path: str, remote: str, path: str, file_name: str, *, ignore_empty: bool = False, strict: bool = False) -> bool:
     """원격에 그 이름의 파일이 있는가. 목록을 못 읽으면 False. ignore_empty=True면 크기가 0인 파일은 없는 것으로 본다(이전 업로드 실패의 찌꺼기 — 충돌로 치지 않는다, 크기를 모르면 있는 것으로 본다)."""
     target = f"{remote}:{path}" if path else f"{remote}:"
     try:
         output = _run(config_path, ["lsjson", target])
-    except RcloneError:
+    except RcloneError as e:
+        if strict and e.returncode != 3:  # rclone: directory not found
+            raise
         return False
     entries = json.loads(output)
     return any(e["Name"] == file_name and not (ignore_empty and e.get("Size") == 0) for e in entries)
@@ -193,7 +236,7 @@ def moveto(config_path: str, src_spec: str, dest_spec: str) -> None:
     """src_spec을 dest_spec으로 옮긴다. 둘 중 하나(또는 둘 다)가 'remote:path' 형태면
     rclone이 원격으로 처리하고, 콜론이 없는 일반 경로는 로컬 파일시스템으로 처리한다
     (rclone 자체 규칙) — 로컬↔원격, 원격↔원격 이동을 전부 이 한 함수로 커버한다."""
-    _run(config_path, ["moveto", src_spec, dest_spec], timeout=_UPLOAD_TIMEOUT_SECONDS)
+    _run(config_path, ["moveto", src_spec, dest_spec, "--ignore-times"], timeout=_UPLOAD_TIMEOUT_SECONDS)
 
 
 def copyto(config_path: str, src_spec: str, dest_spec: str) -> None:
@@ -241,5 +284,5 @@ def read_small_text_file(config_path: str, remote: str, path: str, file_name: st
 def delete_file(config_path: str, remote: str, path: str, file_name: str) -> None:
     """remote 위의 파일 하나를 지운다 — 카카오 표지를 새로 받아서 다른 파일로
     교체할 때, 원본 표지 파일을 지우는 용도로 쓴다."""
-    target = f"{remote}:{path}/{file_name}" if path else f"{remote}:{file_name}"
+    target = _remote_spec(remote, path, file_name)
     _run(config_path, ["deletefile", target])

@@ -135,4 +135,45 @@ try: archiver.manual_archive_now(st.archive_root, st.download_root, [fid2], "", 
 finally: archiver.folder_archive._bulk_move_single_file = real_single
 assert srcf2.exists() and repository.get_archive_target(fid2) is not None
 print("9) 폴더 대상 OK")
+
+# A skipped collision keeps the original episode and its metadata and the archive target.
+repository.set_setting("archive_conflict_policy", "skip")
+src = make(A, "폴더충돌원본", (1, 2))
+dest = A / "폴더충돌대상"
+dest.mkdir()
+(dest / "0001 1화.zip").write_bytes(b"different version")
+fid = repository.create_folder_archive_target(src.name, "local", src.name, dest.name, "local", True)
+conflicts = []
+moved = archiver.manual_archive_now(st.archive_root, st.download_root, [fid], full_move=True, conflict_log=conflicts)
+assert moved == 1 and conflicts == [(src.name, "0001 1화.zip", "skip")]
+assert (src / "0001 1화.zip").read_bytes() == b"zip1" and (src / "info.xml").exists()
+assert (dest / "0001 1화.zip").read_bytes() == b"different version" and (dest / "0002 2화.zip").exists()
+assert repository.get_archive_target(fid) is not None
+
+# An unrecognized file in a nested directory also keeps the target.
+src = make(A, "폴더미처리원본", (1,))
+(src / "other").mkdir()
+(src / "other" / "note.txt").write_bytes(b"keep")
+fid = repository.create_folder_archive_target(src.name, "local", src.name, "폴더미처리대상", "local", True)
+failures = []
+moved = archiver.manual_archive_now(st.archive_root, st.download_root, [fid], full_move=True, failure_log=failures)
+assert moved == 1 and failures and (src / "other" / "note.txt").read_bytes() == b"keep"
+assert repository.get_archive_target(fid) is not None
+
+# A missing download volume is not an empty source. Manual and queued work wait.
+webtoon("9901", "볼륨복구작품", "보관9901")
+pending("9901")
+missing_root = D / "not-mounted"
+failures = []
+assert archiver.manual_archive_now(st.archive_root, str(missing_root), ["9901"], full_move=True, failure_log=failures) == 0
+assert failures == [("볼륨복구작품", "-", "원본 다운로드 저장소를 읽을 수 없습니다.")]
+assert repository.get_archive_target("9901") is not None
+failures.clear()
+assert archiver.process_pending_finish_archives(st.archive_root, str(missing_root), failure_log=failures) == 0
+assert ("볼륨복구작품", "-", "원본 다운로드 저장소를 읽을 수 없습니다.") in failures
+assert repository.get_archive_target("9901") is not None and "9901" in repository.list_pending_finish_archive()
+restored = make(missing_root, "볼륨복구작품", (1,))
+assert archiver.process_pending_finish_archives(st.archive_root, str(missing_root)) == 1
+assert not restored.exists() and (A / "보관9901" / "0001 1화.zip").read_bytes() == b"zip1"
+assert repository.get_archive_target("9901") is None and "9901" not in repository.list_pending_finish_archive()
 print("ALL OK")

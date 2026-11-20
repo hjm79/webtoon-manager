@@ -242,6 +242,7 @@ const downloadRootBrowse = { naver: { open: false, path: "" }, kakao: { open: fa
 const downloadStorageState = { naver: { path: null, storage: null, version: 0 }, kakao: { path: null, storage: null, version: 0 } };
 
 function effectiveDownloadRootDraft(kind) {
+  if (downloadRootsInfo.viewer_bound) return downloadRootDraft[kind] || downloadRootsInfo[kind].default;
   return downloadRootDraft[kind] || (kind === "kakao" ? downloadRootDraft.naver || downloadRootsInfo.base : downloadRootsInfo.base);
 }
 
@@ -344,6 +345,7 @@ function downloadRootLabel(kind) {
   const info = downloadRootsInfo;
   const draft = downloadRootDraft[kind];
   if (draft) return draft;
+  if (info.viewer_bound) return info[kind].default;
   return kind === "kakao" ? "네이버와 같은 폴더" : `기본 폴더 (${info.base})`;
 }
 
@@ -365,16 +367,19 @@ async function renderDownloadRootPicker(kind) {
   if (host) {
     const containerEl = document.createElement("span");
     containerEl.className = "drp-host";
-    containerEl.textContent = downloadRootDraft[kind] ? `(컨테이너: ${downloadRootDraft[kind]})` : `(컨테이너: ${shownAbs}${kind === "kakao" ? ", 네이버와 같은 폴더" : ", 기본 폴더"})`;
+    containerEl.textContent = info.viewer_bound || downloadRootDraft[kind] ? `(컨테이너: ${shownAbs})` : `(컨테이너: ${shownAbs}${kind === "kakao" ? ", 네이버와 같은 폴더" : ", 기본 폴더"})`;
     current.appendChild(containerEl);
   }
-  current.appendChild(makeButton(browse.open ? "닫기" : "폴더 선택", () => {
-    browse.open = !browse.open;
-    renderDownloadRootPicker(kind);
-  }));
-  if (downloadRootDraft[kind]) {
-    current.appendChild(makeButton(kind === "kakao" ? "네이버와 같게" : "기본으로", () => {
+  if (!info.viewer_bound) {
+    current.appendChild(makeButton(browse.open ? "닫기" : "폴더 선택", () => {
+      browse.open = !browse.open;
+      renderDownloadRootPicker(kind);
+    }));
+  }
+  if (downloadRootDraft[kind] && (!info.viewer_bound || shownAbs !== info[kind].default)) {
+    current.appendChild(makeButton(kind === "kakao" && !info.viewer_bound ? "네이버와 같게" : "기본으로", () => {
       downloadRootDraft[kind] = "";
+      document.getElementById("btn-download-roots-save").disabled = false;
       renderDownloadRootPicker(kind);
     }));
   }
@@ -387,7 +392,7 @@ async function renderDownloadRootPicker(kind) {
   box.appendChild(storage);
   refreshDownloadStorage(kind);
   if (kind === "naver" && !downloadRootDraft.kakao) renderDownloadRootPicker("kakao");
-  if (!browse.open) return;
+  if (info.viewer_bound || !browse.open) return;
 
   const panel = document.createElement("div");
   panel.className = "drp-browser";
@@ -463,8 +468,10 @@ async function loadDownloadRoots() {
     renderDownloadRootPicker("naver");
     renderDownloadRootPicker("kakao");
     statusEl.classList.remove("error");
-    statusEl.textContent = "저장된 폴더를 표시했습니다. 새로 선택한 폴더는 저장해야 적용됩니다.";
-    save.disabled = false;
+    statusEl.textContent = data.viewer_bound
+      ? "통합 뷰어에 연결된 폴더와 남은 공간을 표시합니다."
+      : "저장된 폴더를 표시했습니다. 새로 선택한 폴더는 저장해야 적용됩니다.";
+    save.disabled = data.viewer_bound === true;
   } catch (e) {
     statusEl.classList.add("error");
     statusEl.textContent = `${e.message} 저장은 차단했습니다. 설정 화면을 다시 열어주세요.`;
@@ -653,7 +660,7 @@ async function refreshJobStatus() {
     const st = statuses[jobName];
     if (!st) continue;
     const badge = document.getElementById(`${jobName}-status-badge`);
-    badge.textContent = st.status;
+    badge.textContent = JOB_OUTCOME_LABEL[st.status] || st.status;
     badge.className = `badge job-${st.status}`;
     renderJobLog(jobName, st.log);
   }

@@ -118,7 +118,9 @@ assert [e.number for e in plan.to_download] == [12, 13]
 print("4) 규칙2 OK (스크린샷 상황 재현: 잠금/보유/무료, 누락 회차 비교, 제목 일치 인정)")
 
 # ═════ 6. 실제로 받기 (규칙 적용 + 이름 + 페이지수) ═════
-JPG = b"\xff\xd8\xff\xe0" + b"jpg"
+from fakes import image_bytes
+
+JPG = image_bytes("JPEG")
 SERIES_ITEM = {"id": 1, "title": "작품", "authors": "연상호,최규석", "description": "줄거리 & <설명>", "sub_category": "드라마", "age_grade": 15, "on_issue": "Y"}
 cover_calls = []
 def fake_cover(series_id, **k):
@@ -171,13 +173,21 @@ asyncio.run(t6())
 
 # ═════ 7. 수동 선택 다운로드 (분석 표에서 고른 회차) ═════
 async def t7():
+    from zipfile import ZipFile
+    from app.kakao_page_download.models import zip_identity_comment
+
     root = Path(tempfile.mkdtemp()); folder = root / "작품"; folder.mkdir()
-    (folder / "0002_2화#9.zip").write_bytes(b"old"); (folder / "0003_3화#9.zip").write_bytes(b"old")          # zip 2개 → 비교 모드
+    with ZipFile(folder / "0002_2화#9.zip", "w") as existing:
+        existing.comment = zip_identity_comment(1, E(2).product_id)
+        existing.writestr("0001.jpg", b"old")
+    (folder / "0003_3화#9.zip").write_bytes(b"old")
     eps_list = [E(1), E(2), E(3), E(4, acc=False), E(5)]
     cl = kp.KakaoPageClient(FakeSession(site(eps_list)), {}, 10)
     res = await kp.download_selected(cl, series_id=1, title="작품", numbers=[5, 1, 2, 4], download_root=str(root), on_progress=None)
     assert res.downloaded == [1, 2, 5] and res.replaced == [2] and res.skipped_locked == [4] and res.failed == []   # 이미 받은 2도 다시 받는다, 잠긴 4는 건너뜀
-    assert sorted(p.name for p in folder.iterdir() if p.suffix == ".zip") == ["0001_1화.zip", "0002_2화.zip", "0003_3화#9.zip", "0005_5화.zip"]   # 2번의 예전 파일(#9)은 새 파일로 교체
+    assert sorted(p.name for p in folder.iterdir() if p.suffix == ".zip") == ["0001_1화.zip", "0002_2화#9.zip", "0003_3화#9.zip", "0005_5화.zip"]
+    with ZipFile(folder / "0002_2화#9.zip") as replaced:
+        assert replaced.read("001.jpg") != b"old"
     assert (folder / "0003_3화#9.zip").read_bytes() == b"old"                                                    # 고르지 않은 회차는 그대로
     # 다시 받다가 실패하면 원래 파일이 그대로 남는다
     class Bad(FakeSession):
@@ -192,7 +202,8 @@ async def t7():
     root2 = Path(tempfile.mkdtemp()); (root2 / "작품").mkdir(); (root2 / "작품" / "0003_3화#9.zip").write_bytes(b"x")
     cl2 = kp.KakaoPageClient(FakeSession(site([E(n) for n in range(1, 7)])), {}, 10)
     res2 = await kp.download_selected(cl2, series_id=1, title="작품", numbers=[1, 3, 4, 99], download_root=str(root2), on_progress=None)
-    assert res2.downloaded == [1, 3, 4] and res2.replaced == [3] and res2.not_found == [99]
+    assert res2.downloaded == [1, 3, 4] and res2.replaced == [] and res2.not_found == [99]
+    assert (root2 / "작품" / "0003_3화#9.zip").read_bytes() == b"x"
     print("6) 수동 선택 다운로드 OK (이미 받은 회차도 다시 받아 교체, 실패하면 원본 유지, 잠긴 회차 건너뜀, 표식 폴더)")
 asyncio.run(t7())
 # ═════ 8. 카카오 info.xml — 연령 표기(15세/18세/전체이용가)와 표지 ═════

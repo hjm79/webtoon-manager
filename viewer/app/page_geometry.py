@@ -37,7 +37,7 @@ def _size(handle):
 
 def chapter_page_sizes(zip_path: str) -> list[dict | None]:
     stat = os.stat(zip_path)
-    key = (zip_path, stat.st_dev, stat.st_ino, stat.st_mtime_ns, stat.st_ctime_ns, stat.st_size)
+    key = (zip_path, *scan.zip_file_identity(stat))
     with _lock:
         cached = _cache.get(key)
         if cached is not None:
@@ -45,6 +45,7 @@ def chapter_page_sizes(zip_path: str) -> list[dict | None]:
     if cached is None:
         sizes = []
         with zipfile.ZipFile(zip_path) as archive:
+            key = (zip_path, *scan.zip_file_identity(os.fstat(archive.fp.fileno())))
             for name in scan.list_zip_image_names(zip_path, archive):
                 try:
                     with archive.open(name) as handle:

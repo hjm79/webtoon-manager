@@ -108,9 +108,11 @@ def test_recently_read_progress_is_profile_isolated_and_series_filtered(client, 
     assert [item["id"] for item in items] == [sid]
     assert items[0]["recently_read_chapter"] == {"id": chapters[0]["id"], "label": chapters[0]["label"]}
     assert "list" not in items[0]
+    assert all(chapter["has_read"] is False for chapter in client.get(f"/api/series/{sid}/chapters").json()["chapters"])
     monkeypatch.setattr(routes.access_control, "get_profile", lambda request: None)
     admin = next(item for item in client.get("/api/series").json() if item["id"] == sid)
     assert admin["recently_read_chapter"]["id"] == chapters[-1]["id"]
+    assert all(chapter["has_read"] is True for chapter in client.get(f"/api/series/{sid}/chapters").json()["chapters"])
     assert db.export_backup_data() == before
 
 

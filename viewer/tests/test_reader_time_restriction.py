@@ -95,6 +95,24 @@ def test_reader_allowed_inside_window(profile_with_two_chapters):
         assert r.status_code == 200
 
 
+def test_page_validator_does_not_bypass_profile_permissions(profile_with_two_chapters):
+    from datetime import datetime
+
+    ctx = profile_with_two_chapters
+    page_url = f"/p/{ctx['token']}/api/chapters/{ctx['chapters'][0]['id']}/pages/0"
+    with patch("app.profile_time_restrictions.datetime") as clock:
+        clock.now.return_value = datetime(2026, 1, 5, 19, 0)
+        response = ctx["profile_client"].get(page_url)
+        assert response.status_code == 200
+        validator = {"If-None-Match": response.headers["etag"]}
+        assert ctx["profile_client"].get(page_url, headers=validator).status_code == 304
+        clock.now.return_value = datetime(2026, 1, 5, 22, 0)
+        assert ctx["profile_client"].get(page_url, headers=validator).status_code == 403
+        clock.now.return_value = datetime(2026, 1, 5, 19, 0)
+        profiles.set_allowed_series(ctx["profile_id"], [])
+        assert ctx["profile_client"].get(page_url, headers=validator).status_code == 403
+
+
 def test_currently_reading_chapter_is_exempt_outside_window(profile_with_two_chapters):
     """GIVEN 창 안에 있을 때 1화를 읽기 시작해서 이어보기 포인터가 1화를 가리키고 있을 때"""
     ctx = profile_with_two_chapters

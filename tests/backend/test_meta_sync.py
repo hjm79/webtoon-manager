@@ -8,8 +8,9 @@ from app import db, repository, tracker, job_status, kakao_page_download as kp, 
 db.get_connection()
 import app.main as m
 from app.config import get_settings
+from fakes import image_bytes
 
-OLD = b"OLD-COVER"; NEW_KAKAO = b"\xff\xd8\xffNEW-KAKAO"; NEW_NAVER = b"\xff\xd8\xffNEW-NAVER"
+OLD = b"OLD-COVER"; NEW_KAKAO = b"\xff\xd8\xffNEW-KAKAO"; NEW_NAVER = image_bytes("JPEG")
 LEGACY_XML = '<ComicInfo><Series>옛</Series><Web>https://webtoon.kakao.com/content/옛/123</Web></ComicInfo>'
 _o = asyncio.sleep
 async def _ns(x): await _o(0)
@@ -57,7 +58,7 @@ async def main():
     assert "<Web>https://page.kakao.com/content/6</Web>" in (f6 / "info.xml").read_text(encoding="utf-8") and (f6 / "cover.png").read_bytes() == OLD and not (f6 / "cover.jpg").exists()   # 표지만 못 받으면 info.xml은 갱신, 기존 커버 유지
     t = log_text()
     assert "[카카오] 쌍갑포차 — info.xml 갱신 / 커버 교체" in t and "[카카오] 조회실패 — 작품 정보 조회 실패로 건너뜀" in t and "[카카오] 표지실패 — info.xml 갱신 / 커버는 받지 못해 기존 유지" in t, t
-    assert count == 4, count                                                                                                                          # 처리(info.xml 갱신)한 작품: 1·2·3·6
+    assert count == tracker.MetadataSyncStats(updated=4, failed=1, cover_failed=1), count
     print("1) 카카오 메타 동기화 OK (info.xml+커버 교체, 옛 커버 정리, 상태 무관, 폴더 없음/조회 실패/표지 실패 격리)")
 
     # ── 2. 한 작품에서 예외가 나도 나머지는 계속 ──
@@ -89,15 +90,26 @@ async def main():
         async def __aexit__(self, *a): return False
     tracker.aiohttp.ClientSession = lambda *a, **k: Sess()
     job_status.start("metadata_sync"); n = await tracker.sync_metadata_for_all(st)
-    assert n == 1 and (nf / "cover.jpg").read_bytes() == NEW_NAVER and not (nf / "cover.png").exists()               # 있던 커버도 새로 받아 교체(다른 확장자 커버는 정리)
+    assert n == tracker.MetadataSyncStats(updated=1) and (nf / "cover.jpg").read_bytes() == NEW_NAVER and not (nf / "cover.png").exists()
     assert "<Title>네이버작품</Title>" in (nf / "info.xml").read_text(encoding="utf-8")
     print("3) 네이버 커버 교체 OK")
+    old_read = Resp.read
+    async def error_body(self):
+        return b"<html>image temporarily unavailable</html>"
+    Resp.read = error_body
+    try:
+        n = await tracker.sync_metadata_for_all(st)
+        assert n == tracker.MetadataSyncStats(updated=1, cover_failed=1)
+        assert (nf / "cover.jpg").read_bytes() == NEW_NAVER and len(list(nf.glob("cover.*"))) == 1
+    finally:
+        Resp.read = old_read
 
     # ── 4. API: 카카오웹툰 관리를 켰을 때만 카카오도 함께 ──
+    job_status.finish("metadata_sync", success=True)
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=m.app), base_url="http://test") as c:
         async def run():
-            calls.clear(); job_status.start("metadata_sync")
-            assert (await c.post("/api/metadata/sync")).status_code == 200
+            calls.clear()
+            assert (await c.post("/api/metadata/sync")).json() == {"status": "started"}
             for _ in range(200):
                 await _o(0.02); s = job_status.snapshot()["metadata_sync"]
                 if s["status"] != "running": return s
@@ -105,11 +117,21 @@ async def main():
         repository.set_setting("kakao_webtoons_enabled", "0"); s = await run()
         assert s["status"] == "success" and calls == [] and "카카오" not in "\n".join(s["log"]).replace("카카오 메타", "")
         repository.set_setting("kakao_webtoons_enabled", "1"); s = await run()
-        assert s["status"] == "success" and sorted({c_[1] for c_ in calls}) == [1, 2, 3, 5, 6] and "카카오 메타 동기화 시작" in "\n".join(s["log"])
+        assert s["status"] == "partial" and sorted({c_[1] for c_ in calls}) == [1, 2, 3, 5, 6]
+        assert "카카오 정보 갱신 4개, 작품 실패 1개, 표지 실패 1개" in "\n".join(s["log"])
         orig_sync = tracker.sync_kakao_metadata
         async def fail(client_, settings_): raise RuntimeError("카카오 전체 실패")
         tracker.sync_kakao_metadata = fail; s = await run(); tracker.sync_kakao_metadata = orig_sync
-        assert s["status"] == "error" and "카카오 전체 실패" in "\n".join(s["log"])
+        assert s["status"] == "partial" and "카카오 전체 실패" in "\n".join(s["log"])
+        orig_naver = tracker.sync_metadata_for_all
+        async def naver_fail(settings_): return tracker.MetadataSyncStats(failed=1)
+        tracker.sync_metadata_for_all = naver_fail
+        tracker.sync_kakao_metadata = fail
+        try:
+            s = await run()
+            assert s["status"] == "error" and "네이버 정보 갱신 0개, 작품 실패 1개" in "\n".join(s["log"])
+        finally:
+            tracker.sync_metadata_for_all, tracker.sync_kakao_metadata = orig_naver, orig_sync
     print("4) API OK (카카오 관리 켰을 때만, 전체 실패 시 오류 표시)")
 asyncio.run(main())
 print("\n전부 통과")

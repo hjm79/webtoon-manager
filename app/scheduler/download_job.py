@@ -7,8 +7,9 @@ import time
 
 import aiohttp
 
-from app import cookie_health, daily_plus, job_status, kakao_page_auth, repository, retention, waitfree_sync, workflow_progress
+from app import cookie_health, daily_plus, download_roots, job_status, kakao_page_auth, repository, retention, waitfree_sync, workflow_progress
 from app.config import get_settings
+from app.repository.scoped_subscription import clear_failed_download
 
 from app.scheduler.kakao_download import (
     _download_kakao_subscriptions,
@@ -25,7 +26,11 @@ _download_job_lock = asyncio.Lock()
 
 _DOWNLOAD_TARGET_PLATFORMS = {"naver": {"naver"}, "kakao": {"kakao"}, "both": {"naver", "kakao"}}
 _DOWNLOAD_RETRY_DELAYS = (60, 300)
-_TIMED_QUEUE_STATES = {"retry_wait", "retry_download"}
+_TIMED_QUEUE_STATES = {"retry_wait", "retry_download", "blocked_storage"}
+
+
+class DownloadStorageBlocked(RuntimeError):
+    """An otherwise valid queue entry must wait for its download volume."""
 
 
 _download_claimed_platforms: set[str] = set()  # 지금 실행 중이거나 순서를 기다리는 실행이 맡은 플랫폼
@@ -44,7 +49,7 @@ def title_running(platform: str, title_id: str) -> bool:
 
 def title_queued(platform: str, title_id: str) -> bool:
     return any(row["platform"] == platform and row["title_id"] == str(title_id)
-               for row in repository.list_download_queue())
+               for row in repository.list_download_queue(include_failed=False))
 
 
 def start_queued_downloads(*, recover: bool = False) -> None:
@@ -54,7 +59,7 @@ def start_queued_downloads(*, recover: bool = False) -> None:
         kakao_page_auth.resume_verified_queue()
     if _queue_worker_task is not None and not _queue_worker_task.done():
         return
-    if not repository.list_download_queue():
+    if not repository.list_download_queue(include_failed=False):
         return
     _queue_worker_task = asyncio.create_task(_run_queued_downloads())
 
@@ -71,7 +76,7 @@ async def stop_queued_downloads() -> None:
 async def _run_queued_downloads() -> None:
     from app import kakao_page_download
 
-    while items := repository.list_download_queue():
+    while items := repository.list_download_queue(include_failed=False):
         if download_busy() or kakao_page_download.download_lock.locked():
             await asyncio.sleep(1)
             continue
@@ -92,6 +97,9 @@ async def _run_queued_downloads() -> None:
         except kakao_page_auth.KakaoAuthPending as exc:
             state, message = kakao_page_auth.defer_download(item['id'], exc)
             workflow_progress.update(state=state, error=message, rest_until=None)
+            continue
+        except DownloadStorageBlocked as exc:
+            repository.update_download_queue(item["id"], state="blocked_storage", reason=str(exc), retry_at=time.time() + 60)
             continue
         except asyncio.CancelledError:
             workflow_progress.fail("다운로드가 중단되었습니다. 다음 실행에서 이어받습니다.")
@@ -146,6 +154,8 @@ def enqueue_reserved_title(platform: str, title_id: str, title: str) -> None:
         try:
             async with _download_job_lock:
                 await _run_download_job_impl({platform}, only_title=title_id)
+        except DownloadStorageBlocked:
+            pass  # Reported by the mount preflight.
         except asyncio.CancelledError:
             workflow_progress.fail("다운로드가 중단되었습니다. 다음 실행에서 이어받습니다.")
             job_status.finish("download", success=False)
@@ -189,6 +199,23 @@ async def _run_download_job_impl(platforms: set[str], scheduled: bool = False, p
                                  only_title: str | None = None) -> str | None:
     """Return a failure reason if a queued title did not finish successfully."""
     settings = get_settings()
+    ready = set()
+    blocked = {}
+    for platform in sorted(platforms):
+        problem = await asyncio.to_thread(download_roots.download_root_problem, platform, settings)
+        if problem:
+            blocked[platform] = problem
+        else:
+            ready.add(platform)
+    job_status.start("download")
+    for problem in blocked.values():
+        job_status.log_line("download", f"다운로드 보류 · {problem}")
+    if not ready:
+        job_status.finish("download", success=False)
+        if only_title is not None:
+            raise DownloadStorageBlocked(next(iter(blocked.values())))
+        return None
+    platforms = ready
     # 신작 스캔이 자동으로 구독 추가해 둔 매일+ 작품은 받지 않는다 — 저장해 둔 매일+ 목록으로(네트워크 없이) 먼저 제외됨으로 정리한다
     auto_excluded = repository.exclude_auto_added_titles(daily_plus.cached_ids()) if "naver" in platforms else []
     active_webtoons, active_kakao_webtoons = repository.download_subscription_snapshot(platforms, include_queued=only_title is not None)
@@ -198,7 +225,6 @@ async def _run_download_job_impl(platforms: set[str], scheduled: bool = False, p
     _active_batch_titles.update(("naver", w.title_id) for w in active_webtoons)
     _active_batch_titles.update(("kakao", str(w["title_id"])) for w in active_kakao_webtoons)
 
-    job_status.start("download")
     if partial:
         job_status.log_line("download", "이미 실행 중이거나 대기 중인 대상은 건너뛰고 나머지만 실행합니다 (중복 실행 방지)")
     if auto_excluded:
@@ -215,7 +241,11 @@ async def _run_download_job_impl(platforms: set[str], scheduled: bool = False, p
     async with aiohttp.ClientSession() as session:
         for webtoon in active_webtoons:
             try:
+                failed_before = len(failures)
                 await _download_new_episodes_for_one(session, settings, webtoon.title_id, adult_tracker, failures)
+                progress = workflow_progress.title_snapshot("naver", webtoon.title_id) or {}
+                if only_title is None and len(failures) == failed_before and progress.get("state") == "success":
+                    clear_failed_download("naver", webtoon.title_id)
             except Exception as e:
                 had_error = True
                 log.error("웹툰(titleId=%s) 다운로드 처리 중 예외 — 다음 웹툰으로 진행: %s", webtoon.title_id, e)
@@ -262,7 +292,8 @@ async def _run_download_job_impl(platforms: set[str], scheduled: bool = False, p
         log.error("실행 이력 보관기간 정리 중 예외: %s", e)
 
     job_status.log_line("download", "다운로드 스캔 종료")
-    job_status.finish("download", success=not had_error and not failures)
+    job_status.finish("download", success=not blocked and not had_error and not failures,
+                      outcome="partial" if blocked and not (had_error or failures) else None)
     if only_title is not None and (had_error or failures):
         progress = workflow_progress.title_snapshot(next(iter(platforms)), only_title) or {}
         if progress.get("state") == "error" and progress.get("error"):

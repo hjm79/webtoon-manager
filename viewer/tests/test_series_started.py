@@ -48,6 +48,9 @@ def test_series_with_a_saved_reading_position_is_being_read_even_if_no_chapter_i
     """THEN 읽은 회차는 0개 그대로지만, 읽기를 시작한 웹툰으로 표시된다"""
     assert item["unread_count"] == item["chapter_count"]
     assert item["reading_now"] is True
+    chapters = client.get(f"/api/series/{sid}/chapters").json()["chapters"]
+    assert chapters[0]["reading"] is True
+    assert all(chapter["has_read"] is False for chapter in chapters)
 
 
 def test_marking_everything_unread_clears_being_read(client, one_series):
@@ -165,6 +168,8 @@ def test_fully_read_series_is_being_read_again_when_a_chapter_is_reopened(client
 
     """THEN 회차 목록에 "읽는 중"으로 표시되는 것과 같이, 읽음 기록이 전부 있어도 읽는 중으로 본다"""
     assert [ch["id"] for ch in chapters if ch["reading"]] == [last["id"]]
+    assert chapters[-1]["read"] is False
+    assert all(chapter["has_read"] is True for chapter in chapters)
     assert item["reading_now"] is True
     assert item["unread_count"] == 0
     """AND 카드에는 "완독"이 아니라 읽고 있는 회차가 보인다(읽는 중 목록에 "완독"이 적힌 카드가 나오면 모순)"""

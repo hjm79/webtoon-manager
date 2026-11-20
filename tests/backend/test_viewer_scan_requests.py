@@ -112,8 +112,6 @@ print("7) 변경 알림 OK")
 
 # Scenario 8: 아카이빙 — 자동(정기+완결 대기열) 아카이빙 잡이 파일을 옮기면 스캔을 요청하고, 하나도 안 옮겼으면 하지 않는다
 ST = get_settings(); Path(ST.archive_root).mkdir(parents=True, exist_ok=True)
-async def noop_update(): return "rclone 확인 생략"
-scheduler.archive_job.rclone_updater.check_and_update = noop_update
 def run_auto(periodic, pending):
     scheduler.archive_job.archiver.run_periodic_archive = lambda *a, **k: periodic
     scheduler.archive_job.archiver.process_pending_finish_archives = lambda *a, **k: pending
@@ -127,7 +125,6 @@ print("8) 자동 아카이빙 OK")
 async def api():
     import app.api.archive as api_archive
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=m.app), base_url="http://test") as c:
-        api_archive.rclone_updater.check_and_update = noop_update
         async def wait_idle(): await asyncio.sleep(0.2)
         def fake_manual(moved): return lambda *a, **k: moved
         # 선택한 웹툰 수동 아카이빙

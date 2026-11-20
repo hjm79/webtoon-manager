@@ -37,8 +37,8 @@ async def request_device_approval(request: Request):
         raise HTTPException(400, "no device id")
 
     label = request.headers.get("user-agent", "알 수 없는 기기")[:120]
-    profile_devices.create_pending_request(profile["id"], device_id, label)
-    asyncio.create_task(
-        discord_notify.send(f"📱 '{profile['name']}' 프로필에서 새 기기의 접속 승인을 요청했습니다.")
-    )
+    if await asyncio.to_thread(profile_devices.create_pending_request, profile["id"], device_id, label):
+        asyncio.create_task(
+            discord_notify.send(f"📱 '{profile['name']}' 프로필에서 새 기기의 접속 승인을 요청했습니다.")
+        )
     return {"ok": True}

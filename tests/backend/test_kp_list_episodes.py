@@ -56,14 +56,16 @@ assert len(site.calls) == 3 and [c["cursor_index"] for c in site.calls] == [0, 2
 assert sleeps == [kp_client._PAGE_INTERVAL_SECONDS] * 2, "페이지 사이에만 쉰다: " + str(sleeps)
 print("1) 페이지 이어 읽기 OK")
 
-# Scenario 2: 멈춤 조건 — 마지막 페이지(has_next false)에서 / 새 항목이 하나도 없는 페이지(같은 페이지가 되풀이)에서 / 다음 위치(cursor)를 알 수 없을 때 / 최대 페이지 수에서
-site = Site([([entry(1), entry(2)], True), ([entry(1), entry(2)], True)])                                                   # 두 번째 페이지가 같은 항목뿐 → 끝없이 읽지 않는다
-_, episodes = listing(site); assert [e.number for e in episodes] == [1, 2] and len(site.calls) == 2, len(site.calls)
-site = Site([([], True)]); _, episodes = listing(site); assert episodes == [] and len(site.calls) == 1, "빈 페이지에서 멈춘다"
+# Scenario 2: 마지막 페이지는 성공하고 끝에 도달하지 못한 목록은 실패한다.
+site = Site([([entry(1), entry(2)], True), ([entry(1), entry(2)], True)])
+assert listing(site) is None and len(site.calls) == 2
+site = Site([([], True)]); assert listing(site) is None and len(site.calls) == 1
+site = Site([([], False)]); _, episodes = listing(site); assert episodes == [] and len(site.calls) == 1
 site = Site([([entry(1)], False), ([entry(2)], False)]); _, episodes = listing(site); assert [e.number for e in episodes] == [1] and len(site.calls) == 1, "has_next가 false면 더 읽지 않는다"
-noncursor = entry(2); noncursor["cursor_index"] = None; site = Site([([entry(1), noncursor], True), ([entry(3)], False)]); _, episodes = listing(site); assert len(site.calls) == 1, "다음 위치를 알 수 없으면 멈춘다"
-many = [([entry(i + 1)], True) for i in range(kp_client._MAX_LIST_PAGES + 5)]; site = Site(many); _, episodes = listing(site)
-assert len(site.calls) == kp_client._MAX_LIST_PAGES and len(episodes) == kp_client._MAX_LIST_PAGES, (len(site.calls), len(episodes))
+noncursor = entry(2); noncursor["cursor_index"] = None; site = Site([([entry(1), noncursor], True), ([entry(3)], False)])
+assert listing(site) is None and len(site.calls) == 1
+many = [([entry(i + 1)], True) for i in range(kp_client._MAX_LIST_PAGES + 5)]; site = Site(many)
+assert listing(site) is None and len(site.calls) == kp_client._MAX_LIST_PAGES
 print("2) 멈춤 조건 OK")
 
 # (작품 정보의 제목이 "작품0"이라 부제목에서 작품 제목을 떼지 못한다 — 제목 떼기는 다른 테스트가 본다)

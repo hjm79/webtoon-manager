@@ -93,7 +93,8 @@ def mk_folder(rel, names):
 folder_target = NS(display_name="", source_dest_type="local", source_path="폴더원본", dest_type="local", dest_base_path="폴더대상", filename_template_preset_id=None, title_id="folder_cancel")
 fsrc = mk_folder("폴더원본", ["0001_1화.zip", "0002_2화.zip", "0003_3화.zip", "0004_4화.zip", "info.xml"]); cancel.reset(); flog = []
 archiver.title_archive  # (import 확인)
-moved = archiver._archive_folder_target(folder_target, "skip", "", st.archive_root, True, after_first_move(flog), [], [])
+moved, completed = archiver._archive_folder_target(folder_target, "skip", "", st.archive_root, True, after_first_move(flog), [], [])
+assert not completed
 assert moved == 1 and sorted(p.name for p in fsrc.glob("*.zip")) == ["0002_2화.zip", "0003_3화.zip", "0004_4화.zip"], (moved, sorted(p.name for p in fsrc.glob("*")))
 assert any("중단 요청" in x for x in flog), flog
 assert not (A / "폴더대상" / "info.xml").exists(), "중단했으면 정보 파일도 복사하지 않는다"
@@ -126,7 +127,7 @@ async def api():
             else: raise AssertionError("20초 안에 끝나지 않았다")
         finally: job_status.log_line = real_log
         log = "\n".join(job_status.snapshot()["archive"]["log"])
-        assert left(src) == ["0002 2화.zip", "0003 2화.zip".replace("2화", "3화"), "0004 4화.zip"] and job_status.snapshot()["archive"]["status"] == "success", (left(src), log)
+        assert left(src) == ["0002 2화.zip", "0003 2화.zip".replace("2화", "3화"), "0004 4화.zip"] and job_status.snapshot()["archive"]["status"] == "cancelled", (left(src), log)
         assert "사용자 요청으로 중단했습니다" in log, log
 asyncio.run(api())
 print("7~8) 중단 API/실행 시작 시 비움 OK")
@@ -148,7 +149,7 @@ async def periodic_job():
     finally: job_status.log_line = real_log
     log = "\n".join(job_status.snapshot()["archive"]["log"])
     assert left(src) == ["0002 2화.zip", "0003 3화.zip", "0004 4화.zip"], (left(src), log)                  # 첫 파일은 옮기고(요청이 비워졌다는 증거) 나머지는 그대로
-    assert "사용자 요청으로 중단했습니다" in log and job_status.snapshot()["archive"]["status"] == "success", log
+    assert "사용자 요청으로 중단했습니다" in log and job_status.snapshot()["archive"]["status"] == "cancelled", log
 asyncio.run(periodic_job())
 print("9) 정기 작업 중단 OK")
 print("ALL OK")

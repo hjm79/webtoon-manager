@@ -3,29 +3,39 @@ const test = require("node:test");
 const { createLoader, validSize } = require("../../static/reader-images.js");
 
 function fixture(options = {}) {
-  let observerCallback;
+  const callbacks = new Map();
   const observed = [];
-  const timers = [];
+  const viewportObserved = [];
+  const timers = new Map();
+  let timerId = 0;
   const loaded = [];
   const failed = [];
-  let disconnected = false;
+  let disconnected = 0;
   const loader = createLoader({
     observerFactory(callback, config) {
-      observerCallback = callback;
-      assert.equal(config.rootMargin, "1200px 0px");
-      return { observe: (img) => observed.push(img), disconnect() { disconnected = true; } };
+      assert.ok(["1200px 0px 3600px", "0px"].includes(config.rootMargin));
+      const viewport = config.rootMargin === "0px";
+      callbacks.set(viewport ? "viewport" : "near", callback);
+      return {
+        observe: (img) => (viewport ? viewportObserved : observed).push(img),
+        unobserve() {},
+        disconnect() { disconnected++; },
+      };
     },
-    schedule(callback) { timers.push(callback); return timers.length; },
-    cancel(id) { timers[id - 1] = null; },
+    schedule(callback, delay) { timers.set(++timerId, { callback, delay }); return timerId; },
+    cancel(id) { timers.delete(id); },
     onLoaded: (img) => loaded.push(img),
     onFailed: (img, retry) => failed.push({ img, retry }),
     ...options,
   });
-  function image(number) {
+  function image(number, top = 0) {
     const requests = [];
     const img = {
       dataset: {}, style: {}, isConnected: true, naturalWidth: 0, naturalHeight: 0,
+      ownerDocument: { documentElement: { clientHeight: 800 } },
       requests, removed: [],
+      moveTo(nextTop) { top = nextTop; },
+      getBoundingClientRect() { return { top, bottom: top + 1600, height: 1600 }; },
       set src(value) { requests.push(value); },
       removeAttribute(name) { this.removed.push(name); },
       succeed(width = 720, height = 1600) { this.naturalWidth = width; this.naturalHeight = height; this.onload?.(); },
@@ -34,11 +44,20 @@ function fixture(options = {}) {
     loader.register(img, `/viewer/api/chapters/ch/pages/${number}`, { width: 720, height: 1600 });
     return img;
   }
-  return { loader, image, observed, loaded, failed, timers,
-    visible: (...imgs) => observerCallback(imgs.map((target) => ({ target, isIntersecting: true }))),
-    hidden: (...imgs) => observerCallback(imgs.map((target) => ({ target, isIntersecting: false }))),
-    tick() { const callback = timers.shift(); callback?.(); },
-    disconnected: () => disconnected,
+  function notify(field, isIntersecting, imgs) {
+    callbacks.get(field)(imgs.map((target) => ({ target, isIntersecting })));
+  }
+  return { loader, image, observed, viewportObserved, loaded, failed, timers,
+    visible: (...imgs) => notify("near", true, imgs),
+    hidden: (...imgs) => notify("near", false, imgs),
+    enterViewport: (...imgs) => notify("viewport", true, imgs),
+    tick() {
+      const first = [...timers].sort((a, b) => a[1].delay - b[1].delay)[0];
+      if (!first) return;
+      timers.delete(first[0]);
+      first[1].callback();
+    },
+    disconnected: () => disconnected === 2,
   };
 }
 
@@ -49,6 +68,7 @@ test("page dimensions reserve geometry without making an image request", () => {
   assert.equal(img.dataset.dimensionsKnown, "true");
   assert.equal(img.requests.length, 0);
   assert.deepEqual(f.observed, [img]);
+  assert.deepEqual(f.viewportObserved, [img]);
 });
 
 test("only viewport-near images are queued and at most three run concurrently", async () => {
@@ -67,6 +87,36 @@ test("the restore target takes precedence over queued neighboring pages", () => 
   imgs[0].succeed();
   assert.equal(imgs[5].requests.length, 1);
   assert.equal(imgs[3].requests.length, 0);
+});
+
+test("lookahead starts closest panels first and reserves capacity for a panel reaching the screen", () => {
+  const f = fixture();
+  const far = f.image(3, 3800);
+  const near = f.image(1, 1000);
+  const middle = f.image(2, 2500);
+  f.visible(far, near, middle);
+  assert.deepEqual([near, middle, far].map((img) => img.requests.length), [1, 1, 0]);
+  assert.equal(near.fetchPriority, "low");
+
+  far.moveTo(0);
+  f.enterViewport(far);
+  assert.equal(far.requests.length, 1);
+  assert.equal(far.fetchPriority, "high");
+  const next = f.image(4, 100);
+  f.enterViewport(next);
+  assert.equal(next.requests.length, 0);
+  near.succeed();
+  assert.equal(next.requests.length, 1);
+});
+
+test("an in-flight lookahead panel receives visible priority when it enters the screen", () => {
+  const f = fixture(); const img = f.image(0, 1000);
+  f.visible(img);
+  assert.equal(img.fetchPriority, "low");
+  img.moveTo(0);
+  f.enterViewport(img);
+  assert.equal(img.fetchPriority, "high");
+  assert.equal(img.requests.length, 1);
 });
 
 test("newly visible pages bypass observer-only requests that have left the viewport", () => {
@@ -148,7 +198,7 @@ test("automatic recovery is bounded to the initial request plus two retries", as
   img.fail();
   assert.equal(await result, false);
   assert.equal(img.requests.length, 3);
-  assert.equal(f.timers.length, 0);
+  assert.equal(f.timers.size, 0);
   assert.equal(img.dataset.imageState, "failed");
   assert.equal(f.failed.length, 1);
   assert.match(img.requests[1], /retry=1$/);
@@ -173,6 +223,25 @@ test("a retry delay releases its concurrency slot for visible pages", () => {
   f.visible(a, b); a.fail();
   assert.equal(b.requests.length, 1);
   assert.equal(a.requests.length, 1);
+});
+
+test("a stalled request releases the slot and a late callback cannot finish its retry", async () => {
+  const f = fixture({ concurrency: 1, loadTimeoutMs: 2000 });
+  const stalled = f.image(0); const next = f.image(1);
+  const result = f.loader.ensure(stalled);
+  const expiredOnload = stalled.onload;
+  f.enterViewport(next);
+  f.tick();
+  assert.deepEqual(stalled.removed, ["src"]);
+  assert.equal(next.requests.length, 1);
+  next.succeed();
+  f.tick();
+  assert.equal(stalled.requests.length, 2);
+  expiredOnload();
+  assert.equal(stalled.dataset.imageState, "loading");
+  stalled.succeed();
+  assert.equal(await result, true);
+  assert.equal(f.timers.size, 0);
 });
 
 test("disconnected pages are skipped without consuming a request slot", async () => {

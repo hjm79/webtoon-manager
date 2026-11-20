@@ -6,6 +6,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import tempfile
 import zipfile
 from pathlib import Path
 
@@ -28,10 +29,12 @@ from app.kakao_page_download.models import (
     _image_extension,
     episode_zip_name,
     plan_by_folder_rules,
+    read_zip_identity,
     rental_eligible,
     scan_existing_files,
     series_folder,
     waitfree_supported,
+    zip_identity_comment,
 )
 
 log = logging.getLogger(__name__)
@@ -48,8 +51,7 @@ async def download_episode(client: KakaoPageClient, series_id: int, episode: Epi
     """회차 하나를 zip으로 저장하고 경로를 돌려준다. 이미지 목록을 못 받거나 이미지가 하나라도 안 받히면
     아무것도 남기지 않고 None — 일부만 담긴 zip이 있으면 다음에 "이미 받은 회차"로 오인하기 때문이다.
     zip은 임시 이름으로 완성한 뒤 한 번에 이름을 바꿔서, 도중에 끊겨도 반쪽짜리가 남지 않는다.
-    같은 번호의 예전 파일(이름이 다른 것, 예: 뒤에 #페이지수가 붙은 것)이 있으면 새 파일을 다 저장한 뒤에
-    지운다 — 다시 받기를 하면 한 회차에 파일이 둘이 되지 않도록."""
+    다시 받기는 같은 작품·상품 ID로 확인된 ZIP만 교체한다. 숫자만 같은 파일은 보존한다."""
     client.last_failure = None
     urls = await client.viewer_image_urls(series_id, episode.product_id)
     if not urls:
@@ -85,53 +87,63 @@ async def download_episode(client: KakaoPageClient, series_id: int, episode: Epi
         return None
 
     folder.mkdir(parents=True, exist_ok=True)
-    final_path = folder / episode_zip_name(episode.number, episode.subtitle)
-    part_path = folder / (final_path.name + ".part")
+    identity = (series_id, episode.product_id)
+    existing = scan_existing_files(folder)
+    same_file = next((file for file in existing if (file.series_id, file.product_id) == identity), None)
+    canonical = folder / episode_zip_name(episode.number, episode.subtitle)
+    final_path = folder / same_file.name if same_file is not None else canonical
+    part_path = None
     zero_fill = max(3, len(str(len(images))))
     try:
-        with zipfile.ZipFile(part_path, "w", zipfile.ZIP_DEFLATED) as archive:
-            for index, (body, content_type) in enumerate(images, 1):
-                archive.writestr(f"{str(index).zfill(zero_fill)}{_image_extension(content_type, body)}", body)
-        os.replace(part_path, final_path)
+        with tempfile.NamedTemporaryFile(dir=folder, prefix=".kakao-", suffix=".part", delete=False) as staged:
+            part_path = Path(staged.name)
+            with zipfile.ZipFile(staged, "w", zipfile.ZIP_DEFLATED) as archive:
+                archive.comment = zip_identity_comment(*identity)
+                for index, (body, content_type) in enumerate(images, 1):
+                    archive.writestr(f"{str(index).zfill(zero_fill)}{_image_extension(content_type, body)}", body)
+            os.fchmod(staged.fileno(), 0o644)
+        if read_zip_identity(final_path) == identity:
+            os.replace(part_path, final_path)
+        else:
+            try:
+                os.link(part_path, canonical)
+                final_path = canonical
+            except FileExistsError:
+                # Publish without overwriting unrelated or unidentifiable existing files.
+                final_path = canonical.with_stem(f"{canonical.stem} [kp-{series_id}-{episode.product_id}]")
+                if read_zip_identity(final_path) == identity:
+                    os.replace(part_path, final_path)
+                else:
+                    os.link(part_path, final_path)
     except Exception as e:
         log.error("카카오페이지 회차 저장 실패 (%s): %s", final_path, e)
-        part_path.unlink(missing_ok=True)
         return None
-    _remove_superseded(folder, episode.number, keep=final_path)
-    repository.add_kakao_downloaded_numbers(series_id, [episode.number])  # 자동/수동/기다무가 모두 거치는 저장 지점 — 받은 회차 기록에 더한다
-    repository.remove_kakao_pending_numbers(series_id, [episode.number])  # "받지 않은 것으로" 기록해 둔 회차를 받았으면 그 지정은 푼다
-    subscription_scope.completed("kakao", series_id, episode.number)
+    finally:
+        if part_path is not None:
+            part_path.unlink(missing_ok=True)
+    kakao_records.record_download(series_id, episode.number, episode.product_id)
+    subscription_scope.completed("kakao", series_id, episode.number, product_id=episode.product_id)
     return final_path
-
-
-def _remove_superseded(folder: Path, number: int, *, keep: Path) -> None:
-    """같은 번호의 다른 이름 zip(다시 받기로 교체된 예전 파일)을 지운다."""
-    for entry in scan_existing_files(folder):
-        if entry.number == number and entry.name != keep.name:
-            try:
-                (folder / entry.name).unlink()
-            except OSError as e:
-                log.warning("교체된 예전 파일을 지우지 못했습니다 (%s): %s", entry.name, e)
 
 
 def _plan_for_run(series_id: int, series_item: dict, episodes: list[Episode], existing: list[ExistingFile]) -> DownloadPlan:
     """자동 다운로드의 받을 회차 계획 — 폴더 규칙으로 한 번 정하고, 받은 회차 기록(기록이 없으면 폴더+아카이빙 이력으로 처음 만들고, 폴더를 비웠으면 버린다)이나
     "받지 않은 것으로" 기록한 회차가 있으면 그것을 반영해서 다시 정한다."""
     series_title = series_item.get("title") or ""
-    plan = plan_by_folder_rules(episodes, existing, series_title)
-    recorded = kakao_records.sync_before_planning(series_id, existing, plan)
+    plan = plan_by_folder_rules(episodes, existing, series_title, series_id=series_id)
+    current_files = [file for file in existing if file.series_id in (None, series_id)]
+    recorded = kakao_records.sync_before_planning(series_id, current_files, plan)
     pending = repository.get_kakao_pending_numbers(series_id)
-    if recorded or pending:
-        plan = plan_by_folder_rules(episodes, existing, series_title, recorded, pending)
-    allowed = subscription_scope.allowed_numbers("kakao", series_id, [ep.number for ep in episodes], reopen=pending)
+    plan = kakao_records.plan_for_catalog(series_id, episodes, existing, series_title, recorded=recorded)
+    allowed = subscription_scope.allowed_kakao_numbers(series_id, episodes, reopen=pending)
     if allowed is not None:
         # Scope admission is independent of the folder marker: an earlier failed selected
         # episode must remain eligible even when a later file already exists.
         choice = subscription_scope.get("kakao", series_id)
-        initial = set(choice["pending_initial"])
+        initial = subscription_scope.pending_kakao_numbers(choice, episodes)
         if choice["mode"] == "all":
             initial |= allowed
-        fresh = plan_by_folder_rules(episodes, existing, series_title, recorded, pending | initial)
+        fresh = kakao_records.plan_for_catalog(series_id, episodes, existing, series_title, recorded=recorded, pending=pending | initial)
         plan = fresh
         plan.to_download = [ep for ep in plan.to_download if ep.number in allowed]
         plan.locked = [ep for ep in plan.locked if ep.number in allowed]
@@ -212,7 +224,10 @@ async def run_download(
         return RunResult([], [], None, DownloadPlan(mode="new_folder"), EXCLUDED_MESSAGE)
     folder_title = title or series_item.get("title") or str(series_id)
     folder = series_folder(download_root, folder_title)
-    plan = _plan_for_run(series_id, series_item, episodes, scan_existing_files(folder))
+    try:
+        plan = _plan_for_run(series_id, series_item, episodes, scan_existing_files(folder))
+    except subscription_scope.KakaoRangeReviewRequired as exc:
+        return RunResult([], [], None, DownloadPlan(mode="new_folder"), error=str(exc), title=folder_title)
     downloaded, items, failed, ticket_used = await _download_in_number_order(
         client, series_id, series_item, plan, folder, max_episodes, on_progress, should_continue=may_continue
     )
@@ -375,6 +390,8 @@ class _LockedEpisodeOpener:
 
 async def _download_selected_episode(client: KakaoPageClient, series_id: int, row, number: int, folder: Path, result: SelectedResult, on_progress=None) -> None:
     """고른 회차 하나를 받아 결과에 남긴다. 다시 받다가 실패하면 원래 파일은 그대로 남는다."""
+    identity = (series_id, row.episode.product_id)
+    replaced = any((file.series_id, file.product_id) == identity for file in scan_existing_files(folder))
     path = await download_episode(client, series_id, row.episode, folder)
     if path is None:
         result.failed.append(number)
@@ -383,7 +400,6 @@ async def _download_selected_episode(client: KakaoPageClient, series_id: int, ro
         return
     result.downloaded.append(number)
     result.downloaded_items.append((number, row.episode.subtitle))
-    replaced = row.downloaded and not row.archived  # 보관 폴더로 옮겨진 회차를 다시 받는 것은 폴더의 파일을 바꾸는 게 아니다
     if replaced:
         result.replaced.append(number)
     if on_progress:
@@ -394,7 +410,7 @@ async def download_selected(
     client: KakaoPageClient, *, series_id: int, title: str | None, numbers: list[int], download_root: str, on_progress=None,
     use_rental_tickets: bool = False,
 ) -> SelectedResult:
-    """수동 다운로드 — 분석 표에서 고른 회차들을 번호순으로 받는다. 이미 받은 회차도 고르면 다시 받아 교체한다
+    """수동 다운로드 — 분석 표에서 고른 회차들을 번호순으로 받는다. 같은 상품으로 확인된 회차는 다시 받아 교체한다.
     (자동 다운로드와 달리 수동은 "다시 받기"가 목적일 수 있다). 잠긴 회차는 기다무/대여권으로 열 수 있을 때만 열고(_LockedEpisodeOpener) 못 열면 건너뛰고,
     하나가 실패해도 나머지는 계속한다(직접 고른 것이라 순서를 끊을 이유가 없다). 다시 받다가 실패하면 원래 파일은 그대로 남는다."""
     result = SelectedResult()
@@ -408,10 +424,7 @@ async def download_selected(
         return result
     result.title = title or series_item.get("title") or str(series_id)
     folder = series_folder(download_root, result.title)
-    plan = plan_by_folder_rules(
-        episodes, scan_existing_files(folder), series_item.get("title") or "", repository.get_kakao_downloaded_numbers(series_id),
-        repository.get_kakao_pending_numbers(series_id),
-    )
+    plan = kakao_records.plan_for_catalog(series_id, episodes, scan_existing_files(folder), series_item.get("title") or "")
     rows = {row.episode.number: row for row in plan.rows}
     opener = _LockedEpisodeOpener(client, series_id, series_item, result, use_rental_tickets, on_progress)
     for number in sorted(set(numbers)):

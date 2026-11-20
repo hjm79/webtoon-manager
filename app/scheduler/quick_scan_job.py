@@ -33,11 +33,12 @@ async def run_quick_scan_job(scope: set[str] | None = None, max_age_hours: float
             today = quick_scan.today_key()
             targets, skipped = await asyncio.to_thread(quick_scan.collect_targets, today=today, max_age_hours=max_age_hours, scope=scope)
             _announce_start(targets, skipped, today, scope, max_age_hours)
+            stats = await quick_scan.scan(targets, get_settings(), progress=_say) if targets else quick_scan.ScanStats()
             if targets:
-                stats = await quick_scan.scan(targets, get_settings(), progress=_say)
-                _say(f"빠른 상태 스캔 완료 — 확인 {stats.scanned}개: 요일 새로 알아냄 {stats.resolved_days}개, 새로 완결·서비스 종료·판매 중지 {stats.newly_finished}개, 확인 실패 {stats.failed}개")
+                _say(f"빠른 상태 스캔 결과 — 확인 {stats.scanned}개: 요일 새로 알아냄 {stats.resolved_days}개, 새로 완결·서비스 종료·판매 중지 {stats.newly_finished}개, 확인 실패 {stats.failed}개")
             await asyncio.to_thread(_log_summary_lines)
-            job_status.finish("quick_scan", success=True)
+            job_status.finish("quick_scan", success=stats.failed == 0,
+                              outcome="partial" if 0 < stats.failed < stats.scanned else None)
         except Exception as e:
             log.exception("빠른 상태 스캔 중 예외")
             _say(f"오류: {e}")

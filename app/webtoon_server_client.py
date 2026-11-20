@@ -8,6 +8,7 @@ webtoon-server 자체는 이 프로젝트 소스에 없으므로, 실제 스펙�
 """
 
 import logging
+import re
 from urllib.parse import urlencode
 
 import aiohttp
@@ -15,10 +16,20 @@ import aiohttp
 from app import viewer_connection
 
 log = logging.getLogger(__name__)
+_PROVIDER_WORK_ID = re.compile(r"[0-9]{1,32}\Z")
+
+
+async def _fetch_latest(session, lookup_url: str, params: dict, timeout: aiohttp.ClientTimeout) -> tuple[int, dict | None]:
+    async with session.get(lookup_url, params=params, timeout=timeout, allow_redirects=False) as response:
+        if response.status != 200:
+            return response.status, None
+        data = await response.json()
+        return response.status, data if isinstance(data, dict) else None
 
 
 async def fetch_reader_url(
-    session: aiohttp.ClientSession, base_url: str, series_name: str, timeout_seconds: int
+    session: aiohttp.ClientSession, base_url: str, series_name: str, timeout_seconds: int, *,
+    platform: str | None = None, title_id: str | None = None,
 ) -> str | None:
     """조회에 실패해도(404, 타임아웃, 형식 오류 등) 예외를 던지지 않고 None을 반환한다 —
     이 링크는 리포트 메시지를 보강하는 부가 정보일 뿐이라, 실패해도 리포트 자체가
@@ -28,37 +39,47 @@ async def fetch_reader_url(
         if not base_url:
             return None
         url = base_url.rstrip("/") + "/api/lookup/latest"
-        async with session.get(
-            url,
-            params={"series": series_name},
-            timeout=aiohttp.ClientTimeout(total=timeout_seconds),
-        ) as response:
-            if response.status != 200:
+        params = {"series": series_name}
+        if platform:
+            params["platform"] = platform
+        timeout = aiohttp.ClientTimeout(total=timeout_seconds)
+        status, data = await _fetch_latest(session, url, params, timeout)
+        if status == 404 and platform in {"naver", "kakao"} and title_id and _PROVIDER_WORK_ID.fullmatch(title_id):
+            _, data = await _fetch_latest(session, url, {
+                "series": series_name, "platform": "archive",
+                "origin_platform": platform, "origin_title_id": title_id,
+            }, timeout)
+            # A legacy viewer can ignore the additional query keys.
+            if not data or data.get("origin_platform") != platform or data.get("origin_title_id") != title_id:
                 return None
-            data = await response.json()
-            if viewer_connection.integrated():
-                return viewer_connection.report_reader_url(data.get("url"), data.get("series_id"), data.get("chapter_id"))
-            return data.get("url") or None
+        if not data:
+            return None
+        if viewer_connection.integrated():
+            return viewer_connection.report_reader_url(data.get("url"), data.get("series_id"), data.get("chapter_id"))
+        return data.get("url") or None
     except Exception as e:
         log.warning("webtoon-server 바로가기 조회 실패 (series=%s): %s", series_name, e)
         return None
 
 
 async def fetch_read_numbers(
-    session: aiohttp.ClientSession, base_url: str, series_name: str, timeout_seconds: int
+    session: aiohttp.ClientSession, base_url: str, series_name: str, timeout_seconds: int, *, platform: str | None = None
 ) -> frozenset[int] | None:
     """뷰어에서 이 작품의 '읽은' 회차 번호들을 얻는다: GET {base_url}/api/lookup/read-state?series={작품명}
     -> {"series_id": "...", "read_numbers": [1, 2, ...]} ('읽는 중'인 회차는 뷰어가 이미 뺀다).
-    실패(미설정, 404, 타임아웃, 형식 오류)는 모두 None — 호출부가 "알 수 없음"으로 보고 거르지 않는다.
+    실패(미설정, 404, 타임아웃, 형식 오류)는 None — 호출부가 읽음 상태를 알 수 없는 작품을 건너뛴다.
     읽은 회차가 하나도 없는 것(빈 집합)과 구분된다."""
     try:
         base_url = viewer_connection.internal_base(base_url)
         if not base_url:
             return None
         url = base_url.rstrip("/") + "/api/lookup/read-state"
+        params = {"series": series_name}
+        if platform:
+            params["platform"] = platform
         async with session.get(
             url,
-            params={"series": series_name},
+            params=params,
             timeout=aiohttp.ClientTimeout(total=timeout_seconds),
         ) as response:
             if response.status != 200:

@@ -6,6 +6,7 @@ import aiohttp
 
 from app import db, repository, kakao_page_auth as auth, kakao_page_download as kp, job_status, scheduler, discord_bot
 from app import kakao_cover
+from fakes import image_bytes
 from app.config import get_settings
 db.get_connection()
 
@@ -31,7 +32,7 @@ def handler(method, url, params, data):
     if "content/about" in url: return R(data={"result_code": 0, "result": {"author_list": []}})
     if "viewer/data" in url:
         return R(data={"viewer_data": {"imageDownloadData": {"files": [{"no": i, "secureUrl": f"https://dw-img-page.kakao.com/sdownload/resource?token=t{params['product_id']}_{i}"} for i in (1, 2)]}}})
-    if "sdownload" in url: return R(body=b"\xff\xd8\xffx", ctype="image/jpeg")
+    if "sdownload" in url: return R(body=image_bytes("JPEG"), ctype="image/jpeg")
     raise AssertionError(url)
 class FakeSession:
     def __init__(self, *a, **k): pass
@@ -128,11 +129,11 @@ async def main():
 
     # ── 5. 리포트 ──
     row = lambda platform, title, no, status="success", tid="1": {"platform": platform, "title_name": title, "episode_no": no, "title_id": tid, "status": status, "subtitle": "", "error_msg": ""}
-    naver_only = scheduler.build_report_message([row("naver", "네이버작", 1, tid="100")], [], {"네이버작": "http://v/n"})
+    naver_only = scheduler.build_report_message([row("naver", "네이버작", 1, tid="100")], [], {("naver", "네이버작"): "http://v/n"})
     assert "• 네이버작 [바로가기](<http://v/n>)" in naver_only and "[네이버]" not in naver_only                          # 네이버만 있으면 예전 형식 그대로
     mixed = scheduler.build_report_message(
         [row("naver", "네이버작", 1, tid="100"), row("kakao", "쌍갑포차", 409, tid="61641075"), row("kakao", "쌍갑포차", 411, tid="61641075"), row("kakao", "쌍갑포차", 410, tid="61641075"), row("kakao", "개미", 5, tid="68239972")],
-        [row("kakao", "실패작", 3, "failed", "5"), row("naver", "네이버실패", 2, "failed", "6")], {"kakao:개미": "http://v/ant"})
+        [row("kakao", "실패작", 3, "failed", "5"), row("naver", "네이버실패", 2, "failed", "6")], {("kakao", "개미"): "http://v/ant"})
     assert "📁 받은 작품 (3):" in mixed
     assert "• [네이버] 네이버작" in mixed and "• [카카오] 개미 · 1개 회차(5번) [바로가기](<http://v/ant>)" in mixed                                    # 뷰어 링크가 있으면 뷰어로
     assert "• [카카오] 쌍갑포차 · 3개 회차(409~411번) [바로가기](<https://page.kakao.com/content/61641075>)" in mixed                                # 없으면 카카오페이지 링크, 회차 수/범위

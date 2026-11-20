@@ -6,7 +6,7 @@ from unittest.mock import AsyncMock, patch
 
 import httpx
 
-from app import (backup_restore, db, discord_config, download_roots, kakao_catalog, kakao_page_auth as auth, kakao_page_download as kp,
+from app import (backup_restore, db, discord_config, download_roots, kakao_catalog, kakao_page_auth as auth, kakao_page_download as kp, kakao_records,
                  rclone_updater, repository, schedule_config, scheduler as scheduler_mod)
 from app.config import get_settings
 from app.file_utils import remove_forbidden_str, remove_forbidden_str_kakao
@@ -91,6 +91,43 @@ rep = backup_restore.restore_backup(data, ST)
 assert repository.get_setting(download_roots.NAVER_ROOT_SETTING_KEY) is None and repository.get_setting(kp.DOWNLOAD_ROOT_SETTING_KEY) == good
 assert any("네이버" in w and "/다른환경/Webtoon_Download" in w and "기본 폴더" in w for w in rep["warnings"]) and not any("카카오페이지 다운로드 폴더(" in w for w in rep["warnings"]), rep["warnings"]
 print("4) 다운로드 폴더 경로 점검 OK")
+
+# An existing foreign folder (or the other platform's folder) cannot hide downloaded files from the integrated viewer.
+with tempfile.TemporaryDirectory() as foreign_path, patch.object(ST, "viewer_internal_url", "http://viewer:8000"):
+    naver = download_roots.viewer_download_root("naver", ST)
+    kakao = download_roots.viewer_download_root("kakao", ST)
+    naver.mkdir(exist_ok=True)
+    kakao.mkdir(exist_ok=True)
+    untouched = Path(foreign_path) / "existing.zip"
+    untouched.write_bytes(b"existing download")
+    repository.set_setting(download_roots.NAVER_ROOT_SETTING_KEY, str(naver))
+    repository.set_setting(kp.DOWNLOAD_ROOT_SETTING_KEY, foreign_path)
+    snapshot_with_roots = repository.export_all()
+    for row in snapshot_with_roots["settings"]:
+        if row["key"] == download_roots.NAVER_ROOT_SETTING_KEY:
+            row["value"] = foreign_path
+        elif row["key"] == kp.DOWNLOAD_ROOT_SETTING_KEY:
+            row["value"] = str(naver)
+
+    report = backup_restore.restore_backup(snapshot_with_roots, ST)
+    assert repository.get_setting(download_roots.NAVER_ROOT_SETTING_KEY) == str(naver)
+    assert repository.get_setting(kp.DOWNLOAD_ROOT_SETTING_KEY) is None
+    assert download_roots.kakao_root(ST) == str(kakao)
+    assert untouched.read_bytes() == b"existing download"
+    assert any("네이버" in warning and "기존 설정을 유지" in warning for warning in report["warnings"])
+    assert any("카카오페이지" in warning and "플랫폼 기본 경로" in warning for warning in report["warnings"])
+
+    for row in snapshot_with_roots["settings"]:
+        if row["key"] == download_roots.NAVER_ROOT_SETTING_KEY:
+            row["value"] = str(naver)
+        elif row["key"] == kp.DOWNLOAD_ROOT_SETTING_KEY:
+            row["value"] = str(kakao)
+    report = backup_restore.restore_backup(snapshot_with_roots, ST)
+    assert repository.get_setting(kp.DOWNLOAD_ROOT_SETTING_KEY) == str(kakao)
+    assert not any("통합 뷰어 연결 경로" in warning for warning in report["warnings"])
+# The standalone fixture below expects its original downloader roots.
+repository.set_setting(download_roots.NAVER_ROOT_SETTING_KEY, None)
+repository.set_setting(kp.DOWNLOAD_ROOT_SETTING_KEY, good)
 
 # ═══ 5. 폴더가 실제로 연결돼 있으면 폴더 경고가 없다(작품 폴더 이름은 플랫폼별 규칙) ═══
 (KROOT / remove_forbidden_str_kakao("카카오 구독작")).mkdir(); naver_root = Path(download_roots.naver_root(ST)); (naver_root / remove_forbidden_str("네이버작")).mkdir(parents=True, exist_ok=True)
@@ -222,9 +259,87 @@ async def queue_recovery_and_job_exclusion():
     print("11) 복원 중 작업 배제, 실행 중이던 큐 재개, 뷰어 연동 정보 유지 OK")
 
 
+async def warns_after_commit_and_continues_postprocessing():
+    body = repository.export_all()
+    repository.set_setting("archive_conflict_policy", "old")
+    body["settings"] = [row for row in body["settings"] if row["key"] != "archive_conflict_policy"]
+    body["settings"].append({"key": "archive_conflict_policy", "value": "rename"})
+    with patch.object(backup_restore, "check_environment", side_effect=OSError("environment unavailable")), \
+         patch.object(kakao_records, "backfill_and_log", side_effect=OSError("records unavailable")), \
+         patch.object(scheduler_mod, "reschedule_all") as reschedule, \
+         patch.object(download_job, "start_queued_downloads") as resume:
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=m.app), base_url="http://test") as c:
+            invalid = await c.post("/api/restore", json={})
+            assert invalid.status_code == 400
+            assert repository.get_setting("archive_conflict_policy") == "old"
+            assert not reschedule.called and not resume.called
+            response = await c.post("/api/restore", json=body)
+        assert response.status_code == 200 and response.json()["status"] == "restored_with_warnings"
+        assert len(response.json()["warnings"]) == 2
+        assert repository.get_setting("archive_conflict_policy") == "rename"
+        reschedule.assert_called_once()
+        resume.assert_called_once_with(recover=True)
+    print("12) 커밋 후 점검 실패와 잘못된 백업을 구분하고 대기열 재개 OK")
+
+
+async def integrated_restore_parks_unavailable_storage():
+    repository.upsert_new("1000", "저장소 복구 대기")
+    item = repository.enqueue_download("naver", "1000", "저장소 복구 대기")[0]
+    body = repository.export_all()
+    repository.update_download_queue(item["id"])
+    old_roots = {download_roots.NAVER_ROOT_SETTING_KEY, kp.DOWNLOAD_ROOT_SETTING_KEY}
+    body["settings"] = [row for row in body["settings"] if row["key"] not in old_roots]
+    with patch.object(ST, "viewer_internal_url", "http://viewer:8000"), patch.object(type(ST), "delay_seconds", 0):
+        naver_root = download_roots.viewer_download_root("naver", ST)
+        naver_root.mkdir(exist_ok=True)
+        download_roots.viewer_download_root("kakao", ST).mkdir(exist_ok=True)
+        existing = naver_root / "existing.zip"
+        existing.write_bytes(b"existing archive")
+        body["settings"].append({"key": download_roots.NAVER_ROOT_SETTING_KEY, "value": str(naver_root)})
+        available = threading.Event()
+
+        def mount_problem(platform, _settings, *, path=None):
+            return "다운로드 디스크가 마운트되지 않았습니다." if platform == "naver" and not available.is_set() else None
+
+        async def parked():
+            while True:
+                queue = repository.list_download_queue()
+                if queue and queue[0]["state"] == "blocked_storage":
+                    return queue[0]
+                await asyncio.sleep(0.01)
+
+        with (patch.object(download_roots, "download_root_problem", side_effect=mount_problem),
+              patch.object(download_job, "_download_new_episodes_for_one", new_callable=AsyncMock) as download):
+            try:
+                async with httpx.AsyncClient(transport=httpx.ASGITransport(app=m.app), base_url="http://test") as c:
+                    response = await c.post("/api/restore", json=body)
+                assert response.status_code == 200, response.text
+                report = response.json()
+                assert report["status"] == "restored_with_warnings"
+                assert "naver" in report["download_mount_problems"]
+                assert any("대기열은 보존" in warning for warning in report["warnings"])
+                waiting = await asyncio.wait_for(parked(), timeout=2)
+                assert waiting["id"] == item["id"] and waiting.get("attempts", 0) == item.get("attempts", 0)
+                assert repository.get_setting(download_roots.NAVER_ROOT_SETTING_KEY) == str(naver_root)
+                download.assert_not_awaited()
+                assert existing.read_bytes() == b"existing archive"
+                available.set()
+                repository.update_download_queue(item["id"], state="blocked_storage", retry_at=time.time() - 1)
+                await asyncio.wait_for(download_job._queue_worker_task, timeout=3)
+                assert download.await_count == 1 and not repository.list_download_queue()
+                assert existing.read_bytes() == b"existing archive"
+            finally:
+                await download_job.stop_queued_downloads()
+                existing.unlink()
+                repository.update_download_queue(item["id"])
+    print("13) 마운트가 없는 동안 대기열과 기존 파일 보존, 마운트 복구 뒤 재개 OK")
+
+
 async def main():
     await api()
     await queue_recovery_and_job_exclusion()
+    await warns_after_commit_and_continues_postprocessing()
+    await integrated_restore_parks_unavailable_storage()
 
 
 asyncio.run(main())

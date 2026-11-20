@@ -201,22 +201,70 @@ async def bounded_retries_and_manual_restart():
     assert calls == 3 and retained["attempts"] == 3 and retained["state"] == "failed"
     assert retained["id"] == item["id"] and retained["retry_at"] is None
     assert subscription_scope.get("naver", title_id)["pending_initial"] == [3]
+    assert not dj.title_queued("naver", title_id)
+    naver, _ = repository.download_subscription_snapshot({"naver"})
+    assert title_id in [row.title_id for row in naver]
+
+    async def preview(platform, id):
+        return {"platform": platform, "title_id": id, "title": "보존할 실패 작업", "episodes": rows}
 
     async def success(platforms, *, only_title):
-        assert subscription_scope.allowed_numbers("naver", only_title, [1, 3]) == {3}
+        assert subscription_scope.allowed_numbers("naver", only_title, [1, 3, 4]) == {3, 4}
         subscription_scope.completed("naver", only_title, 3)
+        subscription_scope.completed("naver", only_title, 4)
 
-    with patch.object(dj, "_run_download_job_impl", success):
+    with patch.object(dj, "_run_download_job_impl", success), patch.object(workflow, "_preview", preview):
         async with httpx.AsyncClient(transport=httpx.ASGITransport(app=main.app), base_url="http://test") as client:
+            data = (await client.get("/api/workflow/status")).json()
+            current = next(row for row in data["subscriptions"] if row["title_id"] == title_id)
+            assert current["scope_edit_reason"] is None and "queue_position" not in current
+            reply = await client.post("/api/workflow/scope", json={"platform": "naver", "title_id": title_id,
+                "scope": {"mode": "selected", "episode_nos": [3, 4]}})
+            assert reply.status_code == 200 and repository.list_download_queue() == [retained], reply.text
             reply = await client.post("/api/workflow/queue", json={"platform": "naver", "title_id": title_id})
             assert reply.status_code == 200, reply.text
             assert reply.json()["queue"][0]["id"] == item["id"]
             await asyncio.wait_for(dj._queue_worker_task, 3)
     assert not repository.list_download_queue()
-    assert subscription_scope.get("naver", title_id)["completed_numbers"] == [1, 3]
+    assert subscription_scope.get("naver", title_id)["completed_numbers"] == [1, 3, 4]
+
+    repository.upsert_new_kakao_webtoon(9911, "실패 후 기다무 재개")
+    queued = repository.enqueue_download("kakao", "9911", "실패 후 기다무 재개")[0]
+    repository.update_download_queue(queued["id"], state="failed", reason="fixture failure")
+    webtoon = repository.get_kakao_webtoon(9911)
+    received = []
+
+    async def waitfree_batch(due, now):
+        received.extend(due)
+
+    with patch.object(waitfree_job.waitfree_sync, "is_enabled", return_value=True), \
+         patch.object(waitfree_job.waitfree_sync, "due_webtoons", return_value=[webtoon]), \
+         patch.object(waitfree_job, "_run_waitfree_batch", waitfree_batch):
+        await waitfree_job.run_waitfree_due_job()
+    assert received == [webtoon] and repository.list_download_queue()[0]["state"] == "failed"
+
+
+async def scheduled_recovery_resolves_only_the_failed_row():
+    title_id = "9913"
+    repository.upsert_new(title_id=title_id, title="정기 다운로드 복구")
+    [entry] = [row for row in repository.enqueue_download("naver", title_id, "정기 다운로드 복구")
+               if row["title_id"] == title_id]
+    repository.update_download_queue(entry["id"], state="failed", reason="fixture failure", attempts=3)
+
+    async def recovered(session, settings, selected_title_id, tracker, failures):
+        if selected_title_id == title_id:
+            dj.workflow_progress.begin("naver", title_id, "정기 다운로드 복구", 1)
+            dj.workflow_progress.downloaded()
+            dj.workflow_progress.finish()
+
+    with patch.object(dj, "_download_new_episodes_for_one", recovered):
+        await dj.run_download_job("naver", scheduled=True)
+    assert all(row["id"] != entry["id"] for row in repository.list_download_queue())
+    assert any(row["state"] == "failed" and row["title_id"] == "9911" for row in repository.list_download_queue())
 
 
 atomic_registration()
 asyncio.run(concurrent_registration())
 asyncio.run(bounded_retries_and_manual_restart())
+asyncio.run(scheduled_recovery_resolves_only_the_failed_row())
 print("atomic subscription, save-only while busy, stable two-platform snapshot, durable FIFO recovery, deduplication, scope protection and failure continuation passed")

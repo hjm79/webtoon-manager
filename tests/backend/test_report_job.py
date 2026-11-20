@@ -17,7 +17,9 @@ scheduler.report_sections.collect_unregistered_new_episodes = fake_naver; schedu
 async def no_new_titles(session, settings): return []                                                             # 신규 웹툰 수집은 이 테스트의 관심사가 아니다 — 실제 네이버/카카오 목록을 부르지 않게(CI에서만 실패한 적이 있다)
 scheduler.report_sections.collect_naver_new_titles = no_new_titles; scheduler.report_sections.collect_kakao_new_titles = no_new_titles
 VIEWER = {}
-async def fake_reader(session, base, name, timeout): lookups.append(name); return VIEWER.get(name)
+async def fake_reader(session, base, name, timeout, *, platform, title_id=None):
+    lookups.append((platform, name, title_id))
+    return VIEWER.get((platform, name))
 webtoon_server_client.fetch_reader_url = fake_reader
 
 def reset():
@@ -65,12 +67,24 @@ async def main():
     repository.set_setting("webtoon_server_url", "http://viewer")
     repository.set_setting(SINCE, datetime.now(timezone.utc).isoformat())   # 여기까지의 이력은 이미 집계한 것으로 치고, 이후 이력만 본다
     add_row("845332", "제목 : 부제", 3, "naver"); add_row("61641075", "도굴왕: 엔드라인", 4, "kakao"); add_row("68239972", "개미", 5, "kakao")
-    VIEWER.update({"제목 ： 부제": "http://viewer/n1", "도굴왕_ 엔드라인": "http://viewer/k1"})                              # 조회 키: 네이버=전각 치환, 카카오=밑줄 규칙
+    add_row("80000", "같은 제목", 6, "naver")
+    add_row("80001", "같은 제목", 7, "kakao")
+    VIEWER.update({
+        ("naver", "제목 ： 부제"): "http://viewer/n1",
+        ("kakao", "도굴왕_ 엔드라인"): "http://viewer/k1",
+        ("naver", "같은 제목"): "http://viewer/naver",
+        ("kakao", "같은 제목"): "http://viewer/kakao",
+    })
     msgs, s = await run()
-    assert sorted(lookups) == sorted(["제목 ： 부제", "도굴왕_ 엔드라인", "개미"]), lookups
+    assert set(lookups) == {
+        ("naver", "제목 ： 부제", "845332"), ("kakao", "도굴왕_ 엔드라인", "61641075"),
+        ("kakao", "개미", "68239972"), ("naver", "같은 제목", "80000"), ("kakao", "같은 제목", "80001"),
+    }, lookups
     m = msgs[0]
     assert "• [네이버] 제목 : 부제 [바로가기](<http://viewer/n1>)" in m and "• [카카오] 도굴왕: 엔드라인 · 1개 회차(4번) [바로가기](<http://viewer/k1>)" in m
     assert "• [카카오] 개미 · 1개 회차(5번) [바로가기](<https://page.kakao.com/content/68239972>)" in m                      # 뷰어에 없으면 카카오페이지 링크
+    assert "• [네이버] 같은 제목 [바로가기](<http://viewer/naver>)" in m
+    assert "• [카카오] 같은 제목 · 1개 회차(7번) [바로가기](<http://viewer/kakao>)" in m
     repository.set_setting("webtoon_server_url", None); repository.set_setting(SINCE, datetime.now(timezone.utc).isoformat())
     add_row("845332", "뷰어없음", 6, "naver"); msgs, s = await run(); assert lookups == [] and "• 뷰어없음" in msgs[0] and "바로가기" not in msgs[0].split("뷰어없음")[1].split("\n")[0]   # 뷰어 서버가 없으면 조회 안 함
     print("4) 뷰어 링크 OK")

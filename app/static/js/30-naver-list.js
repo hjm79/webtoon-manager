@@ -367,7 +367,7 @@ async function watchQuickScanThenReload(previousStartedAt) {
       continue;
     }
     if (job && job.started_at !== previousStartedAt && job.status !== "running") {
-      if (job.status === "success") await loadNaverList(true);
+      if (job.status === "success" || job.status === "partial") await loadNaverList(true);
       return;
     }
   }

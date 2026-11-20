@@ -126,7 +126,8 @@ for f in list(FOLDER.iterdir()): f.unlink()
 repository.set_kakao_downloaded_numbers(7, {1, 2, 3}); put(3)
 client = FakeClient(eps(6)); client.fail = {6}
 res = asyncio.run(kp.download_selected(client, series_id=7, title="기다무작품", numbers=[1, 3, 5, 6], download_root=str(KROOT)))
-assert res.downloaded == [1, 3, 5] and res.failed == [6] and res.replaced == [3], (res.downloaded, res.failed, res.replaced)      # 1은 보관된 것을 다시 받은 것(교체 아님), 3은 폴더 파일 교체
+assert res.downloaded == [1, 3, 5] and res.failed == [6] and res.replaced == [], (res.downloaded, res.failed, res.replaced)
+assert (FOLDER / kp.episode_zip_name(3, "3화")).read_bytes() == b"zip"  # 상품이 확인되지 않는 기존 3화는 보존한다.
 assert repository.get_kakao_downloaded_numbers(7) == {1, 2, 3, 5}                                                                      # 5는 새로 기록, 실패한 6은 기록 안 함
 print("3-4) 수동 다운로드 기록 OK")
 

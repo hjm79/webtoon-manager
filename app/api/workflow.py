@@ -10,7 +10,7 @@ from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel, Field, field_validator
 
 from app import auto_subscribe, daily_plus, download_cooldown, download_roots, job_status, kakao_api, kakao_catalog, kakao_page_download
-from app import kakao_page_auth, manual_download, naver_api, repository, subscription_scope, workflow_progress
+from app import kakao_page_auth, kakao_records, manual_download, naver_api, repository, subscription_scope, workflow_progress
 from app.api import kakao_webtoons, webtoons
 from app.config import get_settings
 from app.cookie_loader import get_adult_cookies
@@ -42,8 +42,9 @@ class ScopeIn(BaseModel):
     mode: Literal["all", "latest", "selected", "future"]
     latest_count: int | None = Field(default=None, ge=1, le=1000)
     episode_nos: list[int] = Field(default_factory=list, max_length=10000)
+    product_ids: list[int] = Field(default_factory=list, max_length=10000)
 
-    @field_validator("episode_nos")
+    @field_validator("episode_nos", "product_ids")
     @classmethod
     def valid_numbers(cls, value):
         if any(n <= 0 for n in value):
@@ -139,7 +140,12 @@ async def search(query: str = Query(min_length=1, max_length=100), platform: Lit
                 results[(name, row["title_id"])] = row
     current_hidden = daily_plus.cached_ids()
     results = {key: row for key, row in results.items() if key[0] != "naver" or key[1] not in current_hidden}
-    return {"results": sorted(results.values(), key=lambda r: (r["title"] != query, r["platform"], r["title"]))[:60], "errors": errors}
+    normalized = query.casefold()
+    ordered = sorted(results.values(), key=lambda r: (
+        r["title"].casefold() != normalized, not r["title"].casefold().startswith(normalized),
+        r["title"].casefold(), r["platform"],
+    ))
+    return {"results": ordered[:60], "total_matches": len(ordered), "errors": errors}
 
 
 async def _preview(platform: str, title_id: str) -> dict:
@@ -152,7 +158,9 @@ async def _preview(platform: str, title_id: str) -> dict:
         if info is None:
             raise HTTPException(404, "네이버에서 작품을 찾지 못했습니다.")
         authenticated = not info.is_adult or bool(get_adult_cookies(settings.cookie_file_path))
-        owned = repository.downloaded_episode_numbers(title_id)
+        scope = subscription_scope.get("naver", title_id)
+        owned = repository.downloaded_episode_numbers(title_id) - set(scope.get("reopened_numbers", ()))
+        owned |= set(scope["completed_numbers"])
         folder = Path(download_roots.naver_root(settings)) / remove_forbidden_str(info.title_name)
         owned |= await asyncio.to_thread(find_downloaded_episode_numbers, folder, info.title_name, rows)
         episodes = [{"episode_no": row.episode_no, "subtitle": row.subtitle,
@@ -171,9 +179,10 @@ async def _preview(platform: str, title_id: str) -> dict:
             raise HTTPException(400, "단행본은 구독 대상에서 제외됩니다.")
         folder = kakao_page_download.series_folder(download_roots.kakao_root(settings), title)
         existing = await asyncio.to_thread(kakao_page_download.scan_existing_files, folder)
-        owned = {f.number for f in existing} | (repository.get_kakao_downloaded_numbers(int(title_id)) or set())
-        episodes = [{"episode_no": row.number, "subtitle": row.subtitle,
-                     "available": row.accessible and not row.hidden, "owned": row.number in owned} for row in rows]
+        plan = await asyncio.to_thread(kakao_records.plan_for_catalog, int(title_id), rows, existing, title)
+        episodes = [{"episode_no": row.episode.number, "subtitle": row.episode.subtitle,
+                     "product_id": row.episode.product_id, "owned": row.downloaded,
+                     "available": row.episode.accessible and not row.episode.hidden} for row in plan.rows]
     return {"platform": platform, "title_id": title_id, "title": title, "episodes": episodes,
             "available_count": sum(row["available"] for row in episodes)}
 
@@ -222,6 +231,15 @@ async def _require_kakao_login() -> None:
             raise HTTPException(502, "카카오페이지 로그인 상태를 확인하지 못했습니다.")
 
 
+def _chosen_episode_numbers(platform: str, scope: ScopeIn, episodes: list[dict]) -> list[int]:
+    if platform != "kakao" or scope.mode != "selected" or not scope.product_ids:
+        return scope.episode_nos
+    current = {row["product_id"]: row["episode_no"] for row in episodes}
+    if len(scope.product_ids) != len(scope.episode_nos) or any(pid not in current for pid in scope.product_ids):
+        raise ValueError("카카오페이지 회차 목록이 바뀌었습니다. 회차를 다시 확인하고 선택해주세요.")
+    return [current[pid] for pid in scope.product_ids]
+
+
 @router.post("/subscribe")
 async def subscribe(payload: SubscribeIn, request: Request):
     async with _subscription_lock:
@@ -236,7 +254,7 @@ async def subscribe(payload: SubscribeIn, request: Request):
         try:
             scope = subscription_scope.make_choice(payload.platform, payload.title_id,
                 payload.scope.mode, listing["episodes"], latest_count=payload.scope.latest_count,
-                episode_nos=payload.scope.episode_nos)
+                episode_nos=_chosen_episode_numbers(payload.platform, payload.scope, listing["episodes"]))
             if download_job.title_running(payload.platform, payload.title_id):
                 raise HTTPException(409, "이미 현재 다운로드 작업에 포함된 작품입니다. 실행 완료 후 구독 범위를 변경해주세요.")
             await asyncio.to_thread(repository.activate_scoped_subscription, payload.platform, payload.title_id,
@@ -287,7 +305,8 @@ async def update_scope(payload: ScopeUpdateIn, request: Request):
                     raise HTTPException(409, "구독 상태가 변경되었습니다. 목록을 새로고침해주세요.")
                 scope = subscription_scope.set_choice(payload.platform, payload.title_id,
                     payload.scope.mode, listing["episodes"], latest_count=payload.scope.latest_count,
-                    episode_nos=payload.scope.episode_nos, preserve_existing=True)
+                    episode_nos=_chosen_episode_numbers(payload.platform, payload.scope, listing["episodes"]),
+                    preserve_existing=True)
                 changed = True
                 subscribed = webtoons._to_out(tracked) if payload.platform == "naver" else kakao_webtoons.KakaoWebtoonOut(**tracked)
                 response = {"subscription": subscribed, "scope": scope,
@@ -382,7 +401,8 @@ async def status(request: Request):
     busy = download_job.download_busy() or kakao_page_download.download_lock.locked()
     for entry in queue:
         entry["rest_until"] = download_cooldown.deadline(entry["platform"], entry["title_id"])
-    queued = {(row["platform"], row["title_id"]): (index, row) for index, row in enumerate(queue, 1)}
+    queued = {(row["platform"], row["title_id"]): (index, row)
+              for index, row in enumerate((entry for entry in queue if entry["state"] != "failed"), 1)}
     for row in subscriptions:
         row["next_run_at"] = next_run_at(request, row["platform"])
         if row["progress"] is None:

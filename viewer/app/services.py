@@ -9,6 +9,7 @@
 
 import asyncio
 import concurrent.futures
+import hashlib
 import logging
 import os
 import re
@@ -33,9 +34,6 @@ RESCAN_INTERVAL_SECONDS = int(os.environ.get("RESCAN_INTERVAL_SECONDS", "7200"))
 # 해석하고, 숫자가 아니면 크론(cron) 표현식으로 해석해서 그 일정에 맞춰 실행한다.
 # 비워두면(기본값) 기존 RESCAN_INTERVAL_SECONDS만 그대로 쓴다 - 기존 배포에 영향 없음.
 RESCAN_SCHEDULE = os.environ.get("RESCAN_SCHEDULE", "").strip()
-
-BACKUP_VERSION = 3  # v2부터 read_chapters, v3부터 공유 프로필 전체(프로필/허용목록/
-# 진행률/설정/시간대/요청내역) 포함
 
 SERIES_SCAN_TIMEOUT_SECONDS = int(os.environ.get("SERIES_SCAN_TIMEOUT_SECONDS", "30"))
 
@@ -126,7 +124,8 @@ def migrate_legacy_progress_if_needed(series_id: str, chapters: list, prog: dict
     사용자의 데이터가 갑자기 전부 안읽음으로 보이면 안 되니, 최초 1회만 예전 커서를 기준으로
     read_chapters를 채워 넣어 자연스럽게 이어지게 한다.
     """
-    if not prog or db.get_read_chapter_ids(series_id) or db.archive_progress_imported(series_id):
+    if (not prog or prog.get("explicit_read_state") or db.get_read_chapter_ids(series_id)
+            or db.archive_progress_imported(series_id)):
         return  # 진행률이 없거나 이미 새 방식으로 기록된 적 있으면 할 필요 없음
     idx = resolve_read_index(chapters, prog)
     if idx < 0:
@@ -135,7 +134,7 @@ def migrate_legacy_progress_if_needed(series_id: str, chapters: list, prog: dict
         ids_to_mark = [chapter["id"] for chapter in chapters[: idx + 1]]
     else:
         ids_to_mark = [chapter["id"] for chapter in chapters[:idx]]
-    db.mark_chapters_read(series_id, ids_to_mark)
+    db.migrate_read_chapters(series_id, prog, ids_to_mark)
 
 
 def log_scan_result(prefix: str, series_map: dict, chapters_map: dict, added: int | None = None, removed: int | None = None) -> None:
@@ -277,6 +276,15 @@ async def scan_all_platforms_incrementally() -> tuple[dict, dict]:
     """라이브러리를 스캔한다(_scan_all_platforms_impl). 이미 스캔 중이면 새로 시작하지 않고 그 스캔이 끝나기를 기다려 같은 결과를 받는다."""
     result = await asyncio.shield(_start_scan_task())
     return result.series, result.chapters
+
+
+async def scan_restored_library() -> tuple[str, ...]:
+    """Scan the committed backup state and report the failures from that scan."""
+    if is_scan_running():
+        # Let the scan using the old state finish. Its callback already records errors.
+        await asyncio.gather(asyncio.shield(_scan_task), return_exceptions=True)
+    result = await asyncio.shield(_start_scan_task())
+    return result.failed_platforms
 
 
 def start_background_scan() -> bool:
@@ -570,6 +578,32 @@ async def precompute_covers() -> None:
             except Exception:
                 log.exception(f"커버 사전 생성 실패 (건너뛰고 계속): {series['id']}")
         log.info(f"커버 사전 생성 완료 - {generated}/{len(series_list)}건")
+
+
+def chapter_zip_generation(zip_path: str) -> str:
+    identity = scan.zip_file_identity(os.stat(zip_path))
+    return hashlib.blake2s(repr(identity).encode("ascii"), digest_size=16).hexdigest()
+
+
+def chapter_page_for_http(zip_path: str, page_index: int, validators: str) -> tuple[str, tuple[bytes, str] | None] | None:
+    if page_index < 0:
+        return None
+    tags = {tag.strip().removeprefix("W/") for tag in validators.split(",")}
+    for _ in range(2):
+        generation = chapter_zip_generation(zip_path)
+        etag = f'"page-{generation}-{page_index:x}"'
+        unchanged = etag in tags or "*" in tags
+        if unchanged:
+            if page_index >= len(scan.list_zip_image_names(zip_path)):
+                return None
+            content = None
+        else:
+            content = read_chapter_page_bytes(zip_path, page_index)
+            if content is None:
+                return None
+        if generation == chapter_zip_generation(zip_path):
+            return etag, content
+    return None
 
 
 def read_chapter_page_bytes(zip_path: str, page_index: int) -> tuple[bytes, str] | None:

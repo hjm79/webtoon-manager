@@ -102,7 +102,7 @@ def test_legacy_updates_clear_offset_and_completed_chapters_do_not_carry_it_forw
     assert client.get(f"/api/series/{sid}/continue").json() == {
         "chapter_id": chapters[0]["id"], "page_index": 1,
     }
-    db.set_progress(sid, chapters[0]["id"], 0, 99, page_offset=0.7)
+    db.set_progress(sid, chapters[0]["id"], 0, db.PAGE_FINISHED_SENTINEL, page_offset=0.7)
     assert client.get(f"/api/series/{sid}/continue").json() == {
         "chapter_id": chapters[1]["id"], "page_index": 0,
     }
@@ -110,6 +110,18 @@ def test_legacy_updates_clear_offset_and_completed_chapters_do_not_carry_it_forw
     assert client.get(f"/api/series/{sid}/continue").json() == {
         "chapter_id": chapters[2]["id"], "page_index": 2,
     }
+
+
+def test_replacing_a_zip_with_fewer_pages_clamps_the_cursor_without_completing_it(client, library):
+    sid, chapters = _series(client, library)
+    current = chapters[0]["id"]
+    assert client.put(f"/api/series/{sid}/progress", json={
+        "chapter_id": current, "page_index": 2, "page_offset": 0.7, "completed": False,
+    }).status_code == 200
+    make_chapter_zip(str(library / "naver" / "정밀 이어 읽기" / "001.zip"), page_count=2)
+    assert client.post("/api/rescan").status_code == 200
+    assert client.get(f"/api/series/{sid}/continue").json() == {"chapter_id": current, "page_index": 1}
+    assert db.get_read_chapter_ids(sid) == set()
 
 
 def test_admin_and_profile_precision_remain_isolated_and_backup_compatible(library):

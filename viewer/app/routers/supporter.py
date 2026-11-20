@@ -96,7 +96,7 @@ def _shelf_items(public: str) -> list[dict]:
         metadata = db.get_progress_metadata(sid) or {}
         last_read, last_read_timestamp = _last_read(metadata.get("updated_at"))
         read_ids = db.get_read_chapter_ids(sid)
-        if not read_ids and progress:
+        if not read_ids and progress and not progress.get("explicit_read_state"):
             index = services.resolve_read_index(chapters, progress)
             if index >= 0:
                 end = index + (progress["page_index"] >= db.PAGE_FINISHED_SENTINEL)

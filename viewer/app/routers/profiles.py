@@ -6,9 +6,9 @@ PROFILES_ENABLED가 꺼져있으면 main.py가 이 라우터 자체를 등록하
 import logging
 
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, Field, model_validator
 
-from .. import access_control, access_requests, catalog, db, profile_devices, profile_progress, profile_time_restrictions as time_restrictions, profiles
+from .. import access_control, access_requests, catalog, profile_devices, profile_time_restrictions as time_restrictions, profiles
 
 log = logging.getLogger("webtoon-server")
 # 프로필 관리(생성/수정/삭제, 요청 승인/거부 등)는 전부 관리자 전용이다 - 공유 프로필이
@@ -105,12 +105,8 @@ def rename_profile(profile_id: str, body: RenameProfileIn):
 
 @router.delete("/api/admin/profiles/{profile_id}")
 def delete_profile(profile_id: str):
-    if profiles.get_profile(profile_id) is None:
+    if not profiles.delete_profile(profile_id):
         raise HTTPException(404, "profile not found")
-    profiles.delete_profile(profile_id)
-    db.clear_profile_reading_state(profile_id)
-    profile_progress.delete_all_data_for_profile(profile_id)
-    profile_devices.delete_all_data_for_profile(profile_id)
     return {"ok": True}
 
 
@@ -144,9 +140,20 @@ def get_browse_filters(profile_id: str):
     return [{"platform": p, "age_rating": a} for p, a in pairs]
 
 
+class TimeWindowIn(BaseModel):
+    day_of_week: int = Field(ge=0, le=6)
+    start_minute: int = Field(ge=0, le=1439)
+    end_minute: int = Field(ge=0, le=1439)
+
+    @model_validator(mode="after")
+    def validate_bounds(self):
+        if self.start_minute > self.end_minute:
+            raise ValueError("종료 시각은 시작 시각과 같거나 이후여야 합니다.")
+        return self
+
+
 class TimeWindowsIn(BaseModel):
-    # [{"day_of_week": 0-6(월=0), "start_minute": 0-1439, "end_minute": 0-1439}, ...]
-    windows: list[dict]
+    windows: list[TimeWindowIn]
 
 
 @router.put("/api/admin/profiles/{profile_id}/time-windows")
@@ -154,7 +161,7 @@ def set_time_windows(profile_id: str, body: TimeWindowsIn):
     """리더(회차 페이지)만 막는 접속 가능 시간대. 빈 목록이면 제한 없음."""
     if profiles.get_profile(profile_id) is None:
         raise HTTPException(404, "profile not found")
-    time_restrictions.set_time_windows(profile_id, body.windows)
+    time_restrictions.set_time_windows(profile_id, [window.model_dump() for window in body.windows])
     return {"ok": True}
 
 

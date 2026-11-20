@@ -134,7 +134,7 @@ function workflowScopeRestriction(item, data = workflowStatusData) {
   const current = (data.subscriptions || []).find((row) => row.platform === platform && String(row.title_id) === String(item.title_id)) || item;
   if (current.scope_edit_reason) return current.scope_edit_reason;
   if (["queued", "running", "resting"].includes(current.status)
-      || (data.queue || []).some((row) => row.platform === platform && String(row.title_id) === String(item.title_id))) {
+      || (data.queue || []).some((row) => row.state !== "failed" && row.platform === platform && String(row.title_id) === String(item.title_id))) {
     return "다운로드 대기열에 있는 작품입니다. 대기 취소 또는 실행 완료 후 범위를 변경해주세요.";
   }
   return data.download_busy ? "다른 다운로드가 실행 중입니다. 완료 후 범위를 변경해주세요." : null;
@@ -308,7 +308,8 @@ async function searchWorkflow(event) {
     const data = await apiCall(`/api/workflow/search?query=${encodeURIComponent(query)}&platform=${encodeURIComponent(platform)}`);
     if (generation !== workflowSearchGeneration) return;
     const rows = Array.isArray(data.results) ? data.results : [];
-    status.textContent = `${rows.length}개 작품을 찾았습니다.${(data.errors || []).map((error) => ` ${error.platform === "kakao" ? "카카오페이지" : "네이버"}: ${error.message}`).join("")}`;
+    const count = data.total_matches > rows.length ? `${data.total_matches}개 중 ${rows.length}개 표시. 제목을 더 입력하거나 플랫폼을 선택해주세요.` : `${rows.length}개 작품을 찾았습니다.`;
+    status.textContent = count + (data.errors || []).map((error) => ` ${error.platform === "kakao" ? "카카오페이지" : "네이버"}: ${error.message}`).join("");
     for (const item of rows) {
       const card = document.createElement("article");
       card.className = "webtoon-card workflow-result-card";
@@ -422,14 +423,17 @@ async function chooseSubscriptionScope(item, { edit = false } = {}) {
     status.textContent = `현재 받을 수 있는 회차 ${preview.available_count || 0}개.${edit ? " 기존 다운로드 범위를 불러왔습니다." : " 구독 버튼만으로 전체 회차를 바로 받지 않습니다."}`;
     const current = edit ? preview.current_scope || { mode: "all" } : null;
     const selectedNumbers = new Set(current?.episode_nos || []);
+    const selectedProducts = current?.initial_products ? new Set(Object.values(current.initial_products)) : null;
     const picker = document.getElementById("workflow-episode-picker");
     for (const episode of workflowSubscription.episodes) {
       const label = document.createElement("label");
       const checkbox = document.createElement("input");
       checkbox.type = "checkbox";
       checkbox.value = episode.episode_no;
-      checkbox.disabled = !(episode.available || edit && (episode.owned || selectedNumbers.has(episode.episode_no)));
-      checkbox.checked = edit && selectedNumbers.has(episode.episode_no);
+      if (episode.product_id) checkbox.dataset.productId = episode.product_id;
+      const selected = selectedProducts ? selectedProducts.has(episode.product_id) : selectedNumbers.has(episode.episode_no);
+      checkbox.disabled = !(episode.available || edit && (episode.owned || selected));
+      checkbox.checked = edit && selected;
       const text = document.createTextNode(`${episode.episode_no} · ${episode.subtitle}${episode.owned ? " · 이미 받음" : ""}${!episode.available ? " · 받을 수 없음" : ""}`);
       label.append(checkbox, text); picker.appendChild(label);
     }
@@ -529,8 +533,12 @@ document.getElementById("workflow-subscribe-form").addEventListener("submit", as
     if (!Number.isInteger(scope.latest_count) || scope.latest_count < 1 || scope.latest_count > 1000) { error.textContent = "최근 회차 수는 1~1000 사이의 정수로 입력해주세요."; return; }
   }
   if (mode === "selected") {
-    scope.episode_nos = [...document.querySelectorAll('#workflow-episode-picker input:checked')].map((input) => Number(input.value));
+    const selected = [...document.querySelectorAll('#workflow-episode-picker input:checked')];
+    scope.episode_nos = selected.map((input) => Number(input.value));
     if (!scope.episode_nos.length) { error.textContent = "받을 회차를 하나 이상 선택해주세요."; return; }
+    if (item.platform === "kakao" && selected.every((input) => input.dataset.productId)) {
+      scope.product_ids = selected.map((input) => Number(input.dataset.productId));
+    }
   }
   submit.disabled = true; download.disabled = true;
   workflowSubscribeSaving = true;
@@ -567,7 +575,7 @@ document.getElementById("workflow-subscribe-form").addEventListener("submit", as
 
 const workflowQueueLabels = {
   queued: "다운로드 대기", blocked_auth: "카카오 재인증 대기", retry_wait: "연결 확인 후 재시도 대기",
-  retry_download: "다운로드 재시도 대기", failed: "다운로드 실패 · 수동 재시도 가능"
+  retry_download: "다운로드 재시도 대기", blocked_storage: "저장소 연결 대기", failed: "다운로드 실패 · 수동 재시도 가능"
 };
 
 function renderWorkflowStatus(data) {
@@ -601,7 +609,7 @@ function renderWorkflowStatus(data) {
     const content = document.createElement("div");
     const text = document.createElement("span");
     const queueDetails = [item.title, workflowQueueLabels[item.state], item.reason];
-    if (item.state === "retry_download" && Number.isFinite(item.retry_at) && item.retry_at > 0) {
+    if (["retry_download", "blocked_storage"].includes(item.state) && Number.isFinite(item.retry_at) && item.retry_at > 0) {
       queueDetails.push(`${formatKoreanTime(new Date(item.retry_at * 1000).toISOString())} 재시도 예정`);
     }
     text.textContent = queueDetails.filter(Boolean).join(" · ");
@@ -621,7 +629,7 @@ function renderWorkflowStatus(data) {
   if (!queue.children.length) queue.textContent = "다운로드 대기 작업이 없습니다.";
   document.getElementById("workflow-scope-edit-hint").textContent = data.download_busy
     ? "다운로드가 끝날 때까지 기존 구독의 범위 변경은 잠깁니다. 새 구독과 다운로드 대기열 추가는 계속할 수 있습니다."
-    : (data.queue || []).length ? "대기열에 있는 작품은 대기 취소 또는 실행 완료 후 범위를 변경할 수 있습니다." : "";
+    : (data.queue || []).some((row) => row.state !== "failed") ? "대기열에 있는 작품은 대기 취소 또는 실행 완료 후 범위를 변경할 수 있습니다." : "";
   if (workflowSubscription?.editing && !workflowSubscribeSaving) {
     const reason = workflowScopeRestriction(workflowSubscription, data);
     if (reason) {

@@ -6,14 +6,18 @@
 article/list/info 응답에 없는 필드(예시 파일은 카카오웹툰 기준)는 빈 태그로 둔다.
 """
 
+import asyncio
+from io import BytesIO
 import logging
+import os
 from pathlib import Path
+import tempfile
 from xml.sax.saxutils import escape
 
 import aiohttp
 
 from app.constants import DEFAULT_HEADERS, NAVER_SERIES_URL_TEMPLATE
-from app.file_utils import guess_image_extension
+from app.file_utils import episode_image_format
 from app import kakao_authors
 from app.models import TitleInfo
 
@@ -152,7 +156,12 @@ async def fetch_cover_image(session: aiohttp.ClientSession, info: TitleInfo, tim
             if response.status != 200:
                 log.warning("커버 이미지 다운로드 실패 (titleId=%s): HTTP %s", info.title_id, response.status)
                 return None
-            return guess_image_extension(info.thumbnail_url), await response.read()
+            body = await response.read()
+            fmt = await asyncio.to_thread(episode_image_format, BytesIO(body))
+            if fmt is None:
+                log.warning("네이버 표지 이미지 형식이 잘못되었습니다 (titleId=%s)", info.title_id)
+                return None
+            return (".jpg" if fmt == "jpeg" else f".{fmt}"), body
     except Exception as e:
         log.warning("커버 이미지 다운로드 중 오류 (titleId=%s): %s", info.title_id, e)
         return None
@@ -160,17 +169,27 @@ async def fetch_cover_image(session: aiohttp.ClientSession, info: TitleInfo, tim
 
 async def download_cover_image(
     session: aiohttp.ClientSession, webtoon_dir: Path, info: TitleInfo, timeout_seconds: int
-) -> None:
+) -> bool:
     cover = await fetch_cover_image(session, info, timeout_seconds)
     if cover is None:
-        return
+        return False
     ext, image = cover
+    pending = None
     try:
         webtoon_dir.mkdir(parents=True, exist_ok=True)
         new_cover = webtoon_dir / f"cover{ext}"
-        new_cover.write_bytes(image)
+        with tempfile.NamedTemporaryFile(prefix=".cover-", dir=webtoon_dir, delete=False) as temporary:
+            pending = Path(temporary.name)
+            temporary.write(image)
+            os.fchmod(temporary.fileno(), 0o644)
+        os.replace(pending, new_cover)
         for old in webtoon_dir.glob("cover.*"):  # 확장자가 다른 옛 커버가 남아 cover.*가 둘 이상 되지 않게(새 커버를 저장한 뒤에만 지운다)
             if old != new_cover:
                 old.unlink(missing_ok=True)
     except Exception as e:
         log.warning("커버 이미지 저장 중 오류 (titleId=%s): %s", info.title_id, e)
+        return False
+    finally:
+        if pending is not None:
+            pending.unlink(missing_ok=True)
+    return True

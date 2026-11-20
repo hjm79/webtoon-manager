@@ -10,6 +10,7 @@ zip 내부 이미지(페이지 수/개별 페이지 서빙) + 회차 겹침(리�
 import asyncio
 import logging
 import weakref
+import zipfile
 
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import Response
@@ -36,14 +37,26 @@ def _overlap_limiter() -> asyncio.Semaphore:
 def _resolve_and_authorize(chapter_id: str, profile: dict | None):
     """이 회차가 속한 시리즈를 찾고, 프로필 접근권한 + 접속 가능 시간대까지 확인한다.
     문제 있으면 예외를 던진다."""
-    zip_path = catalog.get_chapter_zip_path(chapter_id)
-    if not zip_path:
-        raise HTTPException(404, "chapter not found")
     series, index = catalog.find_chapter_position(chapter_id)
-    if series is not None:
-        access_control.ensure_series_accessible(profile, series["id"])
-        access_control.ensure_reading_time_allowed(profile, series["id"], chapter_id)
-    return zip_path, series, index
+    if series is None or index is None:
+        raise HTTPException(404, "chapter not found")
+    access_control.ensure_series_accessible(profile, series["id"])
+    access_control.ensure_reading_time_allowed(profile, series["id"], chapter_id)
+    return series["chapters"][index]["path"], series, index
+
+
+def _page_manifest(zip_path: str, dimensions: bool, include_generation: bool) -> dict:
+    for _ in range(2):
+        zip_generation = services.chapter_zip_generation(zip_path) if include_generation else None
+        names = scan.list_zip_image_names(zip_path)
+        result = {"page_count": len(names)}
+        if dimensions:
+            result["page_sizes"] = page_geometry.chapter_page_sizes(zip_path)
+        if zip_generation is None:
+            return result
+        if zip_generation == services.chapter_zip_generation(zip_path):
+            return {**result, "zip_generation": zip_generation}
+    raise HTTPException(409, "chapter file changed; reload the chapter")
 
 
 @router.get("/api/chapters/{chapter_id}/pages")
@@ -51,19 +64,19 @@ async def chapter_pages(chapter_id: str, request: Request, dimensions: bool = Fa
     profile = access_control.get_profile(request)
     zip_path, series, index = _resolve_and_authorize(chapter_id, profile)
     generation = None
-    if start_reading and profile and series and access_control.ensure_reading_time_allowed(profile, series["id"], chapter_id):
+    if start_reading and profile and access_control.ensure_reading_time_allowed(profile, series["id"], chapter_id):
         generation = db.register_progress_intent(access_control.progress_actor_key(profile), series["id"])
-    platform = series["platform"] if series else ""
-    names = await services.run_platform_io(platform, scan.list_zip_image_names, zip_path)
-    if generation is not None and names:
+    platform = series["platform"]
+    result = await services.run_platform_io(platform, _page_manifest, zip_path, dimensions, start_reading)
+    if generation is not None and result["page_count"]:
         access_control.ensure_series_accessible(profile, series["id"])
         db.grant_profile_reading_session(access_control.progress_actor_key(profile), series["id"], generation,
                                          profile["id"], chapter_id)
+    if start_reading:
+        result["reading_coverage"] = await asyncio.to_thread(db.get_reading_coverage,
+            access_control.progress_actor_key(profile), series["id"], chapter_id, result["zip_generation"])
     # 지금 회차를 여는 김에 다음 회차 zip도 서버가 먼저 읽어 둔다(응답을 기다리게 하지 않는 백그라운드 작업)
     warmup.schedule_next_chapter_warmup(series, index)
-    result = {"page_count": len(names)}
-    if dimensions:
-        result["page_sizes"] = await services.run_platform_io(platform, page_geometry.chapter_page_sizes, zip_path)
     return result
 
 
@@ -77,7 +90,7 @@ async def chapter_overlap(chapter_id: str, request: Request):
     zip_path, series, index = _resolve_and_authorize(chapter_id, profile)
 
     prev_chapter = None
-    if series is not None and index is not None and index > 0:
+    if index > 0:
         prev_chapter = series["chapters"][index - 1]
 
     if not prev_chapter:
@@ -109,9 +122,16 @@ async def chapter_page(chapter_id: str, page_index: int, request: Request):
     # 요청이다. 네트워크 드라이브의 회차를 읽을 때 이게 막히면 서비스 전체 체감 지연이
     # 제일 커서, 반드시 격리된 전용 스레드풀(run_platform_io)로 보내 로컬 회차 열람에는
     # 절대 영향이 없게 한다.
-    platform = series["platform"] if series else ""
-    result = await services.run_platform_io(platform, services.read_chapter_page_bytes, zip_path, page_index)
+    platform = series["platform"]
+    try:
+        result = await services.run_platform_io(platform, services.chapter_page_for_http, zip_path, page_index,
+                                                request.headers.get("if-none-match", ""))
+    except (FileNotFoundError, zipfile.BadZipFile):
+        raise HTTPException(404, "page not found") from None
     if result is None:
         raise HTTPException(404, "page not found")
-    data, media_type = result
-    return Response(content=data, media_type=media_type)
+    etag, content = result
+    if content is None:
+        return Response(status_code=304, headers={"ETag": etag})
+    data, media_type = content
+    return Response(content=data, media_type=media_type, headers={"ETag": etag})

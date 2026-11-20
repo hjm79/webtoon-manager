@@ -34,6 +34,11 @@ const { makeApp, sleep, idle, ok, done } = require("./harness");
   ok(/복원 완료/.test($("backup-result").textContent) && !!rep.querySelector("button"), "복원 완료 문구 + 새로고침 버튼");
   rep.querySelector("button").click(); ok(true, "새로고침 버튼 동작(예외 없음)");
 
+  response = { status: "restored_with_warnings", warnings: ["대기열 재개를 완료하지 못했습니다."], reenter: [] };
+  await pick({ webtoons: [] });
+  ok(/복원 완료.*후속 작업/.test($("backup-result").textContent) && !rep.classList.contains("hidden") && w.__reloads === 0,
+    "데이터가 저장된 뒤 후속 작업이 실패한 경우를 복원 거부와 구분");
+
   // 3) 서버가 거부하면: 실패 문구, 결과 영역 숨김, 새로고침 안 함
   w.__reloads = 0; fail = "백업 파일이 아닌 것 같습니다 (백업 데이터가 하나도 들어 있지 않습니다).";
   await pick({ foo: 1 });

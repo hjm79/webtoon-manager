@@ -100,6 +100,24 @@ const { makeApp, sleep, idle, ok, done } = require("./harness");
   $("btn-manual-record-undone").click(); await idle();
   ok(/1화부터/.test(confirms[1]) && /받을 대상/.test(confirms[1]), "네이버 확인 창(받지 않은 것으로): " + confirms[1]);
   ok(posts[1][1].downloaded === false && alerts.some((m) => /다시 2화까지/.test(m)), "네이버 경고 표시: " + alerts.join("|"));
+
+  naver = { ...naver, individual_records: true };
+  await analyze("333");
+  setChecked("manual-ep-checkbox", 1);
+  setChecked("manual-ep-checkbox", 3);
+  naverRecordResponse = { previous: 0, last_downloaded_no: 3, marked: [1, 3], ignored_locked: [], warning: null, individual_records: true };
+  $("btn-manual-record-done").click(); await idle();
+  ok(confirms.at(-1).includes("선택한 2개 회차") && !confirms.at(-1).includes("까지"), "네이버 범위 구독 확인: " + confirms.at(-1));
+  ok(JSON.stringify(posts.at(-1)[1].episode_nos) === JSON.stringify([1, 3]) && /2개 회차의 받은 기록을 추가/.test(alerts.at(-1)),
+    "네이버 범위 구독은 선택한 회차만 기록: " + alerts.at(-1));
+
+  setChecked("manual-ep-checkbox", 1);
+  naverRecordResponse = { previous: 3, last_downloaded_no: 3, marked: [1], ignored_locked: [], warning: null, individual_records: true };
+  $("btn-manual-record-undone").click(); await idle();
+  ok(confirms.at(-1).includes("선택한 1개 회차") && confirms.at(-1).includes("구독 범위"), "네이버 범위 구독 기록 삭제 확인: " + confirms.at(-1));
+  ok(JSON.stringify(posts.at(-1)[1]) === JSON.stringify({ title_id: "333", episode_nos: [1], downloaded: false }) && /1개 회차의 받은 기록을 지웠/.test(alerts.at(-1)),
+    "네이버 범위 구독 기록 삭제: " + alerts.at(-1));
+
   // 구독 안 함이면 기록 영역이 숨는다
   naver = { ...naver, subscription: null }; await analyze("333");
   setChecked("manual-ep-checkbox", 1); ok(!shown("btn-manual-record-done") && !shown("btn-manual-record-undone"), "네이버 구독 안 함: 기록 버튼이 없다");

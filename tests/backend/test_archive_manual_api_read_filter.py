@@ -24,7 +24,8 @@ left = lambda d: sorted(p.name for p in Path(d).glob("*.zip"))
 
 READ = {"value": frozenset()}
 asked = []
-async def fake_read(session, base_url, series_name, timeout_seconds):
+async def fake_read(session, base_url, series_name, timeout_seconds, *, platform):
+    assert platform == "naver"
     asked.append(series_name); return READ["value"]
 webtoon_server_client.fetch_read_numbers = fake_read
 
@@ -53,6 +54,7 @@ async def main():
         # Scenario 3: 읽음 상태를 알 수 없으면(조회 실패) 그 작품은 옮기지 않고 로그에 남긴다
         src = make("수동API작", [21, 22, 23]); READ["value"] = None; log = await run_and_wait(c, title_ids=["911"])
         assert left(src) == ["0021 21화.zip", "0022 22화.zip", "0023 23화.zip"] and "읽음 상태를 확인하지 못해" in log, (left(src), log)
+        assert job_status.snapshot()["archive"]["status"] == "error"
         print("3) 조회 실패는 건너뜀 OK")
         # Scenario 4: 완결 처리로 이동은 읽음 상태를 보지 않는다(조회도 안 한다)
         src = make("수동API작", [31, 32]); READ["value"] = frozenset(); asked.clear(); await run_and_wait(c, title_ids=["911"], full_move=True)

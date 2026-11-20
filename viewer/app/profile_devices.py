@@ -71,14 +71,39 @@ def is_device_registered(profile_id: str, device_id: str | None) -> bool:
     return row is not None
 
 
-def register_device(profile_id: str, device_id: str, label: str) -> None:
+def _insert_device(conn, profile_id: str, device_id: str, label: str) -> None:
     now = datetime.utcnow().isoformat()
+    conn.execute(
+        "INSERT INTO profile_devices (profile_id, device_id, label, created_at, last_seen_at) VALUES (?, ?, ?, ?, ?)",
+        (profile_id, device_id, label, now, now),
+    )
+
+
+def register_device(profile_id: str, device_id: str, label: str) -> None:
     with db.db_connection() as conn:
-        conn.execute(
-            "INSERT INTO profile_devices (profile_id, device_id, label, created_at, last_seen_at) VALUES (?, ?, ?, ?, ?)",
-            (profile_id, device_id, label, now, now),
-        )
+        _insert_device(conn, profile_id, device_id, label)
         conn.commit()
+
+
+def access_status(profile_id: str, device_id: str, label: str) -> str:
+    """Check membership and claim a free slot in one write transaction."""
+    with db.db_connection() as conn, conn:
+        conn.execute("BEGIN IMMEDIATE")
+        updated = conn.execute(
+            "UPDATE profile_devices SET last_seen_at = ? WHERE profile_id = ? AND device_id = ?",
+            (datetime.utcnow().isoformat(), profile_id, device_id),
+        )
+        if updated.rowcount:
+            return "approved"
+        count = conn.execute("SELECT COUNT(*) FROM profile_devices WHERE profile_id = ?", (profile_id,)).fetchone()[0]
+        if count < MAX_DEVICES_PER_PROFILE:
+            _insert_device(conn, profile_id, device_id, label)
+            conn.execute("DELETE FROM profile_device_requests WHERE profile_id = ? AND device_id = ?", (profile_id, device_id))
+            return "approved"
+        pending = conn.execute(
+            "SELECT 1 FROM profile_device_requests WHERE profile_id = ? AND device_id = ?", (profile_id, device_id),
+        ).fetchone()
+        return "pending" if pending else "needs_request"
 
 
 def touch_device(profile_id: str, device_id: str) -> None:
@@ -100,36 +125,19 @@ def list_devices(profile_id: str) -> list[dict]:
     return [{"device_id": r[0], "label": r[1], "created_at": r[2], "last_seen_at": r[3]} for r in rows]
 
 
-def _remove_oldest_device(profile_id: str) -> None:
-    """마지막 접속(last_seen_at)이 가장 오래된 기기 하나를 지운다 - "등록한 지"가
-    아니라 "안 쓴 지" 오래된 걸 기준으로 하므로, 매일 쓰는 기기는 절대 교체되지 않는다."""
-    with db.db_connection() as conn:
-        row = conn.execute(
-            "SELECT device_id FROM profile_devices WHERE profile_id = ? ORDER BY last_seen_at ASC LIMIT 1",
-            (profile_id,),
-        ).fetchone()
-        if row:
-            conn.execute(
-                "DELETE FROM profile_devices WHERE profile_id = ? AND device_id = ?", (profile_id, row[0])
-            )
-            conn.commit()
-
-
-def create_pending_request(profile_id: str, device_id: str, label: str) -> None:
-    """이미 같은 (프로필, 기기) 대기 요청이 있으면 그대로 두고 새로 안 만든다 - 요청
-    화면을 닫았다가 같은 기기로 다시 들어와도 중복 요청이 안 쌓이게."""
-    with db.db_connection() as conn:
-        existing = conn.execute(
-            "SELECT 1 FROM profile_device_requests WHERE profile_id = ? AND device_id = ?",
-            (profile_id, device_id),
-        ).fetchone()
-        if existing:
-            return
-        conn.execute(
-            "INSERT INTO profile_device_requests (profile_id, device_id, label, requested_at) VALUES (?, ?, ?, ?)",
-            (profile_id, device_id, label, datetime.utcnow().isoformat()),
+def create_pending_request(profile_id: str, device_id: str, label: str) -> bool:
+    """Return True only for a new request from an unregistered device."""
+    with db.db_connection() as conn, conn:
+        inserted = conn.execute(
+            """
+            INSERT INTO profile_device_requests (profile_id, device_id, label, requested_at)
+            SELECT ?, ?, ?, ? WHERE NOT EXISTS (
+                SELECT 1 FROM profile_devices WHERE profile_id = ? AND device_id = ?
+            ) ON CONFLICT (profile_id, device_id) DO NOTHING
+            """,
+            (profile_id, device_id, label, datetime.utcnow().isoformat(), profile_id, device_id),
         )
-        conn.commit()
+        return bool(inserted.rowcount)
 
 
 def get_pending_request(profile_id: str, device_id: str | None) -> dict | None:
@@ -167,17 +175,32 @@ def reject_request(profile_id: str, device_id: str) -> None:
 def approve_request(profile_id: str, device_id: str) -> None:
     """이미 2대가 등록되어 있으면 가장 오래(안 쓴) 기기를 먼저 지우고, 새 기기를
     등록한 뒤 대기 요청을 정리한다."""
-    pending = get_pending_request(profile_id, device_id)
-    if pending is None:
-        return
-    if count_devices(profile_id) >= MAX_DEVICES_PER_PROFILE:
-        _remove_oldest_device(profile_id)
-    register_device(profile_id, device_id, pending["label"])
-    with db.db_connection() as conn:
+    with db.db_connection() as conn, conn:
+        conn.execute("BEGIN IMMEDIATE")
+        pending = conn.execute(
+            "SELECT label FROM profile_device_requests WHERE profile_id = ? AND device_id = ?", (profile_id, device_id),
+        ).fetchone()
+        if pending is None:
+            return
+        registered = conn.execute(
+            "SELECT 1 FROM profile_devices WHERE profile_id = ? AND device_id = ?", (profile_id, device_id),
+        ).fetchone()
+        if registered is None:
+            count = conn.execute("SELECT COUNT(*) FROM profile_devices WHERE profile_id = ?", (profile_id,)).fetchone()[0]
+            if count >= MAX_DEVICES_PER_PROFILE:
+                conn.execute(
+                    """
+                    DELETE FROM profile_devices WHERE profile_id = ? AND device_id IN (
+                        SELECT device_id FROM profile_devices WHERE profile_id = ?
+                        ORDER BY last_seen_at, device_id LIMIT ?
+                    )
+                    """,
+                    (profile_id, profile_id, count - MAX_DEVICES_PER_PROFILE + 1),
+                )
+            _insert_device(conn, profile_id, device_id, pending[0])
         conn.execute(
             "DELETE FROM profile_device_requests WHERE profile_id = ? AND device_id = ?", (profile_id, device_id)
         )
-        conn.commit()
 
 
 def delete_all_data_for_profile(profile_id: str) -> None:

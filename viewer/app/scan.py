@@ -24,7 +24,7 @@ log = logging.getLogger("webtoon-server")
 
 LIBRARY_ROOT = os.environ.get("LIBRARY_ROOT", "/library")
 
-IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".gif"}
+IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".gif", ".avif"}
 ARCHIVE_EXTS = {".zip", ".cbz"}
 COVER_FILENAMES = {"cover.jpg", "cover.jpeg", "cover.png", "cover.webp"}
 INFO_FILENAME = "info.xml"
@@ -426,7 +426,7 @@ def iter_platform_series_streaming(platform: str):
 # 키에 크기/수정시각(mtime)을 넣어서 파일이 바뀌면 자동으로 새로 읽는다. 항목은 이름 몇십 개짜리
 # 튜플이라 가볍고, 오래 안 쓴 것부터 밀려난다.
 ZIP_NAMES_CACHE_SIZE = 512
-_zip_names_cache: "OrderedDict[tuple[str, int, int], tuple[str, ...]]" = OrderedDict()
+_zip_names_cache: "OrderedDict[tuple[str, int, int, int, int, int], tuple[str, ...]]" = OrderedDict()
 _zip_names_lock = threading.Lock()
 
 
@@ -445,13 +445,17 @@ def _image_names_in(zf: zipfile.ZipFile) -> list[str]:
     return names
 
 
+def zip_file_identity(file_stat: os.stat_result) -> tuple[int, int, int, int, int]:
+    return (file_stat.st_dev, file_stat.st_ino, file_stat.st_mtime_ns, file_stat.st_ctime_ns, file_stat.st_size)
+
+
 def list_zip_image_names(zip_path: str, zf: zipfile.ZipFile | None = None) -> list[str]:
     """zip 안의 이미지 파일명을 자연 정렬 순서(1,2,3...10)로 반환. 같은 파일이면 캐시에서 준다.
 
     zf: 호출부가 이미 이 zip을 열어 두었으면 넘긴다(캐시에 없을 때 다시 열지 않고 그 핸들로 읽는다).
     """
-    stat = os.stat(zip_path)
-    key = (zip_path, stat.st_mtime_ns, stat.st_size)
+    file_stat = os.stat(zip_path) if zf is None else os.fstat(zf.fp.fileno())
+    key = (zip_path, *zip_file_identity(file_stat))
     with _zip_names_lock:
         cached = _zip_names_cache.get(key)
         if cached is not None:
@@ -462,6 +466,7 @@ def list_zip_image_names(zip_path: str, zf: zipfile.ZipFile | None = None) -> li
     else:
         with zipfile.ZipFile(zip_path) as opened:
             names = _image_names_in(opened)
+            key = (zip_path, *zip_file_identity(os.fstat(opened.fp.fileno())))
     with _zip_names_lock:
         _zip_names_cache[key] = tuple(names)
         _zip_names_cache.move_to_end(key)

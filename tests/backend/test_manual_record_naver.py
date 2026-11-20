@@ -6,10 +6,12 @@
 - 구독 중인 작품만, 잠긴 회차(유료/미공개)는 기록할 수 없다. 분석 화면에는 기록으로만 받은 것이 구분돼 보인다(recorded).
 """
 import asyncio
+from unittest.mock import AsyncMock, patch
 
 import httpx
 
-from app import db, manual_download, naver_api, repository
+from app import db, manual_download, naver_api, repository, subscription_scope
+from app.api import workflow
 from app.models import EpisodeInfo, TitleInfo
 db.get_connection()
 import app.main as m
@@ -72,6 +74,24 @@ async def main():
         r = await post({"title_id": TID, "episode_nos": [23], "downloaded": True}); assert r.status_code == 400 and "잠긴" in r.json()["detail"], r.text
         assert (await post({"title_id": TID, "episode_nos": [500], "downloaded": True})).status_code == 400
         assert (await post({"title_id": "abc", "episode_nos": [1], "downloaded": True})).status_code == 400
+        # 범위 구독은 선택한 회차의 기록만 반영하고, 나머지 선택 범위는 보존한다.
+        rows = [{"episode_no": ep.episode_no, "available": not ep.is_locked, "owned": False} for ep in EPISODES]
+        subscription_scope.set_choice("naver", TID, "selected", rows, episode_nos=[2, 6])
+        repository.add_episode_history(TID, INFO.title_name, 2, "2화", "success")
+        assert (await post({"title_id": TID, "episode_nos": [2, 6], "downloaded": True})).status_code == 200
+        assert subscription_scope.get("naver", TID)["pending_initial"] == []
+        reopened = await post({"title_id": TID, "episode_nos": [2, 5], "downloaded": False})
+        assert reopened.status_code == 200 and reopened.json()["individual_records"] and last() == 6
+        scope = subscription_scope.get("naver", TID)
+        assert scope["pending_initial"] == [2] and scope["completed_numbers"] == [6]
+        by_no = {row["episode_no"]: row for row in (await analyze()).json()["episodes"]}
+        assert not by_no[2]["owned"] and not by_no[5]["owned"] and by_no[6]["recorded"]
+        with patch.object(workflow.daily_plus, "current_ids", AsyncMock(return_value=set())):
+            preview = await c.post("/api/workflow/preview", json={"platform": "naver", "title_id": TID})
+        assert preview.status_code == 200, preview.text
+        by_no = {row["episode_no"]: row for row in preview.json()["episodes"]}
+        assert not by_no[2]["owned"] and by_no[6]["owned"]
+
         # Scenario 5: 작품 정보를 못 받으면 502(아무것도 바꾸지 않는다)
         async def none_info(session, title_id, timeout): return None
         naver_api.fetch_title_info = none_info

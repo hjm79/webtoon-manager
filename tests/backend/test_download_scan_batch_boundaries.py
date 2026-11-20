@@ -28,7 +28,7 @@ async def naver_boundaries():
     requests, attempts, rests = [], [], []
     async def download(**kwargs):
         attempts.append(kwargs["episode"].episode_no)
-        return True, None
+        return True, folder / f"[{attempts[-1]:04d}]"
     def archive(*args, **kwargs):
         path = folder / f"{attempts[-1]}.zip"
         path.write_bytes(b"complete")
@@ -53,7 +53,7 @@ async def naver_boundaries():
     async def unsubscribe_after_file(**kwargs):
         attempts.append(kwargs["episode"].episode_no)
         repository.set_status("601", repository.STATUS_UNSUBSCRIBED)
-        return True, None
+        return True, folder / f"[{attempts[-1]:04d}]"
     with patch.object(nd, "download_single_episode", unsubscribe_after_file), patch.object(nd, "zip_episode_folders", archive), \
          patch.object(nd.asyncio, "sleep", nothing), patch.object(viewer_scan, "request", requests.append):
         await nd._download_pending_batches(None, SETTINGS, "601", plan, [])

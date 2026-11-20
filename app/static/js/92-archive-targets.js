@@ -422,7 +422,7 @@ async function refreshArchiveJobStatus() {
   }
   const s = statuses.archive;
   if (!s) return;
-  document.getElementById("archive-status-badge").textContent = s.status;
+  document.getElementById("archive-status-badge").textContent = JOB_OUTCOME_LABEL[s.status] || s.status;
   renderJobLog("archive", s.log || []);
   document.getElementById("btn-run-archive-now").disabled = s.status === "running";
   updateArchiveCancelButton(s.status === "running");
@@ -467,7 +467,7 @@ async function resumeArchiveJobStatusIfRunning() {
   const s = statuses.archive;
   if (!s) return;
   if (s.status === "running") {
-    document.getElementById("archive-status-badge").textContent = s.status;
+    document.getElementById("archive-status-badge").textContent = JOB_OUTCOME_LABEL[s.status] || s.status;
     renderJobLog("archive", s.log || []);
     document.getElementById("btn-run-archive-now").disabled = true;
     updateArchiveCancelButton(true);
@@ -475,7 +475,7 @@ async function resumeArchiveJobStatusIfRunning() {
     archiveRunFullMove = null; // 이 화면이 시작한 실행이 아니라서 종류를 모른다 — 끝나면 목록만 갱신
     startArchiveJobPolling();
   } else {
-    document.getElementById("archive-status-badge").textContent = "idle";
+    document.getElementById("archive-status-badge").textContent = JOB_OUTCOME_LABEL.idle;
     renderJobLog("archive", []);
     document.getElementById("btn-run-archive-now").disabled = false;
   }
@@ -629,7 +629,7 @@ async function refreshBulkMoveJobStatus() {
     document.getElementById("btn-run-bulk-move").disabled = false;
     const resultEl = document.getElementById("bulk-move-result");
     resultEl.style.color = s.status === "error" ? "" : "";
-    resultEl.textContent = s.status === "success" ? "이동 완료했습니다." : "이동 중 오류가 발생했습니다 (아래 로그 확인).";
+    resultEl.textContent = s.status === "success" ? "이동 완료했습니다." : `${JOB_OUTCOME_LABEL[s.status] || s.status} · 아래 로그를 확인해주세요.`;
     loadArchiveHistory(1);
   }
 }

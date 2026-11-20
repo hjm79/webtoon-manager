@@ -13,6 +13,8 @@ import shutil
 import zipfile
 from pathlib import Path
 
+from app.file_utils import EPISODE_DOWNLOAD_STAGE_PREFIX
+
 log = logging.getLogger(__name__)
 
 _BRACKET_NUMBER_RE = re.compile(r"\[(\d+)\]")
@@ -56,12 +58,20 @@ def zip_episode_folders(webtoon_dir: Path, *, preserve_numbers: bool = False,
     # 어긋나는 경우가 있어서, 폴더 생성(=다운로드) 순서를 실제 순서로 신뢰하고
     # os.walk가 나열하는 순서 그대로 처리한다 (change.py 원본 동작과 동일).
     episode_dirs: list[Path] = []
+    attempt_dir = None
     if only_episode_dir is not None:
-        if only_episode_dir.parent.resolve() != webtoon_dir.resolve() or not only_episode_dir.is_dir():
+        parent = only_episode_dir.parent
+        if (parent.name.startswith(EPISODE_DOWNLOAD_STAGE_PREFIX)
+                and parent.parent.resolve() == webtoon_dir.resolve() and not parent.is_symlink()):
+            attempt_dir = parent
+        elif parent.resolve() != webtoon_dir.resolve():
+            return []
+        if not only_episode_dir.is_dir() or only_episode_dir.is_symlink():
             return []
         episode_dirs.append(only_episode_dir)
     else:
         for dirpath, dirnames, _files in os.walk(webtoon_dir):
+            dirnames[:] = [name for name in dirnames if not name.startswith(EPISODE_DOWNLOAD_STAGE_PREFIX)]
             for dirname in dirnames:
                 episode_dirs.append(Path(dirpath) / dirname)
 
@@ -70,7 +80,7 @@ def zip_episode_folders(webtoon_dir: Path, *, preserve_numbers: bool = False,
         if not match:
             continue
 
-        parent_dir = episode_dir.parent
+        parent_dir = webtoon_dir if attempt_dir is not None else episode_dir.parent
         folder_num = int(match.group(1))
         assigned_num = folder_num if preserve_numbers else _next_zip_number(parent_dir, folder_num)
         number_prefix = str(assigned_num).zfill(3)
@@ -96,11 +106,17 @@ def zip_episode_folders(webtoon_dir: Path, *, preserve_numbers: bool = False,
                 if not zf.namelist():
                     raise ValueError("압축할 회차 이미지가 없습니다.")
             os.replace(part_path, zip_path)
-            shutil.rmtree(episode_dir)
-            created_zip_names.append(zip_filename)
-            log.info("압축 완료: %s", zip_filename)
         except Exception as e:
             part_path.unlink(missing_ok=True)
             log.error("압축 중 오류 발생 (%s): %s", episode_dir, e)
+            if attempt_dir is not None:
+                shutil.rmtree(attempt_dir, ignore_errors=True)
+            continue
+        created_zip_names.append(zip_filename)
+        log.info("압축 완료: %s", zip_filename)
+        try:
+            shutil.rmtree(attempt_dir or episode_dir)
+        except OSError as e:
+            log.warning("압축 후 원본 폴더를 지우지 못했습니다 (%s): %s", episode_dir, e)
 
     return created_zip_names

@@ -65,7 +65,7 @@ def _bulk_move_dest_exists(kind: str, dest_ctx, rel_path: str, rclone_config_pat
     remote, base_path = dest_ctx
     rel = PurePosixPath(rel_path)
     check_dir = f"{base_path}/{rel.parent}" if str(rel.parent) != "." else base_path
-    return rclone_client.file_exists(rclone_config_path, remote, check_dir, rel.name, ignore_empty=True)
+    return rclone_client.file_exists(rclone_config_path, remote, check_dir, rel.name, ignore_empty=True, strict=True)
 
 
 def _bulk_move_resolve_final_rel(
@@ -96,7 +96,7 @@ def _bulk_move_single_file(
     rel_path: str, final_rel: str, rclone_config_path: str,
 ) -> None:
     """파일 하나를 원본에서 목적지(final_rel 경로)로 옮긴다.
-    로컬-로컬은 shutil로, 로컬→원격은 올라간 크기를 확인하는 업로드로, 원본이 원격인 경우는 rclone moveto로 처리한다(rclone은 복사가 끝나기 전에는 원본을 지우지 않는다)."""
+    로컬-로컬은 shutil로, 로컬→원격은 올라간 내용을 확인하는 업로드로, 원본이 원격인 경우는 rclone moveto로 처리한다."""
     if src_kind == "local" and dest_kind == "local":
         dest_abs = dest_ctx / final_rel
         dest_abs.parent.mkdir(parents=True, exist_ok=True)
@@ -104,20 +104,11 @@ def _bulk_move_single_file(
         return
 
     if src_kind == "local" and dest_kind != "local":
-        # 로컬 원본을 원격으로 올릴 때는 올라간 크기를 확인한 뒤에만 원본을 지우는 업로드를 쓴다(rclone_client.move_file_to_remote). 실패하면 원본은 그대로이고,
-        # 업로드를 시작하면서 생긴 0KB 빈 파일만 정리한다(크기가 정확히 0일 때만, 못 지워도 무시).
+        # The staged upload manages its own temporary object.
         remote, base_path = dest_ctx
         dest_dir, _, dest_name = final_rel.rpartition("/")
         dest_path = f"{base_path}/{dest_dir}" if base_path and dest_dir else (base_path or dest_dir)
-        try:
-            rclone_client.move_file_to_remote(rclone_config_path, str(src_ctx / rel_path), remote, dest_path, dest_name)
-        except Exception:
-            try:
-                if (src_ctx / rel_path).exists():
-                    rclone_client.delete_empty_file(rclone_config_path, remote, dest_path, dest_name)
-            except Exception as cleanup_error:  # 정리가 실패해도 원래의 업로드 실패를 그대로 알린다
-                log.warning("0KB 찌꺼기 정리 중 오류(무시): %s", cleanup_error)
-            raise
+        rclone_client.move_file_to_remote(rclone_config_path, str(src_ctx / rel_path), remote, dest_path, dest_name)
         return
 
     if src_kind == "local":
@@ -288,21 +279,10 @@ def _move_folder_files(rel_files: list, move: FolderMove, report: ProgressReport
 
 def _transfer_folder_metadata(
     src_kind: str, src_ctx, dest_kind: str, dest_ctx, meta_names: list[str], regenerated_local_cover: "str | None",
-    keep_last: bool, rclone_config_path: str, display_name: str,
-) -> None:
+    keep_last: bool, rclone_config_path: str, display_name: str, report: ProgressReport,
+) -> bool:
     """info.xml/cover를 옮긴다 — 주기/수동은 복사(커버는 목적지에 이미 있으면 건너뜀), 완결 처리는 이동. 새로 받은 임시 표지가 있으면 목적지
-    cover.jpg로 올리고 임시 파일은 항상 지운다. 어느 쪽이든 실패는 무시하고 계속한다(이동 자체를 막지 않는다)."""
-    for name in meta_names:
-        try:
-            if keep_last:
-                if name.startswith("cover.") and _bulk_move_dest_exists(dest_kind, dest_ctx, name, rclone_config_path):
-                    continue
-                _generic_copy_file(src_kind, src_ctx, dest_kind, dest_ctx, name, rclone_config_path)
-            else:
-                _generic_move_file(src_kind, src_ctx, dest_kind, dest_ctx, name, rclone_config_path)
-        except Exception as e:
-            log.warning("폴더 대상 메타데이터 이동 실패 (%s/%s, 무시하고 계속): %s", display_name, name, e)
-
+    cover.jpg로 올린다. 실패는 기록하고 다른 메타데이터를 계속 처리한다."""
     if regenerated_local_cover is not None:
         try:
             dest_spec = _generic_file_spec(dest_kind, dest_ctx, "cover.jpg")
@@ -312,9 +292,30 @@ def _transfer_folder_metadata(
             else:
                 rclone_client.copyto(rclone_config_path, str(regenerated_local_cover), dest_spec)
         except Exception as e:
-            log.warning("카카오 표지 업로드 실패 (%s, 무시하고 계속): %s", display_name, e)
-        finally:
-            Path(regenerated_local_cover).unlink(missing_ok=True)
+            log.warning("카카오 표지 업로드 실패 (%s): %s", display_name, e)
+            report.failure(display_name, "cover.jpg", f"갱신한 표지 전송 실패: {e}")
+            return False  # Keep the original metadata so a retry can regenerate the cover.
+
+    succeeded = True
+    for name in meta_names:
+        try:
+            if regenerated_local_cover is not None and name == "cover.jpg":
+                if not keep_last:
+                    remote, path = src_ctx
+                    rclone_client.delete_file(rclone_config_path, remote, path, name)
+                continue
+            if keep_last:
+                if name.startswith("cover.") and _bulk_move_dest_exists(dest_kind, dest_ctx, name, rclone_config_path):
+                    continue
+                _generic_copy_file(src_kind, src_ctx, dest_kind, dest_ctx, name, rclone_config_path)
+            else:
+                _generic_move_file(src_kind, src_ctx, dest_kind, dest_ctx, name, rclone_config_path)
+        except Exception as e:
+            log.warning("폴더 대상 메타데이터 이동 실패 (%s/%s): %s", display_name, name, e)
+            report.failure(display_name, name, f"메타데이터 전송 실패: {e}")
+            succeeded = False
+
+    return succeeded
 
 
 def _cleanup_source_folder(src_kind: str, src_ctx, rclone_config_path: str) -> None:
@@ -329,7 +330,7 @@ def _cleanup_source_folder(src_kind: str, src_ctx, rclone_config_path: str) -> N
 def _archive_folder_target(
     target, policy: str, rclone_config_path: str, archive_root: str, keep_last: bool,
     progress_callback=None, conflict_log: list | None = None, failure_log: list | None = None,
-) -> int:
+) -> tuple[int, bool]:
     """폴더-폴더 대상(웹툰 레코드가 없는 카카오웹툰 등) 아카이빙. _archive_title과
     같은 규칙(마지막 파일 보존/완결 전체이동, 파일명 템플릿, 카카오 표지 갱신,
     이력 기록)을 쓰되, 다운로드 루트의 title_id 대신 등록된 원본 폴더를 그대로 쓴다.
@@ -337,14 +338,15 @@ def _archive_folder_target(
     원본이 로컬이면 회차 zip 파일명 템플릿({page_count} 포함)을 전부 지원한다.
     원본이 rclone이면 zip 내용을 굳이 내려받지 않기 위해 {page_count}가 들어간
     템플릿은 적용하지 않고(파일마다 안전하게 원본 이름 유지) 나머지 이동/이름변경은
-    그대로 서버측으로 처리한다 — info.xml만 가볍게 읽어서 카카오 표지 갱신은 그대로 지원한다."""
+    그대로 서버측으로 처리한다 — info.xml만 가볍게 읽어서 카카오 표지 갱신은 그대로 지원한다.
+    반환값은 이동한 회차 개수와 원본 폴더에 남은 파일이 없는지 여부다."""
     display_name = target.display_name or _derive_folder_display_name(target.source_dest_type, target.source_path)
     trigger_type = "manual_finish" if not keep_last else "manual"
     template = _get_effective_filename_template(target.filename_template_preset_id)
 
     scanned = _scan_folder_source(target, rclone_config_path, archive_root, display_name, failure_log)
     if scanned is None:
-        return 0
+        return 0, False
     src_kind, src_ctx, rel_files, meta_names = scanned
 
     regenerated_local_cover = None
@@ -354,28 +356,50 @@ def _archive_folder_target(
     if keep_last and len(rel_files) > 0:
         rel_files = rel_files[:-1]  # 마지막(가장 큰 번호)은 보존
 
-    if not rel_files and not meta_names and regenerated_local_cover is None:
-        return 0
+    report = ProgressReport(progress_callback, conflict_log, failure_log)
+    moved = 0
+    metadata_succeeded = True
+    try:
+        if rel_files or meta_names or regenerated_local_cover is not None:
+            dest = _prepare_folder_dest(target, rclone_config_path, archive_root, display_name, failure_log)
+            if dest is None:
+                return 0, False
+            dest_kind, dest_ctx = dest
+            moved = _move_folder_files(
+                rel_files,
+                FolderMove(
+                    target=target, src_kind=src_kind, src_ctx=src_ctx, dest_kind=dest_kind, dest_ctx=dest_ctx, policy=policy, template=template,
+                    display_name=display_name, trigger_type=trigger_type, rclone_config_path=rclone_config_path,
+                ),
+                report,
+            )
+            if cancel.is_requested():
+                return moved, False
+            metadata_succeeded = _transfer_folder_metadata(
+                src_kind, src_ctx, dest_kind, dest_ctx, meta_names, regenerated_local_cover,
+                keep_last or moved < len(rel_files), rclone_config_path, display_name, report,
+            )
+    finally:
+        if regenerated_local_cover is not None:
+            Path(regenerated_local_cover).unlink(missing_ok=True)
 
-    dest = _prepare_folder_dest(target, rclone_config_path, archive_root, display_name, failure_log)
-    if dest is None:
-        return 0
-    dest_kind, dest_ctx = dest
-
-    moved = _move_folder_files(
-        rel_files,
-        FolderMove(
-            target=target, src_kind=src_kind, src_ctx=src_ctx, dest_kind=dest_kind, dest_ctx=dest_ctx, policy=policy, template=template,
-            display_name=display_name, trigger_type=trigger_type, rclone_config_path=rclone_config_path,
-        ),
-        ProgressReport(progress_callback, conflict_log, failure_log),
-    )
-    if cancel.is_requested():
-        return moved  # 중단했으면 정보 파일 복사/이동과 원본 폴더 정리도 하지 않는다
-    _transfer_folder_metadata(src_kind, src_ctx, dest_kind, dest_ctx, meta_names, regenerated_local_cover, keep_last, rclone_config_path, display_name)
-    if not keep_last:
-        _cleanup_source_folder(src_kind, src_ctx, rclone_config_path)
-    return moved
+    if keep_last or cancel.is_requested() or moved < len(rel_files) or not metadata_succeeded:
+        return moved, False
+    try:
+        if src_kind == "local":
+            _cleanup_source_folder(src_kind, src_ctx, rclone_config_path)
+            empty = not src_ctx.exists()
+        else:
+            remote, path = src_ctx
+            empty = not rclone_client.list_files_recursive(rclone_config_path, remote, path)
+            if empty:
+                _cleanup_source_folder(src_kind, src_ctx, rclone_config_path)
+        if not empty:
+            report.failure(display_name, "-", "원본 폴더에 옮기지 않은 파일이 남아 있습니다.")
+        return moved, empty
+    except (OSError, rclone_client.RcloneError) as e:
+        report.failure(display_name, "-", f"남은 원본 파일을 확인하지 못했습니다: {e}")
+        return moved, False
 
 
 def _extract_web_url_from_xml_text(xml_text: str | None) -> str | None:
@@ -487,6 +511,7 @@ def bulk_move_folder(
     dest_type: str, dest_path: str,
     progress_callback=None, filename_template: str = "",
     regenerate_kakao_cover: bool = False,
+    *, conflict_log: list | None = None, failure_log: list | None = None,
 ) -> int:
     """1회성 폴더→폴더 전체 이동 (아카이빙 대상 지정 규칙과 무관, 백업 정리용).
     로컬-로컬/로컬-원격/원격-로컬/원격-원격 네 조합을 전부 지원한다.
@@ -528,6 +553,7 @@ def bulk_move_folder(
     # 이력에는 파일 하나마다 한 줄씩 남긴다 — 주기/수동/완결 이동과 같은 단위로 남겨야, "이력 → 아카이빙 이력"에서 어떤 이동
     # 방식이든 항상 같은 수준의 기록을 볼 수 있다(예전엔 일괄 이동만 작업 전체에 한 줄만 남겨서 단위가 달랐음).
     batch_label = f"{source_path} → {dest_path}"
+    report = ProgressReport(progress_callback, conflict_log, failure_log)
     dest_ctx = _bulk_prepare_dest(dest_type, dest_local_root, dest_path, rclone_config_path)
 
     moved = 0
@@ -548,6 +574,7 @@ def bulk_move_folder(
             final_rel = _bulk_move_resolve_final_rel(policy, dest_type, dest_ctx, desired_rel_path, rclone_config_path)
             if final_rel is None:
                 log.info("일괄 이동 건너뜀 (이미 존재): %s", rel_path)
+                report.conflict(batch_label, rel_path, policy)
                 if progress_callback:
                     progress_callback(f"[{index}/{total}] 건너뜀(이미 존재): {rel_path}")
                 continue
@@ -561,6 +588,7 @@ def bulk_move_folder(
                 progress_callback(f"[{index}/{total}] 이동 완료: {final_rel}")
         except Exception as e:
             log.error("일괄 이동 중 개별 파일 실패, 건너뜀 (%s): %s", rel_path, e)
+            report.failure(batch_label, rel_path, str(e))
             if progress_callback:
                 progress_callback(f"[{index}/{total}] 실패(건너뜀): {rel_path} — {e}")
 

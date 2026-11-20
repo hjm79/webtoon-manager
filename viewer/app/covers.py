@@ -22,6 +22,7 @@ IMAGE_MEDIA_TYPES = {
     ".png": "image/png",
     ".webp": "image/webp",
     ".gif": "image/gif",
+    ".avif": "image/avif",
 }
 
 # series_id -> (source_mtime, jpeg_bytes, media_type)

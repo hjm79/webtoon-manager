@@ -596,13 +596,22 @@ async function recordNaverManual(downloaded) {
     alert("기록할 회차를 선택해주세요.");
     return;
   }
-  const message = downloaded
-    ? `선택한 회차 중 가장 큰 번호(${numbers[numbers.length - 1]}화)까지 모두 받은 것으로 기록할까요?\n네이버는 '여기까지 받음' 한 지점만 기억합니다. 폴더의 파일은 건드리지 않습니다.`
-    : `${numbers[0]}화부터 뒤의 모든 회차를 받을 대상으로 기록할까요?\n네이버는 '여기까지 받음' 한 지점만 기억해서 고른 회차만이 아니라 그 뒤 전부가 받을 대상이 됩니다.`;
+  let message;
+  if (a.individual_records) {
+    message = downloaded
+      ? `선택한 ${numbers.length}개 회차를 받은 것으로 기록할까요?`
+      : `선택한 ${numbers.length}개 회차의 받은 기록을 지울까요?\n구독 범위에 있고 파일이 없는 회차는 다음 다운로드 대상이 됩니다.`;
+  } else {
+    message = downloaded
+      ? `선택한 회차 중 가장 큰 번호(${numbers[numbers.length - 1]}화)까지 모두 받은 것으로 기록할까요?\n이 작품은 '여기까지 받음'으로 기록합니다. 폴더의 파일은 그대로 유지합니다.`
+      : `${numbers[0]}화부터 뒤의 모든 회차를 받을 대상으로 기록할까요?\n이 작품은 '여기까지 받음'으로 기록합니다.`;
+  }
   if (!confirm(message)) return;
   try {
     const r = await apiCall("/api/manual-download/record", { method: "POST", body: JSON.stringify({ title_id: a.title_id, episode_nos: numbers, downloaded }) });
-    let result = `받은 기록을 ${r.previous}화에서 ${r.last_downloaded_no}화까지로 바꿨습니다.`;
+    let result = r.individual_records
+      ? `${r.marked.length}개 회차의 받은 기록을 ${downloaded ? "추가했습니다." : "지웠습니다."}`
+      : `받은 기록을 ${r.previous}화에서 ${r.last_downloaded_no}화까지로 바꿨습니다.`;
     if (r.warning) result += `\n${r.warning}`;
     alert(result);
     await runManualAnalyze(String(a.title_id));

@@ -1,6 +1,6 @@
 """로그 마스킹 — 디스코드 웹훅/봇 토큰 + 카카오페이지의 서명 주소(token/signature/credential)와 로그인 쿠키 값."""
 import json, logging, time
-from app import db, discord_config, kakao_page_auth as auth
+from app import db, discord_config, job_status, kakao_page_auth as auth, repository
 db.get_connection()
 from app import log_redaction as lr
 
@@ -41,4 +41,45 @@ r = rec("일반 로그 token=abc"); assert f.filter(r) is True and "token=***" i
 lr._secret_values = orig
 r = rec("평범한 로그"); f.filter(r); assert r.getMessage() == "평범한 로그"
 print("4) 로깅 필터 OK (인자 반영, 조회 실패 격리)")
+
+import io
+from app.main import _configure_logging
+sink = io.StringIO()
+handler = logging.StreamHandler(sink)
+root = logging.getLogger()
+root.addHandler(handler)
+try:
+    _configure_logging()
+    _configure_logging()
+    assert len([f for f in handler.filters if isinstance(f, lr.RedactingFilter)]) == 1
+    try:
+        raise ValueError("token=traceback-secret")
+    except ValueError:
+        logging.getLogger("app.submodule").exception("child record %s", "BOT-TOKEN-XYZ-987654")
+finally:
+    root.removeHandler(handler)
+assert "child record ***REDACTED***" in sink.getvalue()
+assert "token=***" in sink.getvalue() and "traceback-secret" not in sink.getvalue()
+
+root.addHandler(handler)
+try:
+    sink.truncate(0)
+    sink.seek(0)
+    saved_cookies = repository.get_setting(auth.SETTING_KEY)
+    repository.set_setting(auth.SETTING_KEY, "synthetic-invalid-storage")
+    logging.getLogger("app.submodule").warning("ordinary diagnostic")
+    assert sink.getvalue().count("저장소를 읽지 못했습니다") == 1
+    assert sink.getvalue().count("ordinary diagnostic") == 1
+finally:
+    root.removeHandler(handler)
+    repository.set_setting(auth.SETTING_KEY, saved_cookies)
+
+job_status.start("download")
+job_status.log_line("download", "작업 token=synthetic-status-value")
+job_status.finish("download", success=False)
+assert "synthetic-status-value" not in str(job_status.snapshot())
+assert "synthetic-status-value" not in db.fetchone("SELECT log FROM job_history")[0]
+with db.write_transaction() as conn:
+    conn.execute("UPDATE job_history SET log = ?", (json.dumps(["token=legacy-synthetic-value"]),))
+assert "legacy-synthetic-value" not in str(repository.list_job_history())
 print("\n전부 통과")

@@ -47,9 +47,10 @@ async def via_thread():
     provider = _build_read_numbers_provider(asyncio.get_running_loop(), s, "http://viewer:8000", 10)
     naver = await asyncio.to_thread(provider, "제목 : 부제", False)
     kakao = await asyncio.to_thread(provider, "제목 : 부제", True)
-    return naver, kakao, [c[1]["series"] for c in s.calls]
+    return naver, kakao, [params for _, params in s.calls]
 naver, kakao, asked = asyncio.run(via_thread())
-assert naver == kakao == frozenset({3}) and asked == ["제목 ： 부제", "제목 _ 부제"], asked
+assert naver == kakao == frozenset({3})
+assert asked == [{"series": "제목 ： 부제", "platform": "naver"}, {"series": "제목 _ 부제", "platform": "kakao"}], asked
 print("4) 스케줄러 연결 OK (스레드→루프 조회, 네이버/카카오 폴더명 규칙)")
 
 print("\n전부 통과")

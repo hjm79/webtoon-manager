@@ -11,6 +11,7 @@ import logging
 import threading
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from typing import Literal
 
 log = logging.getLogger(__name__)
 
@@ -20,7 +21,7 @@ _lock = threading.Lock()
 
 @dataclass
 class _JobStatus:
-    status: str = "idle"  # idle | running | success | error
+    status: str = "idle"
     started_at: str | None = None
     finished_at: str | None = None
     log: list[str] = field(default_factory=list)
@@ -53,6 +54,9 @@ def start(job_name: str) -> None:
 
 
 def log_line(job_name: str, line: str) -> None:
+    from app.log_redaction import redact
+
+    line = redact(line)
     with _lock:
         st = _statuses[job_name]
         st.log.append(f"{_now()} — {line}")
@@ -81,10 +85,11 @@ def add_finish_listener(listener) -> None:
         _finish_listeners.append(listener)
 
 
-def finish(job_name: str, success: bool) -> None:
+def finish(job_name: str, success: bool, *, outcome: Literal["partial", "cancelled"] | None = None) -> None:
+    status = outcome or ("success" if success else "error")
     with _lock:
         st = _statuses[job_name]
-        st.status = "success" if success else "error"
+        st.status = status
         st.finished_at = _now()
         started_at, finished_at, log_copy = st.started_at, st.finished_at, list(st.log)
 
@@ -93,7 +98,7 @@ def finish(job_name: str, success: bool) -> None:
     from app import repository  # 순환 import 방지용 지연 import
 
     try:
-        repository.add_job_history(job_name, started_at or finished_at, finished_at, st.status, log_copy)
+        repository.add_job_history(job_name, started_at or finished_at, finished_at, status, log_copy)
     except Exception as e:
         log.warning("실행 이력 저장 실패 (%s): %s", job_name, e)  # 이력 저장 실패가 잡 자체의 실행 결과에 영향을 주면 안 되지만, 흔적은 남긴다
 

@@ -36,22 +36,22 @@ def _limited(lines: list[str]) -> list[str]:
     return block
 
 
-def _success_lines(success_rows: list[dict], reader_urls: dict[str, str], tag_platforms: bool) -> list[str]:
-    """받은 작품 한 줄씩. 같은 작품의 여러 회차는 한 줄로 묶는다. 카카오는 받은 회차 수/범위와(뷰어에 없으면) 카카오페이지 링크를 보여준다 — reader_urls의 카카오 키는 "kakao:제목"."""
+def _success_lines(success_rows: list[dict], reader_urls: dict[tuple[str, str], str], tag_platforms: bool) -> list[str]:
+    """받은 작품 한 줄씩. 카카오는 받은 회차 수와 범위, 뷰어에 없으면 카카오페이지 링크를 보여준다."""
     groups: dict[tuple[str, str], list[dict]] = {}
     for row in success_rows:
         groups.setdefault((row.get("platform") or "naver", row["title_name"]), []).append(row)
     lines = []
     for platform, title in sorted(groups, key=_platform_sort_key):
+        url = reader_urls.get((platform, title))
         prefix = f"[{_platform_label(platform)}] " if tag_platforms else ""
         if platform == "kakao":
             group = groups[(platform, title)]
             numbers = sorted({row["episode_no"] for row in group})
             span = f"{numbers[0]}번" if len(numbers) == 1 else f"{numbers[0]}~{numbers[-1]}번"
-            url = reader_urls.get(f"kakao:{title}") or f"https://page.kakao.com/content/{group[0]['title_id']}"
+            url = url or f"https://page.kakao.com/content/{group[0]['title_id']}"
             lines.append(f"• {prefix}{title} · {len(numbers)}개 회차({span}) [바로가기](<{url}>)")
         else:
-            url = reader_urls.get(title)
             lines.append(f"• {prefix}{title} [바로가기](<{url}>)" if url else f"• {prefix}{title}")
     return lines
 
@@ -113,7 +113,7 @@ def _list_alert_sections(
 
 
 def build_report_message(
-    success_rows: list[dict], failed_rows: list[dict], reader_urls: dict[str, str],
+    success_rows: list[dict], failed_rows: list[dict], reader_urls: dict[tuple[str, str], str],
     unregistered_new_episodes: list[tuple[str, str, int]] | None = None,
     app_public_base_url: str = "",
     kakao_new_episodes: list[tuple[int, str, str]] | None = None,

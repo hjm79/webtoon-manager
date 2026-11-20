@@ -79,7 +79,7 @@ async def automatic_retry():
     async def one(**kwargs):
         no = kwargs["episode"].episode_no
         attempts.append(no)
-        return no not in fail, None
+        return no not in fail, Path(settings.download_root) / f"[{no:04d}]"
     async def no_sleep(_):
         return None
     with patch.object(naver_api, "fetch_title_info", title_info), patch.object(naver_api, "fetch_all_episodes", all_episodes), \
@@ -87,7 +87,7 @@ async def automatic_retry():
          patch.object(nd, "find_last_downloaded_episode_no", lambda *_: 0), \
          patch.object(nd.comicinfo, "write_comicinfo_file", lambda *_: None), \
          patch.object(nd.comicinfo, "needs_comicinfo", lambda *_: False), \
-         patch.object(nd, "zip_episode_folders", lambda _, **kw: None), patch.object(nd.asyncio, "sleep", no_sleep):
+         patch.object(nd, "zip_episode_folders", lambda _, **kw: ["episode.zip"]), patch.object(nd.asyncio, "sleep", no_sleep):
         failures = []
         job_status.start("download")
         await nd._download_new_episodes_for_one(None, settings, "101", cookie_health.AdultFetchTracker(), failures)
@@ -137,6 +137,31 @@ def kakao_scope():
     with patch.object(kr.kakao_records, "sync_before_planning", lambda *_: {1, 3}):
         plan = kr._plan_for_run(224, {"title": "카카오 검증"}, episodes[:3], [ExistingFile(3, "3화", "0003_3화.zip")])
     assert [ep.number for ep in plan.to_download] == [2]
+
+
+def kakao_scope_uses_product_identity():
+    def catalog(products):
+        return [Episode(pid, f"회차 {pid}", n, f"회차 {pid}", True, True, 1, False)
+                for n, pid in enumerate(products, start=1)]
+
+    original = catalog([101, 102, 103])
+    preview = [{"episode_no": ep.number, "product_id": ep.product_id, "available": True, "owned": False}
+               for ep in original]
+    subscription_scope.set_choice("kakao", "225", "selected", preview, episode_nos=[2])
+    updated = catalog([100, 101, 102, 103, 104])
+    with patch.object(kr.kakao_records, "sync_before_planning", lambda *_: set()):
+        plan = kr._plan_for_run(225, {"title": "카카오 회차 식별 검증"}, updated, [])
+    assert [(ep.number, ep.product_id) for ep in plan.to_download] == [(3, 102)]
+    subscription_scope.completed("kakao", 225, 3, product_id=102)
+    assert subscription_scope.get("kakao", 225)["pending_initial"] == []
+    assert subscription_scope.allowed_kakao_numbers(225, updated, reopen=[2, 3]) == {3}
+    subscription_scope.set_choice("kakao", "226", "future", preview)
+    assert subscription_scope.allowed_kakao_numbers(226, updated) == {5}
+    assert subscription_scope.allowed_kakao_numbers(226, catalog([101, 102, 104])) == {3}
+    selection = workflow.ScopeIn(mode="selected", episode_nos=[2], product_ids=[102])
+    assert workflow._chosen_episode_numbers("kakao", selection, [
+        {"episode_no": ep.number, "product_id": ep.product_id} for ep in updated
+    ]) == [3]
 
 
 async def kakao_preview_records():
@@ -568,6 +593,7 @@ async def edit_scope_contract():
 scope_rules()
 asyncio.run(automatic_retry())
 kakao_scope()
+kakao_scope_uses_product_identity()
 asyncio.run(kakao_preview_records())
 asyncio.run(api_contract())
 asyncio.run(one_title_admission())

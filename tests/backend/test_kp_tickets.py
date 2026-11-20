@@ -18,7 +18,9 @@ class R:
     async def read(self): return self._b
     async def __aenter__(self): return self
     async def __aexit__(self, *a): return False
-JPG = b"\xff\xd8\xff\xe0jpg"
+from fakes import image_bytes
+
+JPG = image_bytes("JPEG")
 _orig = asyncio.sleep
 async def _ns(x): await _orig(0)
 asyncio.sleep = _ns

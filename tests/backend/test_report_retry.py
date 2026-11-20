@@ -34,7 +34,8 @@ class Transport:
     async def __aexit__(self, *args):
         return None
 
-    def post(self, _url, *, json):
+    def post(self, _url, *, json, allow_redirects):
+        assert not allow_redirects
         self.chunks.append(json["content"])
         return Response(next(self.statuses))
 
@@ -111,7 +112,7 @@ async def retry_standalone():
 
 async def main():
     db.get_connection()
-    discord_config.set_webhook_url("https://discord.test/api/webhooks/unit-test")
+    discord_config.set_webhook_url("https://discord.com/api/webhooks/1/unit-test")
     await retry_batch()
     await retry_standalone()
 

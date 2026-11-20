@@ -13,16 +13,17 @@
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="apple-mobile-web-app-title" content="웹툰">
-<link rel="stylesheet" href="__WEBTOON_BASE_PATH__/style.css?v=reader-controls-3">
+<link rel="stylesheet" href="__WEBTOON_BASE_PATH__/style.css?v=reader-controls-5">
 </head>
 <body class="reader-body">
 <header class="reader-topbar" id="topbar">
   <div class="reader-topbar-row">
-    <a class="back" id="backLink" href="__WEBTOON_BASE_PATH__/">←</a>
-    <span id="chapterTitle"></span>
-    <button class="reader-control auto-scroll-control" id="autoScrollToggle" type="button" aria-label="자동 스크롤 시작" aria-pressed="false" title="자동 스크롤 시작 (Space)">▶ 자동</button>
-    <button class="reader-control speed-control" id="scrollSpeedToggle" aria-label="스크롤 속도" title="스크롤 속도">1x</button>
-    <button class="reader-control" id="fullscreenToggle" aria-label="전체 화면" title="전체 화면">
+    <a class="back" id="backLink" href="__WEBTOON_BASE_PATH__/" aria-label="웹툰 목록으로" title="웹툰 목록으로">←</a>
+    <div class="reader-heading">
+      <span id="chapterTitle"></span>
+      <span id="readerPosition" role="status" aria-live="off"></span>
+    </div>
+    <button class="reader-control" id="fullscreenToggle" type="button" aria-label="전체 화면" title="전체 화면">
       <svg id="fullscreenEnterIcon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
         <polyline points="8 3 3 3 3 8"></polyline>
         <polyline points="16 3 21 3 21 8"></polyline>
@@ -36,14 +37,24 @@
         <polyline points="15 21 15 15 21 15"></polyline>
       </svg>
     </button>
-    <button class="sidebar-toggle" id="sidebarToggle" aria-expanded="false" aria-controls="sidebar" aria-label="회차 목록" title="회차 목록">≡</button>
+    <button class="sidebar-toggle" id="sidebarToggle" type="button" aria-expanded="false" aria-controls="sidebar" aria-label="회차 목록" title="회차 목록">≡</button>
   </div>
   <div class="reader-position-row">
-    <span id="readerPosition" role="status" aria-live="off"></span>
+    <button id="previousChapter" type="button" disabled>이전 화</button>
     <button id="chapterTop" type="button" title="현재 회차 맨 위">회차 처음</button>
     <button id="chapterBottom" type="button" title="현재 회차 맨 아래">회차 끝</button>
+    <button id="nextChapter" type="button" disabled>다음 화</button>
+    <span class="reader-controls-spacer" aria-hidden="true"></span>
+    <button class="reader-control auto-scroll-control" id="autoScrollToggle" type="button" aria-label="자동 스크롤 시작" aria-pressed="false" title="자동 스크롤 시작 (Space)">▶ 자동</button>
+    <button class="reader-control speed-control" id="scrollSpeedToggle" type="button" aria-label="스크롤 속도" title="스크롤 속도">1x</button>
   </div>
+  <progress id="chapterProgress" class="reader-chapter-progress" value="0" max="1" aria-label="회차 내 페이지 위치"></progress>
 </header>
+
+<div id="readerQuickTools" class="reader-quick-tools" role="group" aria-label="리더 빠른 도구" hidden>
+  <button id="showReaderTools" type="button" aria-controls="topbar zoomBar">도구 보기</button>
+  <button id="stopHiddenAutoScroll" type="button" aria-label="자동 스크롤 정지" hidden>자동 정지</button>
+</div>
 
 <div class="reader-zoom-bar" id="zoomBar">
   <span class="reader-zoom-icon" aria-hidden="true">－</span>
@@ -62,16 +73,30 @@
 <aside id="sidebar" class="sidebar" role="dialog" aria-modal="true" aria-labelledby="sidebarTitle" inert>
   <div class="sidebar-header">
     <span id="sidebarTitle">회차 목록</span>
-    <button id="sidebarClose" class="sidebar-close" aria-label="닫기">×</button>
+    <button id="sidebarClose" class="sidebar-close" type="button" aria-label="회차 목록 닫기">×</button>
   </div>
+  <div class="reader-sidebar-tools">
+    <div class="reader-sidebar-search">
+      <input type="search" id="sidebarSearch" aria-label="회차 번호 또는 제목 검색" placeholder="회차 번호 또는 제목" autocomplete="off">
+      <button type="button" id="clearSidebarSearch" disabled>지우기</button>
+    </div>
+    <div class="reader-sidebar-actions">
+      <select id="sidebarEpisodeOrder" aria-label="회차 정렬">
+        <option value="latest">최신순</option>
+        <option value="oldest">오래된순</option>
+      </select>
+      <button type="button" id="focusCurrentChapter">현재 회차</button>
+    </div>
+  </div>
+  <p id="sidebarSearchEmpty" class="reader-sidebar-empty" role="status" hidden>검색 결과가 없습니다.</p>
   <div id="sidebarList" class="sidebar-list"></div>
 </aside>
 <div id="sidebarOverlay" class="sidebar-overlay"></div>
 
 <script src="embed.js"></script>
 <script src="reader-position.js?v=2"></script>
-<script src="reader-images.js"></script>
-<script src="reader-progress.js"></script>
+<script src="reader-images.js?v=2"></script>
+<script src="reader-progress.js?v=3"></script>
 <script>
 // index.html과 동일한 방식 - 공유 프로필 링크("/p/<토큰>/...")로 접속했는지 감지해서,
 // 이 화면에서 나가는 모든 /api/* 요청에 자동으로 그 토큰 경로를 붙인다.
@@ -132,6 +157,17 @@ document.getElementById("backLink").href = withProfilePrefix("/");
 let seriesData = null;       // { title, platform, chapters: [...] } (오름차순)
 let loadedChapters = [];     // 이 화면에 이미 붙인 회차들 (진행 순서대로)
 let currentChapterId = null;
+let pendingJumpChapterId = null;
+let readingFromChapterId = null;
+const readingEvidence = WebtoonReaderProgress.createReadingEvidence();
+const completedChapters = new Set();
+const persistedCompletedChapters = new Set();
+let completedChapterPosition = null;
+let progressRevision = 0;
+let savedProgressRevision = 0;
+let hasReadingInput = false;
+let readingInputUntil = 0;
+let closingProgressSaved = false;
 let currentPageIndex = 0;
 let currentPageOffset = 0;
 let isLoadingNext = false;
@@ -153,6 +189,14 @@ function localCacheKey(baseKey) {
   // API 키(readerSettingKey)는 요청 컨텍스트로 이미 프로필별로 분리되어 있으니
   // 그대로 두고, 여기 로컬 캐시 키에만 추가로 붙인다.
   return `${readerSettingKey(baseKey)}:${PROFILE_TOKEN || "admin"}`;
+}
+
+function cachedReaderPreference(key) {
+  try { return localStorage.getItem(key); } catch (_) { return null; }
+}
+
+function cacheReaderPreference(key, value) {
+  try { localStorage.setItem(key, value); } catch (_) { /* Server settings remain available. */ }
 }
 
 async function loadReaderSettingsScope() {
@@ -180,17 +224,23 @@ let fullscreenPreference = false;
 const pagesEl = document.getElementById("pages");
 const chapterTitleEl = document.getElementById("chapterTitle");
 const sidebarListEl = document.getElementById("sidebarList");
+const sidebarEpisodeOrderEl = document.getElementById("sidebarEpisodeOrder");
 const fullscreenToggleEl = document.getElementById("fullscreenToggle");
 const fullscreenEnterIconEl = document.getElementById("fullscreenEnterIcon");
 const fullscreenExitIconEl = document.getElementById("fullscreenExitIcon");
 const scrollSpeedToggleEl = document.getElementById("scrollSpeedToggle");
 const autoScrollToggleEl = document.getElementById("autoScrollToggle");
+const stopHiddenAutoScrollEl = document.getElementById("stopHiddenAutoScroll");
 const zoomSliderEl = document.getElementById("zoomSlider");
 const zoomValueLabelEl = document.getElementById("zoomValueLabel");
 const readerPositionEl = document.getElementById("readerPosition");
+const chapterProgressEl = document.getElementById("chapterProgress");
+const previousChapterEl = document.getElementById("previousChapter");
+const nextChapterEl = document.getElementById("nextChapter");
 const progressWriter = WebtoonReaderProgress.createWriter({
   send: (body, { keepalive }) => fetch(`/api/series/${encodeURIComponent(seriesId)}/progress`, {
     method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body), keepalive,
+    signal: globalThis.AbortSignal?.timeout?.(5_000),
   }),
 });
 
@@ -242,7 +292,7 @@ function fullscreenSettingKey() {
 async function readFullscreenPreference() {
   // 서버 설정을 우선 사용하되, 서버에 값이 없거나 요청에 실패하면
   // 기존 브라우저의 localStorage 값도 사용할 수 있게 한다.
-  const localValue = localStorage.getItem(localCacheKey(FULLSCREEN_BASE_KEY));
+  const localValue = cachedReaderPreference(localCacheKey(FULLSCREEN_BASE_KEY));
   if (localValue !== null) fullscreenPreference = localValue === "1";
 
   try {
@@ -251,7 +301,7 @@ async function readFullscreenPreference() {
       const data = await res.json();
       if (data.value === "1" || data.value === "0") {
         fullscreenPreference = data.value === "1";
-        localStorage.setItem(localCacheKey(FULLSCREEN_BASE_KEY), data.value);
+        cacheReaderPreference(localCacheKey(FULLSCREEN_BASE_KEY), data.value);
       }
     }
   } catch (e) {
@@ -261,7 +311,7 @@ async function readFullscreenPreference() {
 
 async function writeFullscreenPreference(enabled) {
   fullscreenPreference = enabled;
-  localStorage.setItem(localCacheKey(FULLSCREEN_BASE_KEY), enabled ? "1" : "0");
+  cacheReaderPreference(localCacheKey(FULLSCREEN_BASE_KEY), enabled ? "1" : "0");
   try {
     await fetch(`/api/settings/${encodeURIComponent(fullscreenSettingKey())}`, {
       method: "PUT",
@@ -333,13 +383,18 @@ async function leaveReaderForList(event) {
   if (event) event.preventDefault();
   stopAutoScroll();
   stopContinuousScroll();
+  // 판정은 리더 화면의 크기가 바뀌기 전에 처리한다. iframe이 닫힐 때는
+  // pagehide가 이미 확인한 완독 위치를 다시 덮어쓰지 않도록 한다.
+  if (embedBridge?.active) {
+    const saved = await saveProgressNow({ keepalive: true });
+    if (!saved) return;
+    closingProgressSaved = true;
+  }
   // 웹툰 목록으로 돌아갈 때는 브라우저 전체 화면과 리더 전체 화면을 모두 해제한다.
   document.body.classList.remove("reader-fullscreen");
   await exitBrowserFullscreen();
   updateFullscreenButton();
   if (embedBridge?.active) {
-    const saved = await saveProgressNow({ keepalive: true });
-    if (!saved) return;
     postReaderEvent("close", { chapter_id: currentChapterId, page_index: currentPageIndex });
     return;
   }
@@ -354,7 +409,7 @@ async function loadScrollSpeed() {
   // 기존 브라우저의 localStorage 값도 사용할 수 있게 한다 (전체화면 설정과 동일한 방식).
   const key = readerSettingKey(SCROLL_SPEED_BASE_KEY);
   const localKey = localCacheKey(SCROLL_SPEED_BASE_KEY);
-  const localValue = parseFloat(localStorage.getItem(localKey) || "");
+  const localValue = parseFloat(cachedReaderPreference(localKey) || "");
   if (SCROLL_SPEEDS.includes(localValue)) scrollSpeed = localValue;
 
   try {
@@ -364,7 +419,7 @@ async function loadScrollSpeed() {
       const serverValue = parseFloat(data.value || "");
       if (SCROLL_SPEEDS.includes(serverValue)) {
         scrollSpeed = serverValue;
-        localStorage.setItem(localKey, String(serverValue));
+        cacheReaderPreference(localKey, String(serverValue));
       }
     }
   } catch (e) {
@@ -376,7 +431,7 @@ async function loadScrollSpeed() {
 
 function saveScrollSpeed() {
   const key = readerSettingKey(SCROLL_SPEED_BASE_KEY);
-  localStorage.setItem(localCacheKey(SCROLL_SPEED_BASE_KEY), String(scrollSpeed));
+  cacheReaderPreference(localCacheKey(SCROLL_SPEED_BASE_KEY), String(scrollSpeed));
   fetch(`/api/settings/${encodeURIComponent(key)}`, {
     method: "PUT",
     headers: { "Content-Type": "application/json" },
@@ -436,12 +491,14 @@ function updateAutoScrollButton() {
   autoScrollToggleEl.setAttribute("aria-pressed", String(autoScrollActive));
   autoScrollToggleEl.setAttribute("aria-label", autoScrollActive ? "자동 스크롤 정지" : "자동 스크롤 시작");
   autoScrollToggleEl.title = autoScrollActive ? "자동 스크롤 정지 (Space)" : "자동 스크롤 시작 (Space)";
+  stopHiddenAutoScrollEl.hidden = !autoScrollActive;
 }
 
 function startAutoScroll() {
   if (autoScrollActive || document.getElementById("sidebar").classList.contains("open")) return;
   stopContinuousScroll(); // 방향키 연속 스크롤과 동시에 돌면 속도가 겹쳐 엉킬 수 있어 우선 멈춤
   autoScrollActive = true;
+  noteReadingInput();
   updateAutoScrollButton();
   let lastTime = performance.now();
 
@@ -452,11 +509,23 @@ function startAutoScroll() {
     }
     const elapsed = Math.min(now - lastTime, 50) / 1000;
     lastTime = now;
-    if (window.scrollY + window.innerHeight >= document.documentElement.scrollHeight - 1) {
-      stopAutoScroll();
-      return;
+    for (const img of visiblePages.values()) {
+      if (img.dataset.imageState !== "failed" || !img.isConnected) continue;
+      const rect = img.getBoundingClientRect();
+      if (rect.bottom > 0 && rect.top < window.innerHeight) {
+        stopAutoScroll();
+        return;
+      }
     }
-    window.scrollBy(0, SCROLL_PIXELS_PER_SECOND * scrollSpeed * elapsed);
+    if (window.scrollY + window.innerHeight >= document.documentElement.scrollHeight - 1) {
+      // The observer can run after the scroll frame that first reaches the boundary.
+      if (!isLoadingNext && !pagesEl.querySelector(".reader-next-boundary")) {
+        stopAutoScroll();
+        return;
+      }
+    } else {
+      window.scrollBy(0, SCROLL_PIXELS_PER_SECOND * scrollSpeed * elapsed);
+    }
     autoScrollFrame = requestAnimationFrame(step);
   };
 
@@ -559,7 +628,7 @@ document.addEventListener("visibilitychange", () => {
 });
 window.addEventListener("wheel", pauseReaderScrolling, { passive: true });
 function pauseForManualPointer(event) {
-  if (!event.target.closest("#autoScrollToggle, #scrollSpeedToggle")) pauseReaderScrolling();
+  if (!event.target.closest("#autoScrollToggle, #scrollSpeedToggle, #showReaderTools, #stopHiddenAutoScroll")) pauseReaderScrolling();
 }
 window.addEventListener("touchstart", pauseForManualPointer, { passive: true });
 window.addEventListener("pointerdown", pauseForManualPointer, { passive: true });
@@ -585,7 +654,7 @@ async function loadZoomPercent() {
   // 기존 브라우저의 localStorage 값도 사용할 수 있게 한다 (전체화면 설정과 동일한 방식).
   const key = readerSettingKey(ZOOM_BASE_KEY);
   const localKey = localCacheKey(ZOOM_BASE_KEY);
-  const localValue = parseInt(localStorage.getItem(localKey) || "", 10);
+  const localValue = parseInt(cachedReaderPreference(localKey) || "", 10);
   if (Number.isFinite(localValue) && localValue >= ZOOM_MIN && localValue <= ZOOM_MAX) {
     zoomPercent = localValue;
   }
@@ -597,7 +666,7 @@ async function loadZoomPercent() {
       const serverValue = parseInt(data.value || "", 10);
       if (Number.isFinite(serverValue) && serverValue >= ZOOM_MIN && serverValue <= ZOOM_MAX) {
         zoomPercent = serverValue;
-        localStorage.setItem(localKey, String(serverValue));
+        cacheReaderPreference(localKey, String(serverValue));
       }
     }
   } catch (e) {
@@ -607,7 +676,7 @@ async function loadZoomPercent() {
 
 function saveZoomPercent() {
   const key = readerSettingKey(ZOOM_BASE_KEY);
-  localStorage.setItem(localCacheKey(ZOOM_BASE_KEY), String(zoomPercent));
+  cacheReaderPreference(localCacheKey(ZOOM_BASE_KEY), String(zoomPercent));
   fetch(`/api/settings/${encodeURIComponent(key)}`, {
     method: "PUT",
     headers: { "Content-Type": "application/json" },
@@ -720,13 +789,21 @@ window.addEventListener("resize", () => {
 // 회차 로딩 (무한 스크롤)
 // ---------------------------------------------------------------------
 
+function reachedProfileBoundary(chapter, boundary) {
+  if (chapter?.lastImg?.dataset.imageState !== "loaded" || !boundary?.isConnected) return false;
+  const rect = boundary.getBoundingClientRect();
+  return rect.bottom > 0 && rect.top < window.innerHeight;
+}
+
 const loadMoreObserver = new IntersectionObserver(
   (entries) => {
+    const last = loadedChapters.at(-1);
     for (const entry of entries) {
-      if (entry.isIntersecting) loadNextChapter();
+      if (entry.isIntersecting && entry.target.isConnected && entry.target.dataset.chapter === last?.id
+          && (!IS_PROFILE_VIEW || reachedProfileBoundary(last, entry.target))) loadNextChapter();
     }
   },
-  { rootMargin: "0px 0px 1200px 0px" }
+  { root: document, rootMargin: IS_PROFILE_VIEW ? "0px" : "0px 0px 1200px 0px", threshold: IS_PROFILE_VIEW ? 0.01 : 0 }
 );
 
 const pageObserver = new IntersectionObserver(
@@ -741,99 +818,192 @@ const pageObserver = new IntersectionObserver(
     }
     updateCurrentFromVisible();
   },
-  { threshold: 0.4 }
+  { root: document, rootMargin: "400px 0px", threshold: 0 }
 );
 
 const visiblePages = new Map();
 
 function updateReaderPosition() {
-  if (!seriesData || !currentChapterId) return;
-  const chapterIndex = chapterIndexById(currentChapterId);
+  const chapterIndex = seriesData && currentChapterId ? chapterIndexById(currentChapterId) : -1;
+  previousChapterEl.disabled = chapterIndex < 1;
+  nextChapterEl.disabled = chapterIndex < 0 || chapterIndex + 1 >= seriesData.chapters.length;
+  if (chapterIndex < 0) return;
   const loaded = loadedChapters.find((ch) => ch.id === currentChapterId);
   const count = loaded?.pageCount || 0;
-  readerPositionEl.textContent = `${chapterIndex + 1} / ${seriesData.chapters.length}회차 · ${Math.min(currentPageIndex + 1, count)} / ${count}페이지`;
+  const page = Math.min(currentPageIndex + 1, count);
+  chapterProgressEl.max = Math.max(1, count);
+  chapterProgressEl.value = page;
+  const position = `${chapterIndex + 1} / ${seriesData.chapters.length}회차`;
+  readerPositionEl.textContent = count ? `${position} · ${page} / ${count}페이지` : position;
 }
+
+function jumpAdjacentChapter(offset) {
+  if (!seriesData || !currentChapterId) return;
+  const index = chapterIndexById(currentChapterId);
+  const chapter = index < 0 ? null : seriesData.chapters[index + offset];
+  if (chapter) return jumpToChapter(chapter);
+}
+previousChapterEl.addEventListener("click", () => jumpAdjacentChapter(-1));
+nextChapterEl.addEventListener("click", () => jumpAdjacentChapter(1));
 
 function updateCurrentFromVisible() {
   if (pagesEl.classList.contains("positioning")) return;
+  recordVisibleReading();
   let top = completedDocumentPosition();
+  if (pendingJumpChapterId && top?.el.dataset.chapter !== pendingJumpChapterId) top = null;
   if (!top) {
-    for (const el of pagesEl.querySelectorAll("img")) {
+    for (const el of visiblePages.values()) {
+      if (el.isConnected === false) continue;
+      if (pendingJumpChapterId && el.dataset.chapter !== pendingJumpChapterId) continue;
       const rect = el.getBoundingClientRect();
       if (!el.complete || !el.naturalWidth || !el.naturalHeight || rect.height <= 0
           || rect.bottom <= 0 || rect.top >= window.innerHeight) continue;
       if (!top || rect.top < top.rect.top) top = { el, rect };
     }
   }
-  if (!top) return;
-  for (const img of pagesEl.querySelectorAll("img")) {
-    if (img === top.el) break;
-    const rect = img.getBoundingClientRect();
-    if (img.dataset.imageState === "failed" || rect.height <= 0) return;
-    if (rect.bottom > 0 && (!img.complete || !img.naturalWidth || !img.naturalHeight)) return;
+  // A large jump can reach new images before IntersectionObserver reports them.
+  if (!top) {
+    const chapter = pendingJumpChapterId ? `[data-chapter="${CSS.escape(pendingJumpChapterId)}"]` : '';
+    const images = pagesEl.querySelectorAll(`img[data-image-state="loaded"]${chapter}`);
+    let start = 0;
+    let end = images.length;
+    // All pages are stacked in document order, so skipped geometry is offscreen.
+    while (start < end) {
+      const middle = (start + end) >>> 1;
+      if (images[middle].getBoundingClientRect().bottom <= 0) start = middle + 1;
+      else end = middle;
+    }
+    const el = images[start];
+    if (el && (!pendingJumpChapterId || el.dataset.chapter === pendingJumpChapterId)) {
+      const rect = el.getBoundingClientRect();
+      if (el.complete && el.naturalWidth && el.naturalHeight && rect.height > 0
+          && rect.bottom > 0 && rect.top < window.innerHeight) {
+        top = { el, rect };
+      }
+    }
   }
+  if (!top) return;
   const chapterId = top.el.dataset.chapter;
   const pageIndex = parseInt(top.el.dataset.page, 10);
+  const chapterChanged = chapterId !== currentChapterId;
+  const pageChanged = chapterChanged || pageIndex !== currentPageIndex;
+  if (pageChanged) {
+    const scopeId = activeProgressScope(chapterId);
+    let insideScope = scopeId === null;
+    for (const img of pagesEl.querySelectorAll("img")) {
+      if (img === top.el) break;
+      if (img.dataset.chapter === scopeId) insideScope = true;
+      if (!insideScope) continue;
+      if (pendingJumpChapterId && img.dataset.chapter !== pendingJumpChapterId) continue;
+      if (img.dataset.imageState === "failed") return;
+      if (!img.complete || !img.naturalWidth || !img.naturalHeight) {
+        const rect = img.getBoundingClientRect();
+        if (rect.height <= 0 || rect.bottom > 0) return;
+      }
+    }
+  }
+  pendingJumpChapterId = null;
   const offset = Math.round(Math.max(0, Math.min(1, -top.rect.top / top.rect.height)) * 100000) / 100000;
   const oldOffset = typeof currentPageOffset === "number" ? currentPageOffset : 0;
-  if (chapterId !== currentChapterId || pageIndex !== currentPageIndex || Math.abs(offset - oldOffset) >= 0.001) {
+  if (pageChanged || Math.abs(offset - oldOffset) >= 0.001) {
     currentChapterId = chapterId;
     currentPageIndex = pageIndex;
     currentPageOffset = offset;
-    onPositionChange();
+    onPositionChange(chapterChanged, pageChanged);
   }
 }
 
 function completedDocumentPosition() {
   if (typeof seriesData === "undefined" || !seriesData || !currentChapterId
       || pagesEl.classList.contains("positioning")) return null;
-  const lastChapter = seriesData.chapters.at(-1);
-  if (!lastChapter) return null;
-  const bottomGap = document.documentElement.scrollHeight - (window.scrollY + window.innerHeight);
-  if (bottomGap > 24) return null;
-  const images = [...pagesEl.querySelectorAll("img")];
-  const lastImage = images.filter((img) => img.dataset.chapter === lastChapter.id).at(-1);
+  const chapter = loadedChapters.find((item) => item.id === currentChapterId);
+  const lastImage = chapter?.lastImg;
   if (!lastImage || !lastImage.complete || !lastImage.naturalWidth || !lastImage.naturalHeight) return null;
-  if (images.some((img) => {
-    const rect = img.getBoundingClientRect();
-    return rect.height <= 0 || img.dataset.imageState === "failed"
-      || (rect.bottom > 0 && rect.top < window.innerHeight
-        && (!img.complete || !img.naturalWidth || !img.naturalHeight));
-  })) return null;
   const rect = lastImage.getBoundingClientRect();
-  if (rect.bottom <= 0 || rect.top >= window.innerHeight || rect.bottom > window.innerHeight + 24) return null;
-  if (!Number.isInteger(Number(lastImage.dataset.page)) || Number(lastImage.dataset.page) < 0) return null;
+  if (rect.height <= 0 || rect.bottom <= 0 || rect.top >= window.innerHeight || rect.bottom > window.innerHeight + 24) return null;
+  if (!completedChapters.has(chapter.id)) return null;
   return { el: lastImage, rect };
 }
 
-
-function onPositionChange() {
-  const ch = chapterById(currentChapterId);
-  chapterTitleEl.textContent = ch ? `${seriesData.title} · ${ch.label}` : seriesData.title;
-  highlightSidebar();
-  updateReaderPosition();
-  updateUrlState(currentChapterId, currentPageIndex, currentPageOffset);
-  scheduleSaveProgress();
+function recordVisibleReading({ seed = false } = {}) {
+  if ((!hasReadingInput && !seed) || document.hidden || pagesEl.classList.contains("positioning")) return;
+  const chapter = loadedChapters.find((item) => item.id === currentChapterId);
+  if (!chapter || completedChapters.has(chapter.id)) return;
+  const previous = seriesData.chapters[chapterIndexById(chapter.id) - 1];
+  const allowRecapSkip = previous && (previous.has_read || previous.read || completedChapters.has(previous.id));
+  let fullyCovered = false;
+  // The first wheel can arrive before IntersectionObserver reports the initial viewport.
+  const candidates = new Set([chapter.firstImg, ...visiblePages.values()]);
+  for (const img of candidates) {
+    if (!img || img.isConnected === false || img.dataset.chapter !== chapter.id) continue;
+    fullyCovered = readingEvidence.observe(img, img.getBoundingClientRect(), window.innerHeight, chapter.pageCount,
+      allowRecapSkip ? chapter.skippedPages : 0);
+    if (fullyCovered) break;
+  }
+  if (!hasReadingInput) return;
+  const coverageChanged = readingEvidence.stage(chapter.id);
+  if (fullyCovered) completedChapters.add(chapter.id);
+  if (fullyCovered || coverageChanged) progressRevision++;
+  if (coverageChanged) scheduleSaveProgress();
 }
 
-function blockedByImageFailure(chapterId, pageIndex) {
+function noteReadingInput() {
+  hasReadingInput = true;
+  readingInputUntil = Date.now() + 1500;
+  recordVisibleReading();
+}
+
+
+function onPositionChange(chapterChanged, pageChanged) {
+  if (chapterChanged) {
+    const ch = chapterById(currentChapterId);
+    chapterTitleEl.textContent = ch ? `${seriesData.title} · ${ch.label}` : seriesData.title;
+    highlightSidebar();
+  }
+  if (pageChanged) updateReaderPosition();
+  scheduleSaveProgress();
+  updateUrlState(currentChapterId, currentPageIndex, currentPageOffset);
+}
+
+function progressImageState(chapterId, pageIndex) {
+  if (pagesEl.classList.contains("positioning")) return "unavailable";
+  const scopeId = activeProgressScope(chapterId);
+  let insideScope = scopeId === null;
   let failed = false;
   for (const img of pagesEl.querySelectorAll("img")) {
+    if (img.dataset.chapter === scopeId) insideScope = true;
+    if (!insideScope) continue;
+    if (img.dataset.chapter === chapterId && Number(img.dataset.page) === pageIndex) {
+      if (img.dataset.imageState === "failed" || !img.complete || !img.naturalWidth || !img.naturalHeight) return "unavailable";
+      return failed ? "failed" : "ready";
+    }
     if (img.dataset.imageState === "failed") failed = true;
-    if (img.dataset.chapter === chapterId && Number(img.dataset.page) === pageIndex) return failed;
   }
-  return false;
+  return "unavailable";
 }
 
+function activeProgressScope(chapterId) {
+  if (!readingFromChapterId) return null;
+  return chapterIndexById(readingFromChapterId) <= chapterIndexById(chapterId) ? readingFromChapterId : chapterId;
+}
+
+let completionWrite = null;
 function saveProgressNow({ keepalive = false, urgent = false } = {}) {
-  if (!currentChapterId) return Promise.resolve(true);
+  if (closingProgressSaved || !currentChapterId) return Promise.resolve(true);
 
   if (typeof updateCurrentFromVisible === "function") updateCurrentFromVisible();
   progressWriter.cancelScheduled();
+  const coverage = readingEvidence.snapshots();
+  if (progressRevision === savedProgressRevision && !coverage.length) return Promise.resolve(true);
 
+  // An unsuccessful jump can leave the previous chapter's final image in view.
+  if (pendingJumpChapterId) return Promise.resolve(true);
   const chapterId = currentChapterId;
   const pageIndex = currentPageIndex;
-  if (typeof blockedByImageFailure === "function" && blockedByImageFailure(chapterId, pageIndex)) {
+  const imageState = progressImageState(chapterId, pageIndex);
+  // Selecting a chapter can precede its manifest or first image; never save that provisional cursor.
+  if (imageState === "unavailable") return Promise.resolve(true);
+  if (imageState === "failed") {
     setProgressSaveError(true);
     const message = "불러오지 못한 이미지가 있어 읽음 위치를 확정하지 못했습니다. 해당 이미지를 다시 불러온 뒤 닫아주세요.";
     const label = document.getElementById("progressSaveError").querySelector?.("span");
@@ -842,13 +1012,34 @@ function saveProgressNow({ keepalive = false, urgent = false } = {}) {
     return Promise.resolve(false);
   }
   const endPosition = typeof completedDocumentPosition === "function" ? completedDocumentPosition() : null;
-  const completed = !!endPosition && endPosition.el.dataset.chapter === chapterId
+  const reachedEnd = !!endPosition && endPosition.el.dataset.chapter === chapterId
     && Number(endPosition.el.dataset.page) === pageIndex;
-  const body = { chapter_id: chapterId, page_index: pageIndex, completed };
+  if (reachedEnd) completedChapterPosition = { chapterId, pageIndex };
+  const completed = reachedEnd || (completedChapterPosition?.chapterId === chapterId
+    && completedChapterPosition?.pageIndex === pageIndex);
+  const revision = progressRevision;
+  const readChapterIds = [...completedChapters].filter((id) => id !== chapterId && !persistedCompletedChapters.has(id));
+  const body = { chapter_id: chapterId, page_index: pageIndex, completed, read_chapter_ids: readChapterIds.slice(0, 500) };
+  body.reading_from_chapter_id = activeProgressScope(chapterId) ?? chapterId;
   if (typeof currentPageOffset === "number" && currentPageOffset > 0) body.page_offset = currentPageOffset;
-  return progressWriter.write(body, { keepalive, urgent }).then((result) => {
+  if (coverage.length) body.reading_coverage = coverage;
+  // Completion is stored at the chapter boundary; viewport offsets at that boundary are equivalent.
+  const completionKey = completed ? JSON.stringify([chapterId, pageIndex, body.reading_from_chapter_id, coverage]) : null;
+  if (completionKey && completionWrite?.key === completionKey && (completionWrite.confirmed || !urgent)) {
+    return completionWrite.promise;
+  }
+  const promise = progressWriter.write(body, { keepalive, urgent }).then((result) => {
+    if (completionWrite?.promise === promise) {
+      if (result.ok && result.saved && result.latest) completionWrite.confirmed = true;
+      else completionWrite = null;
+    }
     if (result.ok) {
       if (!result.saved) return false;
+      savedProgressRevision = Math.max(savedProgressRevision, revision);
+      readingEvidence.acknowledge(coverage);
+      if (readingEvidence.snapshots().length) scheduleSaveProgress();
+      for (const id of body.read_chapter_ids) persistedCompletedChapters.add(id);
+      if (completed) persistedCompletedChapters.add(chapterId);
       if (result.latest) setProgressSaveError(false);
       if (result.saved && result.latest) postReaderEvent("progress", body);
       return true;
@@ -859,38 +1050,47 @@ function saveProgressNow({ keepalive = false, urgent = false } = {}) {
     }
     return false;
   });
+  completionWrite = completionKey ? { key: completionKey, promise, confirmed: false } : null;
+  return promise;
 }
 
 function scheduleSaveProgress() {
   progressWriter.scheduleSave(() => saveProgressNow());
 }
 
-// 마지막 회차에는 다음 회차 진입 이벤트가 없으므로, 실제 문서의 끝에
-// 도달했을 때 마지막 이미지까지 읽은 것으로 한 번 더 확정한다.
-// 일반 위치 저장도 같은 판정을 사용해 짧은 마지막 이미지가 이전 페이지로
-// 되돌아가지 않도록 한다.
 let endOfDocumentCheckQueued = false;
 function confirmLastChapterAtDocumentEnd() {
   if (endOfDocumentCheckQueued) return;
   endOfDocumentCheckQueued = true;
   requestAnimationFrame(() => {
     endOfDocumentCheckQueued = false;
-
+    recordVisibleReading();
     if (!completedDocumentPosition()) return;
     updateCurrentFromVisible();
 
-    // 마지막 회차의 마지막 페이지에 도달한 순간에는 debounce를 기다리지 않고
-    // 즉시 저장하며, 실제 끝을 확인한 경우에만 completed를 전송한다.
     saveProgressNow({ keepalive: true });
   });
 }
 
 window.addEventListener("scroll", confirmLastChapterAtDocumentEnd, { passive: true });
 let progressFrame = null;
+let observedScrollY = window.scrollY;
 window.addEventListener("scroll", () => {
+  if (window.scrollY !== observedScrollY && !pendingAnchor && !pagesEl.classList.contains("positioning")
+      && (Date.now() <= readingInputUntil || autoScrollActive || scrollAnimationFrame !== null)) progressRevision++;
+  observedScrollY = window.scrollY;
   if (progressFrame !== null) return;
   progressFrame = requestAnimationFrame(() => { progressFrame = null; updateCurrentFromVisible(); });
 }, { passive: true });
+for (const type of ["wheel", "touchmove", "pointerdown"]) {
+  window.addEventListener(type, (event) => {
+    if (event.isTrusted && (type !== "pointerdown" || event.clientX >= document.documentElement.clientWidth)) noteReadingInput();
+  }, { passive: true });
+}
+window.addEventListener("keydown", (event) => {
+  if (event.isTrusted && ["ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", "AudioVolumeDown", "AudioVolumeUp", "PageUp", "PageDown", "Home", "End", " "].includes(event.key)
+      && !event.target.closest?.("input, textarea, button, select")) noteReadingInput();
+});
 window.addEventListener("pagehide", () => {
   // 종료 전에 현재 위치를 keepalive로 즉시 전송한다.
   pauseReaderScrolling();
@@ -901,13 +1101,15 @@ window.addEventListener("pagehide", () => {
 // 프리페치 (다음 화 이미지를 미리 브라우저 캐시에 받아둠)
 // ---------------------------------------------------------------------
 
-const PREFETCH_PAGE_LIMIT = 6; // 다음 화 앞부분 몇 장만 미리 받음 (데이터 절약)
 const prefetchedChapterIds = new Set();
+let prefetchedChapterOverlap = null;
 
 function prefetchImages(urls) {
   for (const url of urls) {
     const img = new Image();
     img.fetchPriority = "low"; // 지금 보고 있는 화면의 로딩을 방해하지 않도록
+    const deadline = setTimeout(() => { img.removeAttribute("src"); }, 15_000);
+    img.onload = img.onerror = () => clearTimeout(deadline);
     img.src = url;
   }
 }
@@ -918,10 +1120,15 @@ function pageImageLoaded(img) {
   restorePendingAnchor();
   updateCurrentFromVisible();
   confirmLastChapterAtDocumentEnd();
+  if (IS_PROFILE_VIEW) {
+    const last = loadedChapters.at(-1);
+    if (last?.lastImg === img && reachedProfileBoundary(last, pagesEl.querySelector(".reader-next-boundary"))) {
+      loadNextChapter();
+    }
+  }
 }
 
 function imageFailed(img, retry) {
-  stopAutoScroll();
   const wrap = img.parentElement;
   if (!wrap || wrap.querySelector(".reader-image-error")) return;
   const notice = document.createElement("div");
@@ -943,7 +1150,8 @@ function imageFailed(img, retry) {
 
 function newImageLoader() {
   return WebtoonReaderImages.createLoader({
-    observerFactory: (callback, options) => new IntersectionObserver(callback, options),
+    // The implicit root clips embedded readers at the iframe edge before applying the lead margin.
+    observerFactory: (callback, options) => new IntersectionObserver(callback, { ...options, root: document }),
     onLoaded: pageImageLoaded,
     onFailed: imageFailed,
   });
@@ -981,7 +1189,7 @@ for (const type of ["wheel", "touchstart", "pointerdown"]) {
   window.addEventListener(type, cancelPendingAnchor, { passive: true });
 }
 window.addEventListener("keydown", (event) => {
-  if (["ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", "PageUp", "PageDown", "Home", "End", " "].includes(event.key)) cancelPendingAnchor();
+  if (["ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", "AudioVolumeDown", "AudioVolumeUp", "PageUp", "PageDown", "Home", "End", " "].includes(event.key)) cancelPendingAnchor();
 });
 
 async function positionAtImage(img, fraction = 0) {
@@ -991,10 +1199,11 @@ async function positionAtImage(img, fraction = 0) {
   restorePendingAnchor();
   positioningTimer = setTimeout(revealPages, 4000);
   const ok = await imageLoader.ensure(img, { priority: true });
-  if (pendingAnchor?.img !== img) return;
+  if (pendingAnchor?.img !== img) return false;
   if (ok) restorePendingAnchor();
   revealPages();
   anchorTimeout = setTimeout(() => { pendingAnchor = null; }, 4000);
+  return ok;
 }
 
 async function prefetchNextChapter(afterChapterId) {
@@ -1003,22 +1212,26 @@ async function prefetchNextChapter(afterChapterId) {
   if (!next || prefetchedChapterIds.has(next.id)) return;
   prefetchedChapterIds.add(next.id);
 
-  // 겹침 계산은 서버에서 시간이 걸릴 수 있으니(첫 계산 시), 실제로 필요해지기 전에
-  // 미리 요청만 던져서 캐싱해둔다 (결과는 여기서 안 기다림)
-  fetch(`/api/chapters/${encodeURIComponent(next.id)}/overlap`).catch(() => {});
+  // Warm just the first image without requesting the next chapter's manifest.
+  prefetchImages([withProfilePrefix(`/api/chapters/${encodeURIComponent(next.id)}/pages/0`)]);
+  await chapterOverlap(next.id);
+}
 
-  try {
-    const res = await fetch(`/api/chapters/${encodeURIComponent(next.id)}/pages`);
-    const data = await res.json();
-    const pageCount = Math.min(data.page_count || 0, PREFETCH_PAGE_LIMIT);
-    const urls = [];
-    for (let i = 0; i < pageCount; i++) {
-      urls.push(withProfilePrefix(`/api/chapters/${encodeURIComponent(next.id)}/pages/${i}`));
-    }
-    prefetchImages(urls);
-  } catch (e) {
-    prefetchedChapterIds.delete(next.id); // 실패하면 나중에 다시 시도할 수 있게
-  }
+function chapterOverlap(chapterId) {
+  if (prefetchedChapterOverlap?.chapterId === chapterId) return prefetchedChapterOverlap.promise;
+  const promise = (async () => {
+    const res = await fetch(`/api/chapters/${encodeURIComponent(chapterId)}/overlap`, {
+      signal: globalThis.AbortSignal?.timeout?.(10_000),
+    });
+    if (!res.ok) return null;
+    const { skip_pages: skip } = await res.json();
+    return Number.isInteger(skip) && skip >= 0 ? skip : null;
+  })().catch(() => null);
+  prefetchedChapterOverlap = { chapterId, promise };
+  promise.then((skip) => {
+    if (skip === null && prefetchedChapterOverlap?.promise === promise) prefetchedChapterOverlap = null;
+  });
+  return promise;
 }
 
 async function revealSkippedPages(chapter, skipCount, wrapEl) {
@@ -1034,6 +1247,7 @@ async function revealSkippedPages(chapter, skipCount, wrapEl) {
 function showChapterLoadError(chapter, options, message) {
   stopAutoScroll();
   revealPages();
+  pagesEl.querySelector(".reader-next-boundary")?.remove();
   pagesEl.querySelector(".reader-chapter-error")?.remove();
   const notice = document.createElement("div");
   notice.className = "reader-chapter-error";
@@ -1045,10 +1259,13 @@ function showChapterLoadError(chapter, options, message) {
   button.textContent = "회차 다시 불러오기";
   button.addEventListener("click", async () => {
     if (isLoadingNext) return;
+    const activeChapters = loadedChapters;
     button.disabled = true;
+    notice.setAttribute("role", "status");
+    label.textContent = "회차를 다시 불러오는 중…";
     isLoadingNext = true;
     try { await appendChapter(chapter, options); }
-    finally { isLoadingNext = false; }
+    finally { if (activeChapters === loadedChapters) isLoadingNext = false; }
   });
   notice.append(label, button);
   pagesEl.appendChild(notice);
@@ -1056,15 +1273,20 @@ function showChapterLoadError(chapter, options, message) {
 }
 
 async function appendChapter(chapter, { scrollToPage = null, pageOffset = 0, skipPages = 0 } = {}) {
+  const activeChapters = loadedChapters;
   loadMoreObserver.disconnect();
 
   const options = { scrollToPage, pageOffset, skipPages };
-  pagesEl.querySelector(".reader-chapter-error")?.remove();
+  const boundary = pagesEl.querySelector(".reader-next-boundary");
+  const previousError = pagesEl.querySelector(".reader-chapter-error");
   let data;
   try {
-    const res = await fetch(`/api/chapters/${encodeURIComponent(chapter.id)}/pages?dimensions=1&start_reading=true`);
+    const res = await fetch(`/api/chapters/${encodeURIComponent(chapter.id)}/pages?dimensions=1&start_reading=true`, {
+      signal: globalThis.AbortSignal?.timeout?.(30_000),
+    });
     if (!res.ok) {
       const errorBody = await res.json().catch(() => ({}));
+      if (activeChapters !== loadedChapters) return false;
       const restricted = res.status === 403 && errorBody.detail?.reason === "outside_allowed_reading_time";
       showChapterLoadError(chapter, options, restricted
         ? readingTimeMessage(errorBody.detail.windows)
@@ -1074,11 +1296,20 @@ async function appendChapter(chapter, { scrollToPage = null, pageOffset = 0, ski
     data = await res.json();
     if (!Number.isInteger(data.page_count) || data.page_count <= 0) throw new Error("empty chapter");
   } catch (_) {
-    showChapterLoadError(chapter, options, "회차를 불러오지 못했습니다. 연결을 확인하고 다시 시도해주세요.");
+    if (activeChapters === loadedChapters) {
+      showChapterLoadError(chapter, options, "회차를 불러오지 못했습니다. 연결을 확인하고 다시 시도해주세요.");
+    }
     return false;
   }
   const pageCount = data.page_count || 0;
-  const startPage = Math.min(skipPages, Math.max(pageCount - 1, 0));
+  const startPage = Math.min((await skipPages) ?? 0, pageCount - 1);
+  if (activeChapters !== loadedChapters) return false;
+  if (data.zip_generation) {
+    const coverage = data.reading_coverage;
+    readingEvidence.restore(chapter.id, data.zip_generation, coverage?.page_index < pageCount ? coverage : null);
+  }
+  boundary?.remove();
+  previousError?.remove();
 
   if (startPage > 0) {
     const wrap = document.createElement("div");
@@ -1097,6 +1328,7 @@ async function appendChapter(chapter, { scrollToPage = null, pageOffset = 0, ski
   }
 
   let targetImg = null;
+  const targetPage = scrollToPage === null ? null : Math.max(startPage, Math.min(scrollToPage, pageCount - 1));
   let lastImg = null;
   let firstImg = null;
   for (let i = startPage; i < pageCount; i++) {
@@ -1104,51 +1336,58 @@ async function appendChapter(chapter, { scrollToPage = null, pageOffset = 0, ski
     pagesEl.appendChild(wrap);
     lastImg = img;
     if (i === startPage) firstImg = img;
-    if (scrollToPage !== null && i === scrollToPage) targetImg = img;
+    if (i === targetPage) targetImg = img;
   }
 
-  loadedChapters.push({ id: chapter.id, pageCount, firstImg, lastImg, pageSizes: data.page_sizes });
+  loadedChapters.push({ id: chapter.id, pageCount, firstImg, lastImg, pageSizes: data.page_sizes, skippedPages: startPage });
   updateReaderPosition();
 
   if (targetImg) {
-    await positionAtImage(targetImg, pageOffset);
+    await positionAtImage(targetImg, targetPage === scrollToPage ? pageOffset : 0);
   } else if (pagesEl.classList.contains("positioning")) {
     revealPages();
   }
 
+  if (activeChapters !== loadedChapters) return false;
   const idx = chapterIndexById(chapter.id);
   const hasNext = idx >= 0 && idx < seriesData.chapters.length - 1;
   if (hasNext && lastImg) {
-    loadMoreObserver.observe(lastImg);
+    const nextBoundary = document.createElement("div");
+    nextBoundary.className = "reader-next-boundary";
+    nextBoundary.dataset.chapter = chapter.id;
+    nextBoundary.setAttribute("role", "status");
+    pagesEl.appendChild(nextBoundary);
+    // A shared profile must keep the current chapter grant until the reader actually reaches its end.
+    loadMoreObserver.observe(IS_PROFILE_VIEW ? nextBoundary : lastImg);
     prefetchNextChapter(chapter.id); // 지금 화가 화면에 붙는 즉시 다음 화 앞부분을 미리 받아둠
   } else if (!hasNext) {
     appendEndCard();
   }
+  if (previousError) postReaderEvent("ready", { chapter_id: currentChapterId, page_index: currentPageIndex });
   return true;
 }
 
 async function loadNextChapter() {
   if (isLoadingNext) return;
-  const last = loadedChapters[loadedChapters.length - 1];
+  const activeChapters = loadedChapters;
+  const last = activeChapters.at(-1);
   if (!last) return;
   const idx = chapterIndexById(last.id);
   const next = idx >= 0 ? seriesData.chapters[idx + 1] : null;
   if (!next) return;
   isLoadingNext = true;
+  const boundary = pagesEl.querySelector(".reader-next-boundary");
+  if (boundary) {
+    boundary.classList.add("loading");
+    boundary.textContent = "다음 회차를 불러오는 중…";
+  }
   try {
-    let skipPages = 0;
-    try {
-      const res = await fetch(`/api/chapters/${encodeURIComponent(next.id)}/overlap`);
-      if (res.ok) {
-        const overlapData = await res.json();
-        skipPages = overlapData.skip_pages || 0;
-      }
-    } catch (e) {
-      // 겹침 조회 실패해도 그냥 처음부터 보여주면 됨
-    }
-    await appendChapter(next, { skipPages });
+    const overlap = chapterOverlap(next.id);
+    // A shared profile grants reading time only when the chapter is opened.
+    const skipPages = IS_PROFILE_VIEW ? await overlap : overlap;
+    if (activeChapters === loadedChapters) await appendChapter(next, { skipPages });
   } finally {
-    isLoadingNext = false;
+    if (activeChapters === loadedChapters) isLoadingNext = false;
   }
 }
 
@@ -1169,30 +1408,29 @@ function appendEndCard() {
 // ---------------------------------------------------------------------
 
 function renderSidebar() {
-  const ordered = seriesData.chapters; // 오름차순 그대로: 최신화가 맨 아래로
-  sidebarListEl.innerHTML = "";
-  ordered.forEach((ch, idx) => {
+  const ordered = Array.from(seriesData.chapters.entries());
+  if (sidebarEpisodeOrderEl.value === "latest") ordered.reverse();
+  sidebarListEl.replaceChildren();
+  ordered.forEach(([idx, ch]) => {
     const row = document.createElement("button");
     row.type = "button";
     row.className = "sidebar-row";
     row.dataset.chapterId = ch.id;
     row.dataset.idx = String(idx);
-    row.innerHTML = `
-      <span class="sidebar-row-label">${ch.label}</span>
-      <span class="sidebar-row-status"></span>
-    `;
+    const label = document.createElement("span");
+    label.className = "sidebar-row-label";
+    label.textContent = ch.label;
+    const status = document.createElement("span");
+    status.className = "sidebar-row-status";
+    row.append(label, status);
     row.addEventListener("click", () => jumpToChapter(ch));
     sidebarListEl.appendChild(row);
   });
+  filterSidebarChapters();
   highlightSidebar();
 }
 
 function highlightSidebar() {
-  // 회차별 읽음/읽는 중 표시는 기본적으로 서버가 계산해준 ch.read / ch.reading을 쓴다
-  // (메인 화면 사이드바에서 개별 회차를 콕 집어 읽음/안읽음으로 바꾼 경우도 정확히 반영됨).
-  // 다만 지금 이 세션에서 스크롤로 이미 지나온 회차(currentChapterId보다 앞)는 서버에
-  // 아직 저장 안 됐어도 즉시 "읽음"으로 같이 쳐줘서, 새로고침 없이도 실시간으로 맞게 보인다.
-  const currentIdx = chapterIndexById(currentChapterId);
   for (const row of sidebarListEl.querySelectorAll(".sidebar-row")) {
     const idx = parseInt(row.dataset.idx, 10);
     const ch = seriesData.chapters[idx];
@@ -1205,7 +1443,7 @@ function highlightSidebar() {
     // "지금 보고 있는 회차"라는 정보가 "예전에 읽었는지"보다 우선한다 - 이미 읽었던
     // 회차로 다시 돌아가서 보면(예: 10화까지 읽다가 2화를 다시 열어봄), 예전에는
     // "이미 읽음"이 먼저 이겨버려서 "읽는 중"이 뜰 자리가 없는 문제가 있었다.
-    const effectiveRead = (ch && ch.read) || (currentIdx >= 0 && idx < currentIdx);
+    const effectiveRead = ch?.has_read || ch?.read || completedChapters.has(ch?.id);
     if (isCurrent) {
       statusEl.textContent = "읽는 중";
       statusEl.className = "sidebar-row-status reading";
@@ -1219,56 +1457,118 @@ function highlightSidebar() {
   }
 }
 
+const POSITION_URL_INTERVAL_MS = 500;
+let lastPositionUrlAt = -Infinity;
+let positionUrlTimer = null;
+let pendingPositionUrl = null;
+
 function updateUrlState(chapterId, page, offset = 0) {
-  const p = new URLSearchParams(location.search);
-  p.set("series", seriesId);
-  p.set("chapter", chapterId);
-  p.set("page", String(page));
-  if (typeof offset === "number" && Number.isFinite(offset) && offset > 0 && offset <= 1) {
-    p.set("page_offset", String(offset));
-  } else {
-    p.delete("page_offset");
-  }
-  history.replaceState(null, "", `${location.pathname}?${p.toString()}`);
+  pendingPositionUrl = { chapterId, page, offset };
+  if (positionUrlTimer !== null) return;
+  const flush = () => {
+    positionUrlTimer = null;
+    lastPositionUrlAt = Date.now();
+    const position = pendingPositionUrl;
+    const p = new URLSearchParams(location.search);
+    p.set("series", seriesId);
+    p.set("chapter", position.chapterId);
+    p.set("page", String(position.page));
+    if (Number.isFinite(position.offset) && position.offset > 0 && position.offset <= 1) {
+      p.set("page_offset", String(position.offset));
+    } else {
+      p.delete("page_offset");
+    }
+    try {
+      history.replaceState(null, "", `${location.pathname}?${p.toString()}`);
+    } catch (_) {
+      // Some browsers reject history writes during rapid scrolling or when leaving the page.
+    }
+  };
+  const delay = POSITION_URL_INTERVAL_MS - (Date.now() - lastPositionUrlAt);
+  if (delay > 0) positionUrlTimer = setTimeout(flush, delay);
+  else flush();
 }
 
+let chapterJumpSequence = 0;
 async function jumpToChapter(ch) {
+  const sequence = ++chapterJumpSequence;
   pauseReaderScrolling();
-  // 새로고침(페이지 이동) 없이 그 회차로 이동. 이전 회차는 읽음, 이 회차는 읽는 중,
-  // 이후 회차는 안읽음으로 사이드바에 즉시 반영되고, 서버에도 같은 방식으로 저장됨.
+  // Save while the old chapter is still mounted. A failed target leaves that position intact.
+  const differentChapter = currentChapterId !== ch.id;
+  if (differentChapter) {
+    await saveProgressNow({ keepalive: true });
+    if (sequence !== chapterJumpSequence || closingProgressSaved) return;
+  }
+  const loaded = loadedChapters.find((chapter) => chapter.id === ch.id);
+  const target = loaded && (pagesEl.querySelector(`img[data-chapter="${CSS.escape(ch.id)}"][data-page="0"]`) || loaded.firstImg);
+  readingFromChapterId = ch.id;
+  completedChapterPosition = null;
+  readingInputUntil = 0;
+  hasReadingInput = false;
   currentChapterId = ch.id;
-  currentPageIndex = 0;
+  pendingJumpChapterId = ch.id;
+  currentPageIndex = Number(target?.dataset.page) || 0;
   currentPageOffset = 0;
   cancelPendingAnchor();
+  setChromeHidden(false);
   chapterTitleEl.textContent = `${seriesData.title} · ${ch.label}`;
   highlightSidebar();
-  scheduleSaveProgress();
-  updateUrlState(ch.id, 0);
-  closeSidebar();
+  if (document.getElementById("sidebar").classList.contains("open")) closeSidebar();
 
   updateReaderPosition();
-  const alreadyLoaded = loadedChapters.some((c) => c.id === ch.id);
-  if (alreadyLoaded) {
-    const target = document.querySelector(`img[data-chapter="${ch.id}"][data-page="0"]`);
-    if (target) await positionAtImage(target, 0);
-    return;
+  if (target) {
+    if (!await positionAtImage(target, 0) || sequence !== chapterJumpSequence) return;
+  } else {
+    pageObserver.disconnect();
+    loadMoreObserver.disconnect();
+    imageLoader.destroy();
+    imageLoader = newImageLoader();
+    visiblePages.clear();
+    pagesEl.replaceChildren();
+    loadedChapters = [];
+    isLoadingNext = false;
+
+    beginPositioning();
+    if (!await appendChapter(ch, { scrollToPage: 0 }) || sequence !== chapterJumpSequence) return;
   }
 
-  // 아직 로드 안 된(이전/이후 상관없이) 회차 -> 새로고침 대신 이 회차부터 다시 구성
-  pageObserver.disconnect();
-  loadMoreObserver.disconnect();
-  imageLoader.destroy();
-  imageLoader = newImageLoader();
-  visiblePages.clear();
-  pagesEl.innerHTML = "";
-  loadedChapters = [];
-  isLoadingNext = false;
-
-  beginPositioning();
-  await appendChapter(ch, { scrollToPage: 0 });
+  updateCurrentFromVisible();
+  if (pendingJumpChapterId || currentChapterId !== ch.id || progressImageState(currentChapterId, currentPageIndex) !== "ready") return;
+  recordVisibleReading({ seed: true });
+  progressRevision++;
+  scheduleSaveProgress();
+  updateUrlState(currentChapterId, currentPageIndex, currentPageOffset);
 }
 
 let sidebarReturnFocus = null;
+
+function filterSidebarChapters() {
+  const search = document.getElementById("sidebarSearch");
+  const query = search.value.trim().normalize("NFKC").toLocaleLowerCase("ko-KR");
+  const numberQuery = query.match(/^(\d+(?:\.\d+)?)(?:\s*화)?$/);
+  let hasResults = false;
+  for (const row of sidebarListEl.querySelectorAll(".sidebar-row")) {
+    const chapter = seriesData.chapters[Number(row.dataset.idx)];
+    const label = chapter.label.normalize("NFKC").toLocaleLowerCase("ko-KR");
+    const number = label.match(/^(?:제\s*)?(\d+(?:\.\d+)?)/)?.[1] ?? chapter.sort_key;
+    row.hidden = numberQuery ? Number(number) !== Number(numberQuery[1]) : !label.includes(query);
+    if (!row.hidden) hasResults = true;
+  }
+  document.getElementById("clearSidebarSearch").disabled = search.value.length === 0;
+  document.getElementById("sidebarSearchEmpty").hidden = hasResults || !query;
+}
+
+function focusCurrentSidebarChapter() {
+  const search = document.getElementById("sidebarSearch");
+  if (search.value) {
+    search.value = "";
+    filterSidebarChapters();
+  }
+  const active = sidebarListEl.querySelector(".sidebar-row.active");
+  if (active) active.scrollIntoView({ block: "center" });
+  (active || document.getElementById("sidebarClose")).focus({ preventScroll: true });
+}
+
 function openSidebar() {
   pauseReaderScrolling();
   sidebarReturnFocus = document.activeElement;
@@ -1277,19 +1577,24 @@ function openSidebar() {
   sidebar.classList.add("open");
   document.getElementById("sidebarOverlay").classList.add("open");
   document.getElementById("sidebarToggle").setAttribute("aria-expanded", "true");
-  const active = sidebarListEl.querySelector(".sidebar-row.active");
-  if (active) active.scrollIntoView({ block: "center" });
-  (active || document.getElementById("sidebarClose")).focus();
+  const search = document.getElementById("sidebarSearch");
+  if (search.value) {
+    search.value = "";
+    filterSidebarChapters();
+  }
+  sidebarListEl.scrollTop = 0;
+  document.getElementById("sidebarClose").focus({ preventScroll: true });
 }
 
 function closeSidebar() {
   const sidebar = document.getElementById("sidebar");
+  if (!sidebar.classList.contains("open")) return;
   sidebar.classList.remove("open");
+  sidebar.inert = true;
   document.getElementById("sidebarOverlay").classList.remove("open");
   document.getElementById("sidebarToggle").setAttribute("aria-expanded", "false");
-  if (sidebarReturnFocus?.isConnected) sidebarReturnFocus.focus();
-  else document.getElementById("sidebarToggle").focus();
-  sidebar.inert = true;
+  if (sidebarReturnFocus?.isConnected) sidebarReturnFocus.focus({ preventScroll: true });
+  else document.getElementById("sidebarToggle").focus({ preventScroll: true });
 }
 
 function handleSidebarKeyDown(event) {
@@ -1300,14 +1605,15 @@ function handleSidebarKeyDown(event) {
     closeSidebar();
     return;
   }
-  const buttons = Array.from(sidebar.querySelectorAll("button:not(:disabled)"));
-  if (!buttons.length) return;
   if (event.key === "Tab") {
-    const first = buttons[0], last = buttons[buttons.length - 1];
+    const controls = sidebar.querySelectorAll("button:not(:disabled):not([hidden]), input:not(:disabled), select:not(:disabled)");
+    if (!controls.length) return;
+    const first = controls[0], last = controls[controls.length - 1];
     if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last.focus(); }
     else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus(); }
   } else if (["ArrowUp", "ArrowDown", "Home", "End"].includes(event.key)) {
-    const rows = Array.from(sidebarListEl.querySelectorAll(".sidebar-row"));
+    if (document.activeElement === document.getElementById("sidebarSearch") || document.activeElement === sidebarEpisodeOrderEl) return;
+    const rows = Array.from(sidebarListEl.querySelectorAll(".sidebar-row:not([hidden])"));
     if (!rows.length) return;
     event.preventDefault();
     const index = rows.indexOf(document.activeElement);
@@ -1321,6 +1627,37 @@ document.getElementById("sidebar").addEventListener("keydown", handleSidebarKeyD
 document.getElementById("sidebarToggle").addEventListener("click", openSidebar);
 document.getElementById("sidebarClose").addEventListener("click", closeSidebar);
 document.getElementById("sidebarOverlay").addEventListener("click", closeSidebar);
+document.getElementById("sidebarSearch").addEventListener("input", filterSidebarChapters);
+const EPISODE_ORDER_KEY = "webtoonEpisodeOrder";
+try {
+  if (localStorage.getItem(EPISODE_ORDER_KEY) === "oldest") sidebarEpisodeOrderEl.value = "oldest";
+} catch (_) {
+  // The selector still works for the current visit without storage.
+}
+sidebarEpisodeOrderEl.addEventListener("change", () => {
+  try {
+    localStorage.setItem(EPISODE_ORDER_KEY, sidebarEpisodeOrderEl.value);
+  } catch (_) {
+    // Use the selected order even when persistence is unavailable.
+  }
+  if (seriesData) renderSidebar();
+  sidebarListEl.scrollTop = 0;
+});
+window.addEventListener("storage", (event) => {
+  if (event.key !== EPISODE_ORDER_KEY && event.key !== null) return;
+  const order = event.newValue === "oldest" ? "oldest" : "latest";
+  if (sidebarEpisodeOrderEl.value === order) return;
+  sidebarEpisodeOrderEl.value = order;
+  if (seriesData) renderSidebar();
+  sidebarListEl.scrollTop = 0;
+});
+document.getElementById("clearSidebarSearch").addEventListener("click", () => {
+  const search = document.getElementById("sidebarSearch");
+  search.value = "";
+  filterSidebarChapters();
+  search.focus();
+});
+document.getElementById("focusCurrentChapter").addEventListener("click", focusCurrentSidebarChapter);
 
 async function moveToChapterBoundary(end) {
   stopContinuousScroll();
@@ -1328,13 +1665,21 @@ async function moveToChapterBoundary(end) {
   cancelPendingAnchor();
   const loaded = loadedChapters.find((chapter) => chapter.id === currentChapterId);
   if (!loaded) return;
-  const page = end ? Math.max(loaded.pageCount - 1, 0) : 0;
-  const img = pagesEl.querySelector(`img[data-chapter="${CSS.escape(currentChapterId)}"][data-page="${page}"]`);
+  const img = end ? loaded.lastImg
+    : pagesEl.querySelector(`img[data-chapter="${CSS.escape(currentChapterId)}"][data-page="0"]`) || loaded.firstImg;
   if (!img) return;
+  readingInputUntil = 0;
+  hasReadingInput = false;
+  completedChapterPosition = null;
   const height = img.getBoundingClientRect().height;
   const targetOffset = end && height > 0 ? Math.max(0, 1 - window.innerHeight / height) : 0;
-  await positionAtImage(img, targetOffset);
+  const positioned = await positionAtImage(img, targetOffset);
   updateCurrentFromVisible();
+  if (positioned && currentChapterId === loaded.id && currentPageIndex === Number(img.dataset.page)) {
+    recordVisibleReading({ seed: true });
+    progressRevision++;
+    scheduleSaveProgress();
+  }
   updateReaderPosition();
   setChromeHidden(false);
 }
@@ -1349,19 +1694,39 @@ document.getElementById("chapterBottom").addEventListener("click", () => moveToC
 let lastY = window.scrollY;
 const topbar = document.getElementById("topbar");
 const zoomBar = document.getElementById("zoomBar");
+const readerQuickTools = document.getElementById("readerQuickTools");
+const showReaderTools = document.getElementById("showReaderTools");
 
 function setChromeHidden(hidden) {
   if (isAdjustingZoom) return; // 슬라이더 조작 중엔 숨김 로직이 절대 끼어들지 않게
+  const focused = document.activeElement;
+  const activeInToolbar = topbar.contains(focused) || zoomBar.contains(focused);
+  if (hidden && activeInToolbar && focused.matches(":focus-visible")) return;
+  const activeInQuickTools = readerQuickTools.contains(focused);
   topbar.classList.toggle("hidden", hidden);
   zoomBar.classList.toggle("hidden", hidden);
+  topbar.inert = hidden;
+  zoomBar.inert = hidden;
+  readerQuickTools.hidden = !hidden;
+  if (hidden && activeInToolbar) showReaderTools.focus({ preventScroll: true });
+  if (!hidden && activeInQuickTools) autoScrollToggleEl.focus({ preventScroll: true });
 }
+
+showReaderTools.addEventListener("click", () => {
+  pauseReaderScrolling();
+  setChromeHidden(false);
+});
+stopHiddenAutoScrollEl.addEventListener("click", () => {
+  setChromeHidden(false);
+  pauseReaderScrolling();
+});
 
 window.addEventListener(
   "scroll",
   () => {
     const y = window.scrollY;
-    if (y > lastY && y > 80) setChromeHidden(true);
-    else setChromeHidden(false);
+    // Position restoration can move the document far down without a reader scroll gesture.
+    if (!pendingAnchor) setChromeHidden(y > lastY && y > 80);
     lastY = y;
   },
   { passive: true }
@@ -1386,34 +1751,32 @@ pagesEl.addEventListener("click", (e) => {
 
 async function load() {
   if (!await initializeEmbed()) return;
-  const position = await WebtoonReaderPosition.resolve({
+  if (!seriesId) return showError();
+
+  const positionRequest = WebtoonReaderPosition.resolve({
     seriesId, chapterId: initialChapterId, pageIndex: initialPage, pageOffset: initialOffset,
     fetcher: window.fetch.bind(window),
   });
+  const chaptersRequest = fetch(`/api/series/${encodeURIComponent(seriesId)}/chapters`);
+  // The preference scope determines the keys for the remaining settings.
+  const settingsRequest = loadReaderSettingsScope().then(() =>
+    Promise.all([loadScrollSpeed(), readFullscreenPreference(), loadZoomPercent()]));
+  const [position, chaptersResponse] = await Promise.all([positionRequest, chaptersRequest, settingsRequest]);
+  if (!chaptersResponse.ok) return showError();
+  seriesData = await chaptersResponse.json();
+
   initialChapterId = position.chapterId;
   initialPage = position.pageIndex;
   initialOffset = position.pageOffset || 0;
 
-  // 전체화면/스크롤속도/확대축소를 웹툰별로 따로 볼지, 전체 공통으로 볼지부터 정해야
-  // 나머지 세 설정을 어느 키로 읽고 쓸지 알 수 있다.
-  await loadReaderSettingsScope();
-  await loadScrollSpeed();
-
-  await readFullscreenPreference();
   if (fullscreenPreference) {
     // CSS 기반 리더 전체 화면은 자동 적용할 수 있다. 브라우저의 실제 전체 화면 API는
     // 보안상 사용자 제스처가 필요할 수 있으므로, 여기서는 가능한 경우에만 시도한다.
     setReaderFullscreen(true, { persist: false, requestBrowserFullscreen: true });
   } else {
     updateFullscreenButton();
+    applyZoom();
   }
-
-  await loadZoomPercent();
-  applyZoom();
-
-  const res = await fetch(`/api/series/${encodeURIComponent(seriesId)}/chapters`);
-  if (!res.ok) return showError();
-  seriesData = await res.json();
 
   document.title = seriesData.title;
   document.getElementById("sidebarTitle").textContent = seriesData.title;
@@ -1423,6 +1786,8 @@ async function load() {
   if (!startChapter) return showError();
 
   currentChapterId = startChapter.id;
+  pendingJumpChapterId = startChapter.id;
+  readingFromChapterId = startChapter.id;
   currentPageIndex = initialPage;
   currentPageOffset = initialOffset;
   chapterTitleEl.textContent = `${seriesData.title} · ${startChapter.label}`;
@@ -1431,6 +1796,8 @@ async function load() {
   if (initialPage > 0 || initialOffset > 0) beginPositioning();
 
   await appendChapter(startChapter, { scrollToPage: initialPage, pageOffset: initialOffset });
+  updateCurrentFromVisible();
+  recordVisibleReading({ seed: true });
   if (pagesEl.querySelector("img")) postReaderEvent("ready", { chapter_id: currentChapterId, page_index: currentPageIndex });
 }
 

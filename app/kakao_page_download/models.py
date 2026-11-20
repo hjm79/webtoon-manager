@@ -6,6 +6,8 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+import zipfile
+from functools import lru_cache
 from typing import NamedTuple
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -75,6 +77,7 @@ _KST = timezone(timedelta(hours=9))
 
 
 _EXISTING_ZIP_RE = re.compile(r"^(\d+)_(.+?)(?:#\d+)?\.zip$", re.IGNORECASE)
+_ZIP_IDENTITY_RE = re.compile(rb"webtoon-manager:kakao:([1-9][0-9]{0,18}):([1-9][0-9]{0,18})")
 
 
 _IMAGE_EXTENSIONS = {
@@ -123,6 +126,8 @@ class ExistingFile:
     number: int
     subtitle: str  # normalize_subtitle을 거친 부제목
     name: str
+    series_id: int | None = None
+    product_id: int | None = None
 
 
 @dataclass
@@ -167,6 +172,8 @@ class RunResult:
     rental_skip_mode: bool = False  # 대여권 자동 사용이 켜진 실행(기다무 대기 회차를 건너뛰고 대여권 회차를 본다)
 
     stopped_reason: str | None = None  # 구독 다운로드에서 다음 회차를 시작하지 않은 이유
+    total_downloaded: int | None = None
+    total_rental_used: int | None = None
 
     @property
     def caught_up_episode(self) -> "Episode | None":
@@ -276,11 +283,45 @@ def parse_existing_zip_name(name: str) -> ExistingFile | None:
     return ExistingFile(number=int(match.group(1)), subtitle=normalize_subtitle(match.group(2)), name=name)
 
 
+def zip_identity_comment(series_id: int, product_id: int) -> bytes:
+    return f"webtoon-manager:kakao:{series_id}:{product_id}".encode("ascii")
+
+
+@lru_cache(maxsize=8192)
+def _read_zip_identity(path: Path, version: tuple[int, ...]) -> tuple[int, int] | None:
+    try:
+        with zipfile.ZipFile(path) as archive:
+            match = _ZIP_IDENTITY_RE.fullmatch(archive.comment)
+    except (OSError, ValueError, zipfile.BadZipFile):
+        return None
+    if match is None:
+        return None
+    return int(match.group(1)), int(match.group(2))
+
+
+def read_zip_identity(path: Path) -> tuple[int, int] | None:
+    try:
+        if path.is_symlink() or not path.is_file():
+            return None
+        info = path.stat()
+    except OSError:
+        return None
+    return _read_zip_identity(path, (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns))
+
+
 def scan_existing_files(folder: Path) -> list[ExistingFile]:
     """폴더 안의 회차 zip들(번호순). cover.jpg/info.xml/임시 파일/이름 규칙이 다른 파일은 세지 않는다."""
     if not folder.is_dir():
         return []
-    files = [f for f in (parse_existing_zip_name(entry.name) for entry in folder.iterdir()) if f is not None]
+    files = []
+    for path in folder.iterdir():
+        file = parse_existing_zip_name(path.name)
+        if file is None or not path.is_file():
+            continue
+        identity = read_zip_identity(path)
+        if identity is not None:
+            file.series_id, file.product_id = identity
+        files.append(file)
     return sorted(files, key=lambda f: f.number)
 
 
@@ -295,7 +336,9 @@ def _subtitle_key(subtitle: str, series_title: str) -> str:
 
 
 def plan_by_folder_rules(
-    episodes: list[Episode], existing: list[ExistingFile], series_title: str = "", recorded: set[int] | None = None, pending: set[int] | None = None
+    episodes: list[Episode], existing: list[ExistingFile], series_title: str = "", recorded: set[int] | None = None,
+    pending: set[int] | None = None, *, series_id: int | None = None,
+    product_receipts: dict[int, set[int]] | None = None, stale_numbers: set[int] | None = None,
 ) -> DownloadPlan:
     """폴더 규칙(모듈 설명 참고)과 "받은 회차 기록"으로 받을 회차를 정한다.
 
@@ -310,14 +353,34 @@ def plan_by_folder_rules(
     센다(화면에는 무료가 되는 날짜가 보인다). 받을 수는 없다."""
     visible = sorted((e for e in episodes if e.number > 0), key=lambda e: e.number)
     pending = pending or set()  # 사용자가 "받지 않은 것으로" 기록한 회차 — 시작 지점보다 앞이어도 받을 대상(받은 것이 이긴다)
-    start = _decide_start(visible, existing, series_title, recorded)
-
-    folder_numbers = {f.number for f in existing}
-    have_numbers = folder_numbers | start.archived_numbers
-    have_subtitles = {_subtitle_key(f.subtitle, series_title) for f in existing}
-    plan = DownloadPlan(mode=start.mode, marker=start.marker, existing_count=len(existing))
+    by_product = {episode.product_id: episode for episode in visible}
+    by_subtitle: dict[str, list[Episode]] = {}
     for episode in visible:
-        in_folder = episode.number in folder_numbers or normalize_subtitle(episode.subtitle) in have_subtitles
+        by_subtitle.setdefault(normalize_subtitle(episode.subtitle), []).append(episode)
+    current_files = [file for file in existing if series_id is None or file.series_id in (None, series_id)]
+    folder_numbers = set()
+    for file in current_files:
+        if file.product_id is not None:
+            if file.product_id in by_product:
+                folder_numbers.add(by_product[file.product_id].number)
+            continue
+        matches = by_subtitle.get(_subtitle_key(file.subtitle, series_title), [])
+        # During a known renumbering, an unchanged number and subtitle are not identity proof.
+        if len(matches) == 1 and not (matches[0].number == file.number and file.number in (stale_numbers or ())):
+            folder_numbers.add(matches[0].number)
+    receipts = product_receipts or {}
+    replaced_numbers = {file.number for file in existing} | (stale_numbers or set())
+    for numbers in receipts.values():
+        replaced_numbers.update(numbers)
+    matched_receipts = {episode.number for episode in visible if episode.product_id in receipts}
+    effective_recorded = ((recorded or set()) - replaced_numbers) | matched_receipts
+    if recorded:
+        effective_recorded |= folder_numbers
+    start = _decide_start(visible, current_files, series_title, effective_recorded, folder_numbers)
+    have_numbers = folder_numbers | start.archived_numbers
+    plan = DownloadPlan(mode=start.mode, marker=start.marker, existing_count=len(current_files))
+    for episode in visible:
+        in_folder = episode.number in folder_numbers
         done = in_folder or episode.number in have_numbers
         skipped = not done and episode.number < start.lower_bound and episode.number not in pending
         plan.rows.append(EpisodeRow(episode=episode, downloaded=done, before_start=skipped, archived=done and not in_folder))
@@ -343,6 +406,9 @@ def _resolve_marker(only: ExistingFile, visible: list[Episode], series_title: st
     """폴더에 파일이 하나뿐이면 그 파일이 "여기까지 받았다"는 표식이다 — 사이트의 회차와 맞춰 실제 위치를 정한다. 번호가 사이트와 안 맞으면
     부제목으로 위치를 다시 찾고(예전 도구와 번호가 밀려 있는 경우), 그것도 하나로 정해지지 않으면 경고(warning)로 표시한다."""
     resolved, warning = only.number, False
+    if only.product_id is not None:
+        found = next((episode for episode in visible if episode.product_id == only.product_id), None)
+        return MarkerInfo(only.number, only.subtitle, found.number if found is not None else resolved, found is None)
     only_key = _subtitle_key(only.subtitle, series_title)
     at_number = next((e for e in visible if e.number == only.number), None)
     if at_number is None or normalize_subtitle(at_number.subtitle) != only_key:
@@ -354,9 +420,8 @@ def _resolve_marker(only: ExistingFile, visible: list[Episode], series_title: st
     return MarkerInfo(number=only.number, subtitle=only.subtitle, resolved_number=resolved, warning=warning)
 
 
-def _decide_start(visible: list[Episode], existing: list[ExistingFile], series_title: str, recorded: set[int] | None) -> _StartPoint:
+def _decide_start(visible: list[Episode], existing: list[ExistingFile], series_title: str, recorded: set[int], folder_numbers: set[int]) -> _StartPoint:
     """폴더 상태와 받은 회차 기록으로 시작 지점을 정한다(plan_by_folder_rules의 설명 참고)."""
-    folder_numbers = {f.number for f in existing}
     if not existing and recorded:
         # 폴더가 비어 있거나 없어도(전체를 아카이빙한 뒤 연재를 재개한 경우 등) 받은 회차 기록은 그대로 믿는다 — 기록에 없는 회차만 받는다.
         # 기록은 날짜로도 폴더 상태로도 지워지지 않는다(처음부터 다시 받으려면 "받지 않은 것으로 기록"으로 직접 지정한다).
@@ -367,8 +432,8 @@ def _decide_start(visible: list[Episode], existing: list[ExistingFile], series_t
         return _StartPoint("compare", None, recorded - folder_numbers, min(folder_numbers | recorded))
     if len(existing) == 1:
         marker = _resolve_marker(existing[0], visible, series_title)
-        return _StartPoint("single_marker", marker, set(), marker.resolved_number)
-    return _StartPoint("compare", None, set(), min(folder_numbers))
+        return _StartPoint("single_marker", marker, set(), marker.resolved_number + int(marker.warning))
+    return _StartPoint("compare", None, set(), min(folder_numbers or {file.number for file in existing}))
 
 
 def effective_download_root(default_root: str) -> str:
@@ -436,7 +501,7 @@ def _parse_episode(item: dict, series_title: str, now_kst: datetime) -> Episode:
     purchase = ((item.get("service_property") or {}).get("purchase_info")) or {}
     accessible = _is_accessible(item, now_kst) and not item.get("hidden")  # 숨김 회차는 받을 수 없다
     return Episode(
-        product_id=item["product_id"], title=title, number=int(item.get("order_value") or 0),
+        product_id=int(item["product_id"]), title=title, number=int(item.get("order_value") or 0),
         subtitle=derive_subtitle(title, series_title), is_free=bool(item.get("is_free")), accessible=accessible,
         page_count=int(item.get("page_count") or 0), hidden=bool(item.get("hidden")),
         rent_expire=purchase.get("rent_expire_dt") if accessible and not item.get("is_free") else None,

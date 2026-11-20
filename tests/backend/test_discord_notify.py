@@ -32,6 +32,7 @@ class Session:
     """post 호출을 기록하고, 지정한 응답(또는 예외)을 차례로 돌려주는 가짜 세션."""
     def __init__(self, *outcomes): self.outcomes, self.posts = list(outcomes), []
     def post(self, url, json=None, **kw):
+        assert kw.get("allow_redirects") is False
         self.posts.append((url, json)); outcome = self.outcomes.pop(0) if self.outcomes else AsyncResponse(204)
         if isinstance(outcome, BaseException): raise outcome
         return outcome
@@ -55,8 +56,8 @@ s = Session(); assert send(s, text) is True and [p[1]["content"] for p in s.post
 print("3) 발송 성공 OK")
 
 # Scenario 4: 실패 — 204가 아니면(상태와 본문을 로그에) False, 예외도 False. 한 조각이 실패해도 나머지 조각은 계속 보낸다
-logs.lines.clear(); s = Session(AsyncResponse(400, text="Invalid Form Body")); assert send(s, "안녕") is False and any("400" in l and "Invalid Form Body" in l for l in logs.lines), logs.lines
-logs.lines.clear(); s = Session(ConnectionError("연결 끊김")); assert send(s, "안녕") is False and any("연결 끊김" in l for l in logs.lines), logs.lines
+logs.lines.clear(); s = Session(AsyncResponse(400, text="Invalid Form Body")); assert send(s, "안녕") is False and any("400" in l and "Invalid Form Body" not in l for l in logs.lines), logs.lines
+logs.lines.clear(); s = Session(ConnectionError("연결 끊김")); assert send(s, "안녕") is False and any("ConnectionError" in l and "연결 끊김" not in l for l in logs.lines), logs.lines
 s = Session(AsyncResponse(429, text="rate limited")); assert send(s, text) is False and len(s.posts) == len(chunks), "첫 조각이 실패해도 나머지를 보낸다"
 s = Session(AsyncResponse(204), RuntimeError("두번째 실패")); assert send(s, text) is False and len(s.posts) == len(chunks)
 print("4) 발송 실패 OK")
@@ -72,9 +73,17 @@ def test_message(outcome):
     try: return asyncio.run(discord_notify.send_test_webhook_message()), session
     finally: aiohttp.ClientSession = real
 (ok, message), session = test_message(AsyncResponse(204)); assert ok and "전송했습니다" in message and session.posts[0][1]["content"].startswith("✅")
-(ok, message), _ = test_message(AsyncResponse(404, text="Unknown Webhook")); assert not ok and "404" in message and "Unknown Webhook" in message
-(ok, message), _ = test_message(ConnectionError("DNS 실패")); assert not ok and "DNS 실패" in message
+(ok, message), _ = test_message(AsyncResponse(404, text="Unknown Webhook")); assert not ok and "404" in message and "Unknown Webhook" not in message
+(ok, message), _ = test_message(ConnectionError("DNS 실패")); assert not ok and "연결하지 못했습니다" in message
 repository.set_setting(discord_config._KEY_WEBHOOK_URL, None)
 (ok, message), session = test_message(AsyncResponse(204)); assert not ok and "설정되지 않았습니다" in message and session.posts == []
 print("5) 웹훅 테스트 OK")
+discord_config.set_webhook_url("https://example.test/api/webhooks/1/token")
+s = Session()
+assert not send(s, "안녕") and s.posts == []
+(ok, message), s = test_message(AsyncResponse(204))
+assert not ok and "형식" in message and s.posts == []
+discord_config.set_webhook_url("https://discord.com/api/webhooks/1/token")
+s = Session(AsyncResponse(307))
+assert not send(s, "안녕") and len(s.posts) == 1
 print("ALL OK")

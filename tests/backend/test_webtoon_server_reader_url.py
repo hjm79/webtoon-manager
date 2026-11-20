@@ -8,9 +8,11 @@ from fakes import AsyncResponse
 
 class Session:
     def __init__(self, outcome=None): self.outcome, self.calls = outcome, []
-    def get(self, url, params=None, timeout=None):
+    def get(self, url, params=None, timeout=None, allow_redirects=False):
+        assert not allow_redirects
         self.calls.append((url, params, timeout.total))
         if isinstance(self.outcome, BaseException): raise self.outcome
+        if isinstance(self.outcome, list): return self.outcome.pop(0)
         return self.outcome
 fetch = lambda session, base="http://viewer", name="작품", timeout=7: asyncio.run(client.fetch_reader_url(session, base, name, timeout))
 class Logs(logging.Handler):
@@ -32,4 +34,20 @@ assert fetch(Session(AsyncResponse(200, {}))) is None and fetch(Session(AsyncRes
 logs.lines.clear(); assert fetch(Session(AsyncResponse(200, bad_json=True)), name="이상한응답") is None and any("이상한응답" in l for l in logs.lines), logs.lines
 logs.lines.clear(); assert fetch(Session(ConnectionError("연결 끊김"))) is None and any("연결 끊김" in l for l in logs.lines), logs.lines
 assert fetch(Session(asyncio.TimeoutError())) is None
+
+# Archive lookup requires proof of the matching work, even when an old viewer responds 200.
+def archive_fetch(session):
+    return asyncio.run(client.fetch_reader_url(session, "http://viewer", "묵향", 7, platform="naver", title_id="177"))
+
+archive_url = "http://viewer/reader.html?series=archive"
+archive_data = {"url": archive_url, "origin_platform": "naver", "origin_title_id": "177"}
+s = Session([AsyncResponse(404), AsyncResponse(200, archive_data)])
+assert archive_fetch(s) == archive_url and [entry[1] for entry in s.calls] == [
+    {"series": "묵향", "platform": "naver"},
+    {"series": "묵향", "platform": "archive", "origin_platform": "naver", "origin_title_id": "177"},
+]
+assert archive_fetch(Session([AsyncResponse(404), AsyncResponse(200, {"url": archive_url})])) is None
+assert archive_fetch(Session([AsyncResponse(404), AsyncResponse(200, {**archive_data, "origin_title_id": "199"})])) is None
+s = Session([AsyncResponse(409)])
+assert archive_fetch(s) is None and len(s.calls) == 1
 print("ALL OK")

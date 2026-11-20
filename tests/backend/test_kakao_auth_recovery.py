@@ -356,6 +356,7 @@ async def notification_retry_over_http():
     client = kp.client_from_saved_cookies(Session(profile), 1)
     try:
         with patch.object(auth.discord_config, 'get_webhook_url', return_value=f'http://127.0.0.1:{port}/notice'), \
+             patch('app.discord_notify.valid_webhook_url', return_value=True), \
              patch.object(kp, 'client_from_saved_cookies', return_value=client):
             for expected_attempts in (1, 2, 2):
                 try:

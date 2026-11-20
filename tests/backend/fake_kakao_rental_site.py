@@ -2,7 +2,9 @@
 import json
 from http.cookies import SimpleCookie
 
-JPG = b"\xff\xd8\xff\xe0jpg"
+from fakes import image_bytes
+
+JPG = image_bytes("JPEG")
 
 
 class R:

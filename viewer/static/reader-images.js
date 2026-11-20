@@ -9,42 +9,59 @@
   }
 
   function createLoader({ observerFactory, concurrency = 3, maxRetries = 2,
+                          loadTimeoutMs = 15_000,
                           schedule = setTimeout, cancel = clearTimeout,
                           onLoaded = () => {}, onFailed = () => {} }) {
     const records = new Map();
-    const queue = [];
+    const queue = new Set();
+    const prefetchLimit = Math.max(1, concurrency - 1);
     let active = 0;
+    let activePrefetch = 0;
     let disposed = false;
-    const observer = observerFactory((entries) => {
-      for (const entry of entries) {
-        const record = records.get(entry.target);
-        if (record) record.visible = entry.isIntersecting;
-      }
+    const nearObserver = observerFactory((entries) => updateDemand(entries, "near"),
+      { rootMargin: "1200px 0px 3600px" });
+    const viewportObserver = observerFactory((entries) => updateDemand(entries, "inViewport"),
+      { rootMargin: "0px" });
+
+    function requested(record) {
+      return record.near || record.inViewport || record.pinned;
+    }
+
+    function updateDemand(entries, field) {
+      if (disposed) return;
       for (const entry of entries) {
         const record = records.get(entry.target);
         if (!record) continue;
-        if (record.visible && record.state === "idle") enqueue(record);
-        else if (!record.visible && !record.pinned && record.state === "queued") {
-          const index = queue.indexOf(record);
-          if (index >= 0) queue.splice(index, 1);
+        record[field] = entry.isIntersecting;
+        if (requested(record) && record.state === "idle") enqueue(record);
+        else if (!requested(record) && record.state === "queued") {
+          queue.delete(record);
           record.state = "idle";
           record.img.dataset.imageState = "idle";
         }
+        if (record.inViewport && record.state === "loading") record.img.fetchPriority = "high";
       }
       drain();
-    }, { rootMargin: "1200px 0px" });
+    }
 
-    function enqueue(record, priority = false) {
+    function enqueue(record) {
       record.state = "queued";
       record.img.dataset.imageState = "queued";
-      if (priority) queue.unshift(record);
-      else queue.push(record);
+      queue.add(record);
+    }
+
+    function release(record) {
+      active--;
+      if (record.prefetch) activePrefetch--;
     }
 
     function finish(record, success) {
-      if (record.state === "loading") active--;
+      release(record);
       record.state = success ? "loaded" : "failed";
       record.pinned = false;
+      record.priority = false;
+      nearObserver.unobserve(record.img);
+      viewportObserver.unobserve(record.img);
       if (success) onLoaded(record.img);
       else if (!disposed && record.img.isConnected) onFailed(record.img, () => retry(record.img));
       record.resolve?.(success);
@@ -52,21 +69,33 @@
       drain();
     }
 
-    function start(record) {
+    function start(record, prefetch) {
       record.state = "loading";
+      record.prefetch = prefetch;
       active++;
+      if (prefetch) activePrefetch++;
       const img = record.img;
+      const requestNumber = record.requests++;
+      const isActive = () => !disposed && record.state === "loading" && record.requests === requestNumber + 1;
+      const clearRequest = () => {
+        if (record.deadline !== null) cancel(record.deadline);
+        record.deadline = img.onload = img.onerror = null;
+      };
+      img.fetchPriority = prefetch ? "low" : "high";
       img.onload = () => {
-        if (disposed || record.state !== "loading") return;
+        if (!isActive()) return;
         if (!img.naturalWidth || !img.naturalHeight) return fail();
+        clearRequest();
         img.dataset.imageState = "loaded";
         img.style.aspectRatio = `${img.naturalWidth} / ${img.naturalHeight}`;
         finish(record, true);
       };
-      const fail = () => {
-        if (disposed || record.state !== "loading") return;
+      const fail = (timedOut = false) => {
+        if (!isActive()) return;
+        clearRequest();
+        if (timedOut) img.removeAttribute?.("src");
         if (record.attempts++ < maxRetries) {
-          active--;
+          release(record);
           record.state = "waiting";
           img.dataset.imageState = "waiting";
           record.timer = schedule(() => {
@@ -78,7 +107,7 @@
               record.resolve = null;
               return;
             }
-            if (record.visible || record.pinned) enqueue(record);
+            if (requested(record)) enqueue(record);
             else {
               record.state = "idle";
               img.dataset.imageState = "idle";
@@ -91,29 +120,44 @@
           finish(record, false);
         }
       };
-      img.onerror = fail;
+      img.onerror = () => fail();
       img.dataset.imageState = "loading";
-      const requestNumber = record.requests++;
+      record.deadline = schedule(() => fail(true), loadTimeoutMs);
       img.src = requestNumber ? `${record.url}${record.url.includes("?") ? "&" : "?"}retry=${requestNumber}` : record.url;
     }
 
+    function distanceFromViewport(record) {
+      const viewport = record.img.ownerDocument?.documentElement.clientHeight;
+      const bounds = record.img.getBoundingClientRect?.();
+      if (!viewport || !bounds?.height) return record.inViewport ? 0 : Infinity;
+      return Math.max(bounds.top - viewport, -bounds.bottom, 0);
+    }
+
     function drain() {
-      while (!disposed && active < concurrency && queue.length) {
-        const record = queue.shift();
-        if (record.state !== "queued") continue;
-        if (!record.img.isConnected) {
-          record.state = "failed";
-          record.pinned = false;
-          record.resolve?.(false);
-          record.resolve = null;
-          continue;
+      while (!disposed && active < concurrency && queue.size) {
+        let next, bestRank = Infinity, bestDistance = Infinity;
+        for (const record of queue) {
+          if (!record.img.isConnected) {
+            queue.delete(record);
+            record.state = "failed";
+            record.pinned = false;
+            record.resolve?.(false);
+            record.resolve = null;
+            continue;
+          }
+          const distance = distanceFromViewport(record);
+          // Explicit restores and visible pages can use the slot reserved from lookahead.
+          const rank = record.priority ? 0 : distance === 0 ? 1 : record.pinned ? 2 : 3;
+          if (rank === 3 && activePrefetch >= prefetchLimit) continue;
+          if (rank < bestRank || (rank === bestRank && distance < bestDistance)) {
+            next = record;
+            bestRank = rank;
+            bestDistance = distance;
+          }
         }
-        if (!record.visible && !record.pinned) {
-          record.state = "idle";
-          record.img.dataset.imageState = "idle";
-          continue;
-        }
-        start(record);
+        if (!next) return;
+        queue.delete(next);
+        start(next, bestRank === 3);
       }
     }
 
@@ -123,15 +167,11 @@
       if (record.state === "loaded") return Promise.resolve(true);
       if (record.state === "failed") return Promise.resolve(false);
       record.pinned = true;
+      record.priority ||= priority;
       if (!record.promise) record.promise = new Promise((resolve) => { record.resolve = resolve; });
-      if (record.state === "idle") {
-        enqueue(record, priority);
-        drain();
-      } else if (priority && record.state === "queued") {
-        const index = queue.indexOf(record);
-        if (index >= 0) queue.splice(index, 1);
-        queue.unshift(record);
-      }
+      if (record.state === "idle") enqueue(record);
+      if (record.state === "loading" && priority) record.img.fetchPriority = "high";
+      drain();
       return record.promise;
     }
 
@@ -154,17 +194,20 @@
       } else {
         img.style.aspectRatio = "3 / 4";
       }
-      records.set(img, { img, url, state: "idle", visible: false, pinned: false,
-        attempts: 0, requests: 0, promise: null, resolve: null, timer: null });
-      observer.observe(img);
+      records.set(img, { img, url, state: "idle", near: false, inViewport: false, pinned: false, priority: false,
+        attempts: 0, requests: 0, promise: null, resolve: null, timer: null, deadline: null });
+      nearObserver.observe(img);
+      viewportObserver.observe(img);
     }
 
     function destroy() {
       disposed = true;
-      observer.disconnect();
-      queue.length = 0;
+      nearObserver.disconnect();
+      viewportObserver.disconnect();
+      queue.clear();
       for (const record of records.values()) {
         if (record.timer !== null) cancel(record.timer);
+        if (record.deadline !== null) cancel(record.deadline);
         record.img.onload = null;
         record.img.onerror = null;
         if (record.state === "loading") record.img.removeAttribute?.("src");

@@ -5,10 +5,16 @@ let libraryViewerPath = null;
 let libraryReaderPath = null;
 let libraryGeneration = 0;
 let libraryRequest = null;
+let libraryDetailItem = null;
+let libraryDetailRequest = null;
+const LIBRARY_VIEW_KEY = "webtoonLibraryView";
+const EPISODE_ORDER_KEY = "webtoonEpisodeOrder";
+const LIBRARY_ID = /^[A-Za-z0-9_-]{1,128}$/;
+let libraryEpisodeOrder = "latest";
 
 function libraryLocalUrl(raw) {
   const url = workflowReaderUrl(raw);
-  return url && url.origin === window.location.origin && libraryViewerPath
+  return url && !url.username && !url.password && url.origin === window.location.origin && libraryViewerPath
     && url.pathname.startsWith(`${libraryViewerPath}/`) ? url : null;
 }
 
@@ -47,6 +53,62 @@ function libraryDetail(label, text, className) {
   return row;
 }
 
+function setLibraryView(view, save = true) {
+  document.getElementById("library-grid").dataset.view = view;
+  for (const mode of ["card", "list"]) {
+    document.getElementById(`library-view-${mode}`).setAttribute("aria-pressed", String(mode === view));
+  }
+  if (save) {
+    try { localStorage.setItem(LIBRARY_VIEW_KEY, view); } catch (_) { /* browsing still works without storage */ }
+  }
+}
+
+function libraryCover(item, extraClass = "") {
+  const placeholder = document.createElement("div");
+  placeholder.className = `library-cover library-cover-placeholder ${extraClass}`.trim();
+  placeholder.textContent = "표지 없음";
+  const coverUrl = libraryLocalUrl(item.cover_url);
+  if (!coverUrl) return placeholder;
+  const cover = document.createElement("img");
+  cover.className = `library-cover ${extraClass}`.trim();
+  cover.alt = `${item.title} 표지`;
+  cover.loading = "lazy";
+  cover.src = coverUrl.href;
+  cover.addEventListener("error", () => cover.replaceWith(placeholder), { once: true });
+  return cover;
+}
+
+function libraryPlatform(item) {
+  const badge = document.createElement("span");
+  badge.className = "library-platform";
+  badge.textContent = { naver: "네이버", kakao: "카카오페이지", archive: "보관함" }[item.platform] || item.platform || "웹툰";
+  return badge;
+}
+
+function libraryFacts(item) {
+  const latest = libraryDetail("최근 업데이트", libraryText(item.latest_chapter?.label) || "회차 정보 없음", "library-latest-chapter");
+  const date = libraryChapterDate(item.latest_chapter);
+  const updated = document.createElement(date ? "time" : "span");
+  updated.className = "library-chapter-date";
+  updated.textContent = date ? date.label : "날짜 정보 없음";
+  if (date) updated.dateTime = date.datetime;
+  latest.querySelector("dd").appendChild(updated);
+  const recentlyRead = libraryText(item.recently_read_chapter?.label)
+    || (item.recently_read_chapter === undefined ? libraryText(item.progress_display) : "");
+  return [latest, libraryDetail("최근 읽은 회차", recentlyRead || "아직 읽지 않음", "library-recently-read")];
+}
+
+function openLibraryReader(item, chapterId) {
+  const url = libraryLocalUrl(libraryReaderPath);
+  if (!url) return;
+  url.searchParams.set("series", item.id);
+  url.searchParams.set("shelf_chapters", "1");
+  url.searchParams.delete("page");
+  if (chapterId) url.searchParams.set("chapter", chapterId);
+  else url.searchParams.delete("chapter");
+  openEmbeddedReaderByUrl(item.title, url.href);
+}
+
 function renderLibrary() {
   if (!libraryReady) return;
   const query = document.getElementById("library-search").value.trim().toLocaleLowerCase();
@@ -65,56 +127,37 @@ function renderLibrary() {
     const card = document.createElement("article");
     card.className = "library-card";
     card.dataset.seriesId = item.id;
-    const placeholder = document.createElement("div");
-    placeholder.className = "library-cover library-cover-placeholder";
-    placeholder.textContent = "표지 없음";
-    const coverUrl = libraryLocalUrl(item.cover_url);
-    if (coverUrl) {
-      const cover = document.createElement("img");
-      cover.className = "library-cover";
-      cover.alt = `${item.title} 표지`;
-      cover.loading = "lazy";
-      cover.src = coverUrl.href;
-      cover.addEventListener("error", () => cover.replaceWith(placeholder), { once: true });
-      card.append(cover);
-    } else card.append(placeholder);
+    card.append(libraryCover(item));
+    card.addEventListener("click", (event) => {
+      if (!event.target.closest("button, a")) openLibraryDetail(item);
+    });
     const body = document.createElement("div");
     body.className = "library-card-body";
-    const badge = document.createElement("span");
-    badge.className = "library-platform";
-    badge.textContent = { naver: "네이버", kakao: "카카오페이지", archive: "보관함" }[item.platform] || item.platform || "웹툰";
     const title = document.createElement("h3");
-    title.textContent = item.title;
+    const titleButton = makeButton(item.title, () => openLibraryDetail(item));
+    titleButton.type = "button";
+    titleButton.className = "library-title-button";
+    titleButton.setAttribute("aria-label", `${item.title} 작품 정보와 회차`);
+    title.append(titleButton);
     const counts = document.createElement("p");
+    counts.className = "library-counts";
     counts.textContent = `총 ${libraryCount(item.chapter_count)}회차 · 안 읽은 회차 ${libraryCount(item.unread_count)}개`;
     const summary = document.createElement("p");
     summary.className = "library-summary";
     summary.textContent = libraryText(item.summary) || "소개글이 없습니다.";
     const details = document.createElement("dl");
     details.className = "library-card-details";
-    const latest = libraryDetail("최근 업데이트", libraryText(item.latest_chapter?.label) || "회차 정보 없음", "library-latest-chapter");
-    const date = libraryChapterDate(item.latest_chapter);
-    const updated = document.createElement(date ? "time" : "span");
-    updated.className = "library-chapter-date";
-    updated.textContent = date ? date.label : "날짜 정보 없음";
-    if (date) updated.dateTime = date.datetime;
-    latest.querySelector("dd").appendChild(updated);
-    const recentlyRead = libraryText(item.recently_read_chapter?.label)
-      || (item.recently_read_chapter === undefined ? libraryText(item.progress_display) : "");
-    details.append(latest, libraryDetail("최근 읽은 회차", recentlyRead || "아직 읽지 않음", "library-recently-read"));
-    body.append(badge, title, summary, counts, details);
+    details.append(...libraryFacts(item));
+    body.append(libraryPlatform(item), title, summary, counts, details);
     if (item.progress_display) {
       const progress = document.createElement("p");
+      progress.className = "library-progress";
       progress.textContent = `${item.reading_now ? "읽는 중 · " : ""}${item.progress_display}`;
       body.append(progress);
     }
-    const read = makeButton(item.reading_now ? "이어 읽기" : "읽기", () => {
-      const url = libraryLocalUrl(libraryReaderPath);
-      if (!url) return;
-      url.searchParams.set("series", item.id);
-      openEmbeddedReaderByUrl(item.title, url.href);
-    });
+    const read = makeButton(item.reading_now ? "이어 읽기" : "읽기", () => openLibraryReader(item));
     read.type = "button";
+    read.className = "library-read-button";
     read.setAttribute("aria-label", `${item.title} ${item.reading_now ? "이어 읽기" : "읽기"}`);
     body.append(read);
     card.append(body);
@@ -122,7 +165,168 @@ function renderLibrary() {
   }
 }
 
-async function loadLibraryPage() {
+function renderLibraryDetailInfo(item, info = {}) {
+  const metadata = document.createElement("div");
+  metadata.className = "library-detail-meta";
+  const summary = document.createElement("p");
+  summary.className = "library-detail-summary";
+  summary.textContent = libraryText(info.summary) || libraryText(item.summary) || "소개글이 없습니다.";
+  const facts = document.createElement("dl");
+  facts.className = "library-card-details";
+  for (const [key, label] of [["writer", "작가"], ["genre", "장르"], ["publisher", "출판사"]]) {
+    const value = libraryText(info[key]);
+    if (value) facts.append(libraryDetail(label, value, ""));
+  }
+  facts.append(...libraryFacts(item));
+  metadata.append(libraryPlatform(item), summary, facts);
+  document.getElementById("library-detail-info").replaceChildren(libraryCover(item, "library-detail-cover"), metadata);
+}
+
+function renderLibraryEpisodes(item, chapters) {
+  const list = document.getElementById("library-episodes");
+  const focusedId = list.contains(document.activeElement) ? document.activeElement.dataset.chapterId : null;
+  const rows = document.createDocumentFragment();
+  const ordered = libraryEpisodeOrder === "oldest" ? chapters : [...chapters].reverse();
+  for (const chapter of ordered) {
+    const row = document.createElement("li");
+    row.className = "library-episode";
+    const open = makeButton(chapter.label, () => openLibraryReader(item, chapter.id));
+    open.type = "button";
+    open.className = "library-episode-link";
+    open.dataset.chapterId = chapter.id;
+    const states = document.createElement("span");
+    states.className = "library-episode-states";
+    const hasRead = chapter.has_read === true || (chapter.has_read === undefined && chapter.read === true);
+    const reading = chapter.reading === true;
+    if (hasRead) states.append(libraryEpisodeBadge("읽음", "is-read"));
+    if (reading) states.append(libraryEpisodeBadge("읽는 중", "is-reading"));
+    if (!hasRead && !reading) states.append(libraryEpisodeBadge("안 읽음", ""));
+    row.append(open, states);
+    rows.append(row);
+  }
+  list.replaceChildren(rows);
+  if (focusedId) list.querySelector(`[data-chapter-id="${focusedId}"]`)?.focus({ preventScroll: true });
+}
+
+function setLibraryEpisodeOrder(value, remember = false) {
+  const order = value === "oldest" ? "oldest" : "latest";
+  document.getElementById("library-episode-order").value = order;
+  if (order !== libraryEpisodeOrder) {
+    libraryEpisodeOrder = order;
+    const list = document.getElementById("library-episodes");
+    list.reversed = order === "latest";
+    const focused = list.contains(document.activeElement) ? document.activeElement : null;
+    for (const row of [...list.children].reverse()) list.appendChild(row);
+    focused?.focus({ preventScroll: true });
+  }
+  if (remember) {
+    try { localStorage.setItem(EPISODE_ORDER_KEY, order); } catch (_) { /* sorting works without storage */ }
+  }
+}
+
+function libraryEpisodeBadge(label, state) {
+  const badge = document.createElement("span");
+  badge.className = `library-episode-badge ${state}`.trim();
+  badge.textContent = label;
+  return badge;
+}
+
+function openLibraryDetail(item) {
+  libraryDetailItem = item;
+  document.getElementById("library-browse").classList.add("hidden");
+  document.getElementById("library-detail").classList.remove("hidden");
+  const title = document.getElementById("library-detail-title");
+  title.textContent = item.title;
+  title.focus();
+  loadLibraryDetail();
+}
+
+function closeLibraryDetail(restoreFocus = true) {
+  if (!libraryDetailItem) return;
+  const { id } = libraryDetailItem;
+  libraryDetailItem = null;
+  libraryDetailRequest?.abort();
+  libraryDetailRequest = null;
+  document.getElementById("library-detail").classList.add("hidden");
+  document.getElementById("library-browse").classList.remove("hidden");
+  if (restoreFocus) {
+    const trigger = document.querySelector(`#library-grid [data-series-id="${id}"] .library-title-button`);
+    (trigger || document.getElementById("library-search")).focus();
+  }
+}
+
+function libraryFetch(url, signal) {
+  return fetch(url, { credentials: "same-origin", redirect: "manual", cache: "no-store", signal });
+}
+
+function libraryNeedsLogin(response) {
+  return response.status === 401 || response.status === 403 || response.type === "opaqueredirect";
+}
+
+async function loadLibraryDetail(keepEpisodes = false) {
+  const item = libraryDetailItem;
+  if (!item) return;
+  libraryDetailRequest?.abort();
+  const controller = new AbortController();
+  libraryDetailRequest = controller;
+  const timeout = setTimeout(() => controller.abort(), 15000);
+  const endpoint = `${libraryViewerPath}/api/series/${encodeURIComponent(item.id)}`;
+  const status = document.getElementById("library-detail-status");
+  const retry = document.getElementById("library-detail-retry");
+  const login = document.getElementById("library-detail-login");
+  const read = document.getElementById("library-detail-continue");
+  const list = document.getElementById("library-episodes");
+  renderLibraryDetailInfo(item);
+  status.classList.remove("workflow-error");
+  status.textContent = "회차를 불러오는 중…";
+  retry.classList.add("hidden");
+  login.classList.add("hidden");
+  login.removeAttribute("href");
+  read.disabled = true;
+  read.textContent = item.reading_now ? "이어 읽기" : "읽기";
+  if (!keepEpisodes) list.replaceChildren();
+
+  const infoRequest = libraryFetch(`${endpoint}/info`, controller.signal).then(async (response) => {
+    if (!response.ok) return; // older archives may not have an info.xml file
+    const info = await response.json();
+    if (libraryDetailRequest === controller && !controller.signal.aborted && info && typeof info === "object" && !Array.isArray(info)) {
+      renderLibraryDetailInfo(item, info);
+    }
+  }).catch(() => {}); // list metadata remains visible if the optional lookup fails
+
+  try {
+    const response = await libraryFetch(`${endpoint}/chapters`, controller.signal);
+    if (libraryDetailRequest !== controller) return;
+    if (libraryNeedsLogin(response)) {
+      login.href = `${libraryViewerPath}/login.html`;
+      login.classList.remove("hidden");
+      throw new Error("서재 인증이 필요합니다. 로그인한 뒤 다시 시도해주세요.");
+    }
+    if (!response.ok) throw new Error(`회차를 불러오지 못했습니다 (${response.status}). 다시 시도해주세요.`);
+    const data = await response.json();
+    if (libraryDetailRequest !== controller) return;
+    if (data?.id !== item.id || !Array.isArray(data.chapters) || data.chapters.some((chapter) =>
+      !chapter || typeof chapter.id !== "string" || !LIBRARY_ID.test(chapter.id) || typeof chapter.label !== "string")) {
+      throw new Error("회차 목록 응답을 확인해주세요.");
+    }
+    renderLibraryEpisodes(item, data.chapters);
+    read.disabled = data.chapters.length === 0;
+    status.textContent = data.chapters.length ? `총 ${data.chapters.length}회차` : "아직 받은 회차가 없습니다.";
+  } catch (error) {
+    if (libraryDetailRequest !== controller) return;
+    list.replaceChildren();
+    status.classList.add("workflow-error");
+    status.textContent = error.name === "AbortError" ? "회차 목록 응답이 늦어지고 있습니다. 다시 시도해주세요." : error.message;
+    retry.classList.remove("hidden");
+  } finally {
+    await infoRequest;
+    clearTimeout(timeout);
+    if (libraryDetailRequest === controller) libraryDetailRequest = null;
+  }
+}
+
+async function loadLibraryPage({ keepDetail = false } = {}) {
+  if (!keepDetail) closeLibraryDetail(false);
   const generation = ++libraryGeneration;
   libraryReady = false;
   libraryItems = [];
@@ -151,9 +355,9 @@ async function loadLibraryPage() {
     libraryViewerPath = path.replace(/\/+$/, "");
     libraryReaderPath = config.reader_url || `${libraryViewerPath}/reader.html`;
     if (!libraryLocalUrl(libraryReaderPath)) throw new Error("서재 읽기 주소를 확인해주세요.");
-    const response = await fetch(`${libraryViewerPath}/api/series`, { credentials: "same-origin", redirect: "manual", cache: "no-store", signal: controller.signal });
+    const response = await libraryFetch(`${libraryViewerPath}/api/series`, controller.signal);
     if (generation !== libraryGeneration) return;
-    if (response.status === 401 || response.status === 403 || response.type === "opaqueredirect") {
+    if (libraryNeedsLogin(response)) {
       status.textContent = "서재 인증이 필요합니다. 로그인한 뒤 서재를 새로고침해주세요.";
       login.href = `${libraryViewerPath}/login.html`;
       login.classList.remove("hidden");
@@ -163,22 +367,44 @@ async function loadLibraryPage() {
     const data = await response.json();
     if (generation !== libraryGeneration) return;
     if (!Array.isArray(data)) throw new Error("서재 목록 응답을 확인해주세요.");
-    libraryItems = data.filter((item) => item && typeof item.id === "string" && /^[A-Za-z0-9_-]{1,128}$/.test(item.id)
+    libraryItems = data.filter((item) => item && typeof item.id === "string" && LIBRARY_ID.test(item.id)
       && typeof item.title === "string");
     libraryReady = true;
     renderLibrary();
+    if (keepDetail && libraryDetailItem) {
+      const selected = libraryItems.find((item) => item.id === libraryDetailItem.id);
+      if (selected) libraryDetailItem = selected;
+    }
   } catch (error) {
     if (generation !== libraryGeneration) return;
     status.classList.add("workflow-error");
     status.textContent = error.name === "AbortError" ? "서재 응답이 늦어지고 있습니다. 새로고침으로 다시 시도해주세요." : error.message;
   } finally {
     clearTimeout(timeout);
-    if (generation === libraryGeneration) { refresh.disabled = false; libraryRequest = null; }
+    if (generation === libraryGeneration) {
+      refresh.disabled = false;
+      libraryRequest = null;
+      if (keepDetail && libraryDetailItem) loadLibraryDetail(true);
+    }
   }
 }
 
+let savedLibraryView = "card";
+try { if (localStorage.getItem(LIBRARY_VIEW_KEY) === "list") savedLibraryView = "list"; } catch (_) { /* default to cards */ }
+setLibraryView(savedLibraryView, false);
+try { setLibraryEpisodeOrder(localStorage.getItem(EPISODE_ORDER_KEY)); } catch (_) { /* default to newest */ }
+document.getElementById("library-episode-order").addEventListener("change", (event) => setLibraryEpisodeOrder(event.target.value, true));
+window.addEventListener("storage", (event) => {
+  if (event.key === EPISODE_ORDER_KEY || event.key === null) setLibraryEpisodeOrder(event.newValue);
+});
+for (const mode of ["card", "list"]) document.getElementById(`library-view-${mode}`).addEventListener("click", () => setLibraryView(mode));
 for (const id of ["library-search", "library-platform", "library-sort"]) document.getElementById(id).addEventListener(id === "library-search" ? "input" : "change", renderLibrary);
 document.getElementById("library-refresh").addEventListener("click", loadLibraryPage);
+document.getElementById("library-detail-back").addEventListener("click", () => closeLibraryDetail());
+document.getElementById("library-detail-retry").addEventListener("click", () => loadLibraryDetail());
+document.getElementById("library-detail-continue").addEventListener("click", () => {
+  if (libraryDetailItem) openLibraryReader(libraryDetailItem);
+});
 document.addEventListener("webtoon-reader-closed", () => {
-  if (!document.getElementById("page-library").classList.contains("hidden")) loadLibraryPage();
+  if (!document.getElementById("page-library").classList.contains("hidden")) loadLibraryPage({ keepDetail: true });
 });

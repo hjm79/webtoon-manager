@@ -4,13 +4,13 @@ const fs = require("node:fs");
 const path = require("node:path");
 const vm = require("node:vm");
 
-const { createWriter } = require("../../static/reader-progress.js");
+const { createWriter, createReadingEvidence } = require("../../static/reader-progress.js");
 const html = fs.readFileSync(path.join(__dirname, "../../static/reader.html"), "utf8");
 const helpers = html.match(/function setProgressSaveError\(visible\) \{[\s\S]*?\n\}/)[0];
-const save = html.match(/function saveProgressNow\([\s\S]*?(?=\nfunction scheduleSaveProgress)/)[0];
+const save = html.match(/function progressImageState\([\s\S]*?(?=\nfunction scheduleSaveProgress)/)[0];
 const close = html.match(/async function leaveReaderForList\([\s\S]*?(?=\ndocument.getElementById\("backLink"\))/)[0];
 
-function reader(fetcher) {
+function reader(fetcher, images = [{ dataset: { chapter: "chapter-7", page: "4" }, complete: true, naturalWidth: 720, naturalHeight: 1200 }]) {
   const messages = [];
   const requests = [];
   const banner = { hidden: true };
@@ -19,10 +19,17 @@ function reader(fetcher) {
     encodeURIComponent,
     clearTimeout,
     currentChapterId: "chapter-7",
+    pendingJumpChapterId: null,
+    readingFromChapterId: "chapter-7", chapterIndexById: () => 0,
+    completedChapterPosition: null, completedChapters: new Set(), persistedCompletedChapters: new Set(),
+    readingEvidence: createReadingEvidence(),
+    progressRevision: 1, savedProgressRevision: 0,
+    closingProgressSaved: false,
     currentPageIndex: 4,
     seriesId: "series-1",
     saveTimer: null,
     embedBridge: { active: true },
+    pagesEl: { querySelectorAll: () => images, classList: { contains: () => false } },
     document: { body: { classList: { remove() {} } }, getElementById: () => banner },
     stopAutoScroll() {}, stopContinuousScroll() {},
     exitBrowserFullscreen: async () => {},
@@ -65,9 +72,25 @@ test("network failure keeps embedded reader open and a retry saves the same posi
   assert.equal(ctx.banner.hidden, true);
   assert.deepEqual(ctx.messages.map((m) => m.type), ["error", "progress", "close"]);
   assert.deepEqual(ctx.requests.map((r) => (({ client_session_id, client_sequence, ...position }) => position)(JSON.parse(r.options.body))), [
-    { chapter_id: "chapter-7", page_index: 4, completed: false },
-    { chapter_id: "chapter-7", page_index: 4, completed: false },
+    { chapter_id: "chapter-7", page_index: 4, completed: false, read_chapter_ids: [], reading_from_chapter_id: "chapter-7" },
+    { chapter_id: "chapter-7", page_index: 4, completed: false, read_chapter_ids: [], reading_from_chapter_id: "chapter-7" },
   ]);
+});
+
+test("closing an idle reader does not write the old tab's cursor over a newer position", async () => {
+  const ctx = reader(async () => assert.fail("an unchanged cursor must not be written"));
+  ctx.context.progressRevision = 0;
+  await ctx.context.leaveReaderForList();
+  assert.equal(ctx.requests.length, 0);
+  assert.deepEqual(ctx.messages.map((m) => m.type), ["close"]);
+});
+
+test("closing after an acknowledged autosave does not write the cursor again", async () => {
+  const ctx = reader(async () => ({ ok: true }));
+  assert.equal(await ctx.context.saveProgressNow(), true);
+  await ctx.context.leaveReaderForList();
+  assert.equal(ctx.requests.length, 1);
+  assert.deepEqual(ctx.messages.map((m) => m.type), ["progress", "close"]);
 });
 
 test("close acknowledgement waits for the successful progress response", async () => {
@@ -85,6 +108,26 @@ test("non-close autosave callers receive false on failure without an unhandled r
   const ctx = reader(async () => ({ ok: false, status: 500 }));
   assert.equal(await ctx.context.saveProgressNow(), false);
   assert.equal(ctx.messages.some((m) => m.type === "close"), false);
+});
+
+test("a pagehide save after an acknowledged embedded close cannot overwrite the saved position", async () => {
+  const ctx = reader(async () => ({ ok: true, status: 200 }));
+  await ctx.context.leaveReaderForList();
+  assert.equal(ctx.context.closingProgressSaved, true);
+  await ctx.context.saveProgressNow({ keepalive: true, urgent: true });
+  assert.equal(ctx.requests.length, 1);
+  assert.deepEqual(ctx.messages.map((m) => m.type), ["progress", "close"]);
+});
+
+test("closing a missing manifest, pending image, or corrupt target preserves the last server position", async () => {
+  const pending = { dataset: { chapter: "chapter-7", page: "4", imageState: "loading" }, complete: false };
+  const corrupt = { dataset: { chapter: "chapter-7", page: "4", imageState: "failed" }, complete: true, naturalWidth: 0, naturalHeight: 0 };
+  for (const images of [[], [pending], [corrupt]]) {
+    const ctx = reader(async () => ({ ok: true, status: 200 }), images);
+    await ctx.context.leaveReaderForList();
+    assert.equal(ctx.requests.length, 0);
+    assert.deepEqual(ctx.messages.map((m) => m.type), ["close"]);
+  }
 });
 
 test("retry button keeps normal Space activation instead of starting reader autoscroll", () => {

@@ -16,10 +16,13 @@ _JOB_HISTORY_KEEP_PER_JOB = 30
 
 
 def add_job_history(job_name: str, started_at: str, finished_at: str, status: str, log: list[str]) -> None:
+    from app.log_redaction import redact_lines
+
+    sanitized = redact_lines(log)
     with write_transaction() as conn:
         conn.execute(
             "INSERT INTO job_history (job_name, started_at, finished_at, status, log) VALUES (?, ?, ?, ?, ?)",
-            (job_name, started_at, finished_at, status, json.dumps(log)),
+            (job_name, started_at, finished_at, status, json.dumps(sanitized)),
         )
         # 잡마다 최근 N개만 남기고 오래된 이력은 정리한다.
         conn.execute(
@@ -34,6 +37,8 @@ def add_job_history(job_name: str, started_at: str, finished_at: str, status: st
 
 
 def list_job_history(limit_per_job: int = 10) -> list[dict]:
+    from app.log_redaction import redact_lines
+
     with read_lock() as conn:
         job_names = [r["job_name"] for r in conn.execute("SELECT DISTINCT job_name FROM job_history").fetchall()]
         results: list[dict] = []
@@ -53,6 +58,9 @@ def list_job_history(limit_per_job: int = 10) -> list[dict]:
                         "log": json.loads(r["log"] or "[]"),
                     }
                 )
+    sanitized = iter(redact_lines([line for entry in results for line in entry["log"]]))
+    for entry in results:
+        entry["log"] = [next(sanitized) for _ in entry["log"]]
     results.sort(key=lambda r: r["started_at"], reverse=True)
     return results
 

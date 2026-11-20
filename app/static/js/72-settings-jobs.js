@@ -213,6 +213,7 @@ async function loadJobHistoryPage() {
 }
 
 const JOB_NAME_LABEL = { discovery: "신작 스캔", download: "다운로드", manual: "수동 다운로드", registry: "작가/태그 재동기화", subscription: "구독/작가 등록", metadata_sync: "메타 동기화", report: "다운로드 리포트", quick_scan: "빠른 상태 스캔" };
+const JOB_OUTCOME_LABEL = { idle: "대기", running: "실행 중", success: "완료", error: "실패", partial: "일부 미처리", cancelled: "중단" };
 
 async function loadJobHistory() {
   const container = document.getElementById("job-history-list");
@@ -234,7 +235,7 @@ async function loadJobHistory() {
       summary.innerHTML = `
         <span class="job-history-name">${escapeHtml(JOB_NAME_LABEL[entry.job_name] || entry.job_name)}</span>
         <span class="job-history-time">${escapeHtml(startedLabel || "")}</span>
-        <span class="badge job-${entry.status}">${entry.status}</span>
+        <span class="badge job-${escapeHtml(entry.status)}">${escapeHtml(JOB_OUTCOME_LABEL[entry.status] || entry.status)}</span>
       `;
       const deleteBtn = makeButton("삭제", async (ev) => {
         ev.stopPropagation();

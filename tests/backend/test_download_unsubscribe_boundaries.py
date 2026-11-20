@@ -47,7 +47,7 @@ async def naver_stops_after_current_file_and_rest():
     async def single(**kwargs):
         attempts.append(kwargs["episode"].episode_no)
         repository.set_status("302", repository.STATUS_UNSUBSCRIBED)
-        return True, None
+        return True, folder / f"[{attempts[-1]:04d}]"
     def archive(_folder, **kwargs):
         path = folder / f"{attempts[-1]}.zip"
         path.write_bytes(b"finished")
@@ -67,7 +67,7 @@ async def naver_stops_after_current_file_and_rest():
     attempts.clear()
     async def single_active(**kwargs):
         attempts.append(kwargs["episode"].episode_no)
-        return True, None
+        return True, folder / f"[{attempts[-1]:04d}]"
     rests = []
     async def rest(platform, title_id, seconds):
         rests.append(seconds)

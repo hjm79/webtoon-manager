@@ -71,10 +71,16 @@ async def episode_lists():
     flaky = FakeSession(lambda url, params, n: [RuntimeError("끊김"), FakeResponse(500), page([2, 1])][n])
     episodes = await naver_api.fetch_all_episodes(flaky, "1", {}, 10)
     assert [e.episode_no for e in episodes] == [1, 2] and sleeps == [1.0, 2.0] and len(flaky.calls) == 3
-    # 끝까지 실패하면 (재시도 횟수+1)번 시도하고 포기 → 빈 목록
+    # 끝까지 실패하면 (재시도 횟수+1)번 시도하고 실패를 보고한다.
     sleeps.clear()
     dead = FakeSession(lambda *a: FakeResponse(500))
-    assert await naver_api.fetch_all_episodes(dead, "1", {}, 10) == [] and len(dead.calls) == EPISODE_LIST_MAX_RETRIES + 1
+    try:
+        await naver_api.fetch_all_episodes(dead, "1", {}, 10)
+    except naver_api.NaverApiError as exc:
+        assert "1페이지" in str(exc)
+    else:
+        raise AssertionError("첫 페이지 실패가 빈 목록으로 처리됨")
+    assert len(dead.calls) == EPISODE_LIST_MAX_RETRIES + 1
     assert sleeps == [RETRY_BACKOFF_BASE_SECONDS * 2 ** i for i in range(EPISODE_LIST_MAX_RETRIES)]
     # Scenario 5: 여러 페이지는 합쳐서 회차 번호 오름차순, 잠금 표시와 쿠키 전달
     pages = {1: page([5, 4], total=3, locked={4}), 2: page([3, 2]), 3: page([1])}
@@ -90,9 +96,15 @@ async def episode_lists():
         raise SystemExit("불완전한 목록을 그대로 돌려줌")
     except naver_api.NaverApiError as e:
         assert "9" in str(e) and "2" in str(e), str(e)           # 어느 작품의 몇 페이지가 실패했는지 알려 준다
-    # 첫 페이지 실패는 예전처럼 빈 목록(접근 불가 — 성인 미인증 등)
-    sleeps.clear()
-    assert await naver_api.fetch_all_episodes(FakeSession(lambda *a: FakeResponse(403)), "9", {}, 10) == []
+    # 명시적인 빈 목록은 성공하고 중복 페이지는 불완전한 목록으로 실패한다.
+    assert await naver_api.fetch_all_episodes(FakeSession(lambda *a: page([])), "9", {}, 10) == []
+    repeated = FakeSession(lambda *a: page([2, 1], total=2))
+    try:
+        await naver_api.fetch_all_episodes(repeated, "9", {}, 10)
+    except naver_api.NaverApiError as exc:
+        assert "중복" in str(exc)
+    else:
+        raise AssertionError("중복 페이지가 전체 목록으로 처리됨")
     # Scenario 7: 최신 회차만 가볍게 — 한 페이지에서 가장 큰 번호, 비었거나 실패면 None
     latest_page = FakeSession(lambda *a: page([9, 10, 8], locked={10}))
     latest = await naver_api.fetch_latest_episode(latest_page, "1", 10, {"c": "v"})

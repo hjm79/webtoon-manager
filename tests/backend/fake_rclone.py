@@ -18,7 +18,7 @@ class FakeRclone:
         self.files: dict[tuple[str, str], bytes] = {}
         self.folders: set[tuple[str, str]] = set()
         self.fail_move_names: set[str] = set()  # 이 이름의 파일을 원격으로 올릴 때 RcloneError를 낸다
-        self.leave_empty_on_fail = False  # 업로드가 실패하면 OneDrive처럼 0KB 자리표시 파일이 목적지에 남는다(정리 요청도 실패하면 그대로 남는다)
+        self.leave_empty_on_fail = False  # An upload failure can leave a temporary object until cleanup.
         self.fail_delete = False  # 원격 파일 지우기가 실패한다(401 등) — 정리가 실패해도 이동이 망가지지 않는지 본다
         self.deleted: list[str] = []  # 지운 원격 파일(경로) 기록 — 무엇을 지웠는지 확인한다
 
@@ -68,12 +68,16 @@ class FakeRclone:
         name = dest_file_name or Path(local_file_path).name
         if name in self.fail_move_names:
             if self.leave_empty_on_fail:
-                self.files[(remote, _join(dest_path, name))] = b""
+                staged = _join(dest_path, f".webtoon-archive-fixture-{name}.part")
+                if self.fail_delete:
+                    self.files[remote, staged] = b""
+                else:
+                    self.deleted.append(staged)
             raise rclone_client.RcloneError(f"업로드 실패: {name}")
         self.files[(remote, _join(dest_path, name))] = Path(local_file_path).read_bytes()
         Path(local_file_path).unlink()
 
-    def file_exists(self, config_path, remote, path, file_name, *, ignore_empty=False):
+    def file_exists(self, config_path, remote, path, file_name, *, ignore_empty=False, strict=False):
         data = self.files.get((remote, _join(path, file_name)))
         return data is not None and not (ignore_empty and len(data) == 0)
 

@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import asyncio
+import io
 import logging
 import time
 from email.utils import parsedate_to_datetime
@@ -13,6 +14,7 @@ import aiohttp
 from yarl import URL
 
 from app import kakao_api, kakao_page_auth
+from app.file_utils import episode_image_format
 
 from app.kakao_page_download.models import (
     ABOUT_URL,
@@ -281,6 +283,7 @@ class KakaoPageClient:
         episodes: dict[int, Episode] = {}
         excluded_orders: list[int] = []  # 동영상/체험판 회차의 순서 번호(뒤 회차의 번호를 그만큼 당기는 데 쓴다)
         cursor, direction = 0, "NEXT"
+        seen_cursors = {cursor}
         for _ in range(_MAX_LIST_PAGES):
             params = {
                 "series_id": series_id, "cursor_index": cursor, "cursor_direction": direction, "window_size": _LIST_WINDOW_SIZE,
@@ -289,17 +292,28 @@ class KakaoPageClient:
             _, data = await self._request_json("GET", PRODUCT_LIST_URL, params=params, label=f"회차 목록 series_id={series_id}")
             if data is None or ('result_code' in data and data['result_code'] != 0):
                 return None
-            result = data.get("result") or {}
+            result = data.get("result")
+            entries = result.get("list") if isinstance(result, dict) else None
+            if not isinstance(entries, list) or any(not isinstance(entry, dict) for entry in entries):
+                self.last_failure = "잘못된 카카오페이지 회차 목록 응답"
+                return None
             if not series_item:
                 series_item = result.get("series_item") or {}
-            entries = result.get("list") or []
             new_count = _absorb_entries(entries, episodes, excluded_orders, series_item.get("title", ""), now_kst)
+            if entries and not new_count:
+                self.last_failure = "카카오페이지가 동일하거나 회차 정보가 없는 페이지를 반환했습니다."
+                return None
+            if not result.get("has_next"):
+                series_item["_excluded_video_count"] = len(excluded_orders)
+                return series_item, _renumber_after_exclusion(episodes, excluded_orders)
             cursor = entries[-1].get("cursor_index") if entries else None
-            if not result.get("has_next") or new_count == 0 or cursor is None:
-                break
+            if type(cursor) is not int or cursor in seen_cursors:
+                self.last_failure = "카카오페이지 회차 목록의 다음 페이지를 확인할 수 없습니다."
+                return None
+            seen_cursors.add(cursor)
             await asyncio.sleep(_PAGE_INTERVAL_SECONDS)
-        series_item["_excluded_video_count"] = len(excluded_orders)  # 동영상/체험판이라 목록에서 뺀 회차 수(분석 화면의 "사이트 회차 수" 비교용)
-        return series_item, _renumber_after_exclusion(episodes, excluded_orders)
+        self.last_failure = "카카오페이지 회차 목록이 조회 한도를 초과했습니다."
+        return None
 
     async def ticket_info(self, series_id: int) -> TicketInfo | None:
         """이 작품의 대여권/소장권 수와 기다무 상태. 못 받으면 None(기다무를 못 쓰는 것으로 다룬다)."""
@@ -437,12 +451,15 @@ class KakaoPageClient:
                     self._ensure_current(refresh=False)
                     if response.status == 200:
                         body = await response.read()
+                        image_format = await asyncio.to_thread(episode_image_format, io.BytesIO(body))
                         self._ensure_current(refresh=False)
-                        if body:
+                        if image_format is not None:
                             if self.cookie_revision == request_revision:
                                 self._absorb_cookies(response, request_url=url)
                                 persist_refreshed_cookies(self, strict_auth=True)
-                            return body, response.headers.get("Content-Type", "")
+                            return body, f"image/{image_format}"
+                        self.last_failure = "이미지 데이터를 읽을 수 없습니다."
+                        log.warning("카카오페이지 이미지 받기 실패: 잘못된 이미지 데이터 (%s)", target.host)
                     else:
                         log.warning("카카오페이지 이미지 받기 실패: HTTP %s (%s)", response.status, target.host)
                         self.last_failure = f"이미지 받기 실패(HTTP {response.status})"

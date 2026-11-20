@@ -7,7 +7,7 @@ from zipfile import ZipFile
 from app import archiver, db, repository
 from app.archiver import cancel, origin
 from app.config import get_settings
-from viewer.app import db as viewer_db, profile_progress, scan
+from viewer.app import backup, db as viewer_db, profile_progress, profiles, scan
 
 settings = get_settings()
 db.get_connection()
@@ -34,13 +34,15 @@ with TemporaryDirectory() as temp, patch.object(settings, "viewer_internal_url",
     with patch.object(viewer_db, "DB_PATH", str(Path(temp) / "progress.db")):
         viewer_db.init_schema()
         profile_progress.init_schema()
+        profiles.init_schema()
+        profile_id = profiles.create_profile("테스트 프로필")["id"]
         before, _ = scan._scan_series_at_path("naver", source_folder.name, str(source_folder))
         source_id = before["id"]
         original_first, original_second = [chapter["id"] for chapter in before["chapters"]]
         viewer_db.mark_chapters_read(source_id, [original_first])
         viewer_db.set_progress(source_id, original_second, 1, 1, page_offset=0.45)
-        profile_progress.mark_chapters_read("one", source_id, [original_second])
-        profile_progress.set_progress("one", source_id, original_first, 0, 0, page_offset=0.25)
+        profile_progress.mark_chapters_read(profile_id, source_id, [original_second])
+        profile_progress.set_progress(profile_id, source_id, original_first, 0, 0, page_offset=0.25)
 
         repository.upsert_new("99101", source_folder.name)
         repository.set_status("99101", repository.STATUS_UNSUBSCRIBED)
@@ -67,8 +69,8 @@ with TemporaryDirectory() as temp, patch.object(settings, "viewer_internal_url",
         assert dest["archive_identity"] == ("naver", "99101")
         assert viewer_db.get_read_chapter_ids(dest_id) == {new_first}
         assert viewer_db.get_progress(dest_id) == {"chapter_id": new_second, "chapter_index": 1, "page_index": 1, "page_offset": 0.45}
-        assert profile_progress.get_read_chapter_ids("one", dest_id) == {new_second}
-        assert profile_progress.get_progress("one", dest_id)["page_offset"] == 0.25
+        assert profile_progress.get_read_chapter_ids(profile_id, dest_id) == {new_second}
+        assert profile_progress.get_progress(profile_id, dest_id)["page_offset"] == 0.25
         assert profile_progress.get_progress("other", dest_id) is None
         assert viewer_db.get_progress(source_id)["chapter_id"] == original_second
 
@@ -77,6 +79,18 @@ with TemporaryDirectory() as temp, patch.object(settings, "viewer_internal_url",
         scan._scan_series_at_path("archive", dest_folder.name, str(dest_folder))
         assert not viewer_db.get_read_chapter_ids(dest_id)
         assert viewer_db.get_progress(dest_id)["page_offset"] == 0.9
+
+        snapshot = backup.export_snapshot()
+        assert len(snapshot["archive_progress_imports"]) == 2
+        with patch.object(viewer_db, "DB_PATH", str(Path(temp) / "restored-progress.db")):
+            viewer_db.init_schema()
+            restored = backup.restore_snapshot(snapshot)
+            assert restored["archive_progress_imports_count"] == 2
+            scan._scan_series_at_path("archive", dest_folder.name, str(dest_folder))
+            assert not viewer_db.get_read_chapter_ids(dest_id)
+            assert viewer_db.get_read_chapter_ids(source_id) == {original_first}
+            assert viewer_db.get_progress(dest_id)["page_offset"] == 0.9
+            assert profile_progress.get_read_chapter_ids(profile_id, dest_id) == {new_second}
 
         # Re-using an old name and marker cannot assign the previous identity to a new file.
         moved_first.write_bytes(b"replacement")

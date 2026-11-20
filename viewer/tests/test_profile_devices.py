@@ -2,8 +2,14 @@
 app/profile_devices.py 회귀 테스트.
 """
 
+import sqlite3
 import time
+from concurrent.futures import ThreadPoolExecutor
+from threading import Barrier
 
+import pytest
+
+from app import db
 from app import profile_devices as devices
 
 
@@ -89,3 +95,54 @@ def test_approving_nonexistent_request_does_nothing(library):
 
     """THEN 아무 일도 안 일어난다(에러 없이 조용히 무시)"""
     assert devices.count_devices("p1") == 0
+
+
+def test_concurrent_device_access_respects_two_slot_limit(library):
+    devices.init_schema()
+    barrier = Barrier(8, timeout=5)
+
+    def access(index):
+        barrier.wait()
+        return devices.access_status("p1", f"device-{index}", "테스트 기기")
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        statuses = list(pool.map(access, range(8)))
+    assert statuses.count("approved") == 2
+    assert statuses.count("needs_request") == 6
+    assert devices.count_devices("p1") == 2
+
+
+def test_concurrent_requests_and_approval_retry_do_not_evict_extra_device(library):
+    devices.init_schema()
+    devices.register_device("p1", "old", "기존 기기")
+    devices.register_device("p1", "recent", "최근 기기")
+
+    with db.db_connection() as conn, conn:
+        conn.execute("UPDATE profile_devices SET last_seen_at = '2000-01-01' WHERE device_id = 'old'")
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        requested = list(pool.map(lambda _: devices.create_pending_request("p1", "new", "새 기기"), range(4)))
+        assert requested.count(True) == 1
+        assert len(devices.list_pending_requests("p1")) == 1
+        list(pool.map(lambda _: devices.approve_request("p1", "new"), range(4)))
+
+    assert {device["device_id"] for device in devices.list_devices("p1")} == {"recent", "new"}
+    assert not devices.list_pending_requests("p1")
+    assert not devices.create_pending_request("p1", "new", "승인된 기기")
+
+
+def test_failed_approval_preserves_existing_devices_and_pending_request(library):
+    devices.init_schema()
+    devices.register_device("p1", "old", "기존 기기")
+    devices.register_device("p1", "recent", "최근 기기")
+    devices.create_pending_request("p1", "new", "새 기기")
+
+    with db.db_connection() as conn, conn:
+        conn.execute("""
+            CREATE TRIGGER deny_device_insert BEFORE INSERT ON profile_devices
+            BEGIN SELECT RAISE(ABORT, 'approval write failed'); END
+        """)
+    with pytest.raises(sqlite3.IntegrityError, match="approval write failed"):
+        devices.approve_request("p1", "new")
+
+    assert {device["device_id"] for device in devices.list_devices("p1")} == {"old", "recent"}
+    assert devices.get_pending_request("p1", "new") is not None

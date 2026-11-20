@@ -25,6 +25,7 @@ from app.file_utils import remove_forbidden_str, remove_forbidden_str_kakao
 from app.config import get_settings
 from app.path_guard import PathOutsideRootError
 from app.db import write_transaction
+from app.repository.settings import set_settings
 
 from app.api.common import (
     _is_author_auto_register_enabled,
@@ -43,32 +44,37 @@ class DownloadRootsIn(BaseModel):
 
 
 def _download_roots_state() -> dict:
-    """설정 화면용: 네이버/카카오페이지 각각 (설정값, 실제로 쓰는 폴더). 카카오 폴더를 비워 두면 네이버 폴더를 쓴다."""
+    """설정 화면에 플랫폼별 기본값과 실제 다운로드 경로를 반환한다."""
     settings = get_settings()
     naver_effective, kakao_effective = download_roots.naver_root(settings), download_roots.kakao_root(settings)
     return {
         # base: 컨테이너에 마운트된 다운로드 폴더(폴더 찾아보기의 출발점), host_path: 호스트 쪽 실제 경로(알 때만)
         "base": settings.download_root, "host_path": settings.webtoon_download_host_path,
+        "viewer_bound": download_roots.viewer_download_root("naver", settings) is not None,
         "naver": {
             "path": repository.get_setting(download_roots.NAVER_ROOT_SETTING_KEY) or "", "effective": naver_effective,
-            "effective_host": download_roots.host_path_of(naver_effective, settings), "default": settings.download_root,
+            "effective_host": download_roots.host_path_of(naver_effective, settings), "default": download_roots.naver_default(settings),
         },
         "kakao": {
             "path": repository.get_setting(kakao_page_download.DOWNLOAD_ROOT_SETTING_KEY) or "", "effective": kakao_effective,
-            "effective_host": download_roots.host_path_of(kakao_effective, settings), "default": naver_effective,
+            "effective_host": download_roots.host_path_of(kakao_effective, settings), "default": download_roots.kakao_default(settings),
         },
     }
 
 
-def _validate_download_folder(raw_path: str) -> str:
-    """비어 있으면 "" (기본 폴더로 되돌림). 아니면 이미 있는(컨테이너에 마운트된) 절대 경로의 쓸 수 있는 폴더만 받는다 — 없는
-    폴더를 자동으로 만들면 마운트가 안 된 경로일 때 컨테이너 안에만 저장돼서, 컨테이너를 다시 만들면 받은 파일이 사라지기 때문이다."""
+def _validate_download_folder(raw_path: str, platform: str, settings) -> str:
+    """Confirm a writable existing folder and the viewer mount when integrated."""
     path = raw_path.strip()
-    if not path:
+    watched_root = download_roots.viewer_download_root(platform, settings)
+    if not path and watched_root is None:
         return ""
-    folder = Path(path)
+    folder = Path(path) if path else watched_root
     if not folder.is_absolute():
         raise HTTPException(status_code=400, detail="절대 경로로 입력해주세요(예: /webtoon_download_kakao).")
+    if watched_root is not None:
+        problem = download_roots.download_root_problem(platform, settings, path=folder)
+        if problem:
+            raise HTTPException(400, problem)
     if not folder.is_dir():
         raise HTTPException(
             status_code=400,
@@ -113,10 +119,15 @@ async def set_download_roots(payload: DownloadRootsIn):
     """네이버/카카오페이지 다운로드 폴더. 폴더를 바꿔도 이미 받은 파일을 옮기지는 않는다(옮기는 건 사용자가 직접). 웹툰 유형
     아카이빙 대상은 실행할 때 새 폴더를 보고, 폴더 유형 대상/일괄 이동은 "다운로드 폴더"(네이버)와 "카카오페이지 다운로드
     폴더"를 각각 고를 수 있다."""
-    naver = _validate_download_folder(payload.naver)
-    kakao = _validate_download_folder(payload.kakao)
-    await asyncio.to_thread(repository.set_setting, download_roots.NAVER_ROOT_SETTING_KEY, naver or None)
-    await asyncio.to_thread(repository.set_setting, kakao_page_download.DOWNLOAD_ROOT_SETTING_KEY, kakao or None)
+    settings = get_settings()
+    naver, kakao = await asyncio.to_thread(
+        lambda: (_validate_download_folder(payload.naver, "naver", settings),
+                 _validate_download_folder(payload.kakao, "kakao", settings))
+    )
+    await asyncio.to_thread(set_settings, {
+        download_roots.NAVER_ROOT_SETTING_KEY: naver or None,
+        kakao_page_download.DOWNLOAD_ROOT_SETTING_KEY: kakao or None,
+    })
     return await get_download_roots()
 
 
@@ -512,5 +523,7 @@ async def lookup_webtoon_server_reader_url(title: str, platform: str = "naver"):
     settings = get_settings()
     safe_title = remove_forbidden_str_kakao(title) if platform == "kakao" else remove_forbidden_str(title)
     async with aiohttp.ClientSession() as session:
-        url = await webtoon_server_client.fetch_reader_url(session, server_url, safe_title, settings.request_timeout_seconds)
+        url = await webtoon_server_client.fetch_reader_url(
+            session, server_url, safe_title, settings.request_timeout_seconds, platform=platform
+        )
     return {"url": url}

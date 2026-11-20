@@ -4,10 +4,11 @@
 정기/수동 다운로드가 돌고 있으면 이번 틱은 건너뛴다(같은 작품을 동시에 받지 않는다 — 1분 뒤 다시 확인). 같은 작품을 연속으로 두드리지 않도록
 충전 시각이 그대로면 10분, 오류/로그인 문제면 30분 뒤로 미룬다(waitfree_sync).
 """
+import asyncio
 import logging
 from datetime import datetime, timezone
 
-from app import job_status, repository, waitfree_sync
+from app import download_roots, job_status, repository, waitfree_sync
 from app.config import get_settings
 from app.scheduler import download_job
 from app.scheduler.download_job import _download_job_lock
@@ -20,7 +21,7 @@ async def run_waitfree_due_job(now: datetime | None = None) -> None:
     if not waitfree_sync.is_enabled():
         return
     now = now or datetime.now(timezone.utc)
-    queued = {(row["platform"], row["title_id"]) for row in repository.list_download_queue()}
+    queued = {(row["platform"], row["title_id"]) for row in repository.list_download_queue(include_failed=False)}
     due = [row for row in waitfree_sync.due_webtoons(now) if ("kakao", str(row["title_id"])) not in queued]
     if not due:
         return  # 서버에 요청도, 작업 상태/이력도 만들지 않는다
@@ -37,6 +38,10 @@ async def run_waitfree_due_job(now: datetime | None = None) -> None:
 
 async def _run_waitfree_batch(due: list[dict], now: datetime) -> None:
     settings = get_settings()
+    problem = await asyncio.to_thread(download_roots.download_root_problem, "kakao", settings)
+    if problem:
+        log.warning("기다무 다운로드 보류 · %s", problem)
+        return
     job_status.start("download")
     job_status.log_line("download", f"기다무 충전 시각이 된 작품 {len(due)}개를 받습니다: " + ", ".join(w["title"] for w in due))
     had_error = False

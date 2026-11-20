@@ -92,10 +92,16 @@ def get_kakao_downloaded_numbers(title_id: int) -> set[int] | None:
 
 def set_kakao_downloaded_numbers(title_id: int, numbers) -> None:
     """받은 회차 기록을 통째로 바꾼다(빈 기록도 "기록 있음"). 추적하지 않는 작품이면 아무것도 하지 않는다."""
+    from app.kakao_records import discard_removed_receipts
+
+    values = {int(n) for n in numbers}
     with write_transaction() as conn:
+        previous = conn.execute("SELECT downloaded_numbers FROM kakao_webtoons WHERE title_id=?", (title_id,)).fetchone()
+        if previous is not None and previous["downloaded_numbers"] is not None:
+            discard_removed_receipts(conn, title_id, set(json.loads(previous["downloaded_numbers"])) - values)
         conn.execute(
             "UPDATE kakao_webtoons SET downloaded_numbers = ? WHERE title_id = ?",
-            (json.dumps(sorted({int(n) for n in numbers})), title_id),
+            (json.dumps(sorted(values)), title_id),
         )
 
 

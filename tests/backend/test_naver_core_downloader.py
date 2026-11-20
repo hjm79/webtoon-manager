@@ -5,12 +5,14 @@
 import asyncio
 import logging
 import tempfile
+from zipfile import ZipFile
 from pathlib import Path
 
-from app import downloader
+from app import downloader, zipper
 from app.constants import DEFAULT_HEADERS, IMAGE_DOWNLOAD_MAX_RETRIES, NAVER_DETAIL_URL_TEMPLATES, RETRY_BACKOFF_BASE_SECONDS
 from app.models import EpisodeInfo
 from fake_naver_http import FakeResponse, FakeSession, InflightTracker
+from fakes import image_bytes
 
 logs = []
 class Capture(logging.Handler):
@@ -25,6 +27,8 @@ EPISODE = EpisodeInfo(episode_no=12, subtitle="열두 번째: 이야기", is_loc
 HTML = '<html><body><div class="wt_viewer"><img src="https://img/a.jpg"><img src="https://img/b.png?x=1"><img><img src=""><img src="https://img/c"></div></body></html>'
 DETAIL = NAVER_DETAIL_URL_TEMPLATES["webtoon"]
 BACKOFF = [RETRY_BACKOFF_BASE_SECONDS * 2 ** i for i in range(IMAGE_DOWNLOAD_MAX_RETRIES)]      # 1, 2, 4, 8, 16초
+JPEG = image_bytes("JPEG")
+PNG = image_bytes("PNG")
 
 
 async def image_urls():
@@ -55,12 +59,19 @@ async def image_urls():
 
 async def single_image():
     tmp = Path(tempfile.mkdtemp())
-    # Scenario 6: 200이면 조각(chunk)을 이어 붙여 저장하고(폴더가 없으면 만든다) 크기와 상관없이 성공
+    # Scenario 6: 조각을 이어 붙여 저장하고 작은 이미지도 읽을 수 있으면 성공한다.
     target = tmp / "새 폴더" / "0001.jpg"
-    assert await downloader._download_single_image(FakeSession(lambda *a: FakeResponse(200, chunks=[b"abc", b"def"])), "https://img/a.jpg", target, {}, 10) is True
-    assert target.read_bytes() == b"abcdef"
+    assert await downloader._download_single_image(FakeSession(lambda *a: FakeResponse(200, chunks=[JPEG[:20], JPEG[20:]])), "https://img/a.jpg", target, {}, 10) is True
+    assert target.read_bytes() == JPEG
     tiny = tmp / "tiny.jpg"
-    assert await downloader._download_single_image(FakeSession(lambda *a: FakeResponse(200, chunks=[b"x"])), "u", tiny, {}, 10) is True and tiny.read_bytes() == b"x"
+    assert await downloader._download_single_image(FakeSession(lambda *a: FakeResponse(200, chunks=[PNG])), "u", tiny, {}, 10) is True
+    assert not tiny.exists() and tiny.with_suffix(".png").read_bytes() == PNG
+    for invalid_bytes in (b"<html>denied</html>", JPEG[:50]):
+        sleeps.clear()
+        invalid = tmp / "invalid.jpg"
+        resp = FakeSession(lambda *a: FakeResponse(200, chunks=[invalid_bytes]))
+        assert await downloader._download_single_image(resp, "u", invalid, {}, 10) is False
+        assert not invalid.exists() and not invalid.with_suffix(".part").exists() and sleeps == BACKOFF
     # Scenario 7: 200이 아니면 백오프(1~16초)로 다시 시도하고 끝까지 안 되면 False — 파일은 만들지 않는다
     sleeps.clear(); dead = FakeSession(lambda *a: FakeResponse(500)); missing = tmp / "no.jpg"
     assert await downloader._download_single_image(dead, "u", missing, {}, 10) is False and len(dead.calls) == IMAGE_DOWNLOAD_MAX_RETRIES + 1 and sleeps == BACKOFF and not missing.exists()
@@ -69,8 +80,8 @@ async def single_image():
     # Scenario 8: 네트워크 예외는 재시도하다가 마지막 시도에서 False. 한 번 실패하고 성공하면 True
     sleeps.clear(); boom = FakeSession(lambda *a: RuntimeError("끊김"))
     assert await downloader._download_single_image(boom, "u", tmp / "e.jpg", {}, 10) is False and len(boom.calls) == IMAGE_DOWNLOAD_MAX_RETRIES + 1
-    sleeps.clear(); retry = FakeSession(lambda url, p, n: [RuntimeError("끊김"), FakeResponse(200, chunks=[b"ok"])][n])
-    assert await downloader._download_single_image(retry, "u", tmp / "r.jpg", {}, 10) is True and sleeps == [1.0] and (tmp / "r.jpg").read_bytes() == b"ok"
+    sleeps.clear(); retry = FakeSession(lambda url, p, n: [RuntimeError("끊김"), FakeResponse(200, chunks=[JPEG])][n])
+    assert await downloader._download_single_image(retry, "u", tmp / "r.jpg", {}, 10) is True and sleeps == [1.0] and (tmp / "r.jpg").read_bytes() == JPEG
     print("6~8) 이미지 하나 받기 OK")
 
 
@@ -86,13 +97,14 @@ async def whole_episode():
     run = lambda session, root, title="작품: 이름", kind="webtoon", workers=2: downloader.download_single_episode(
         session=session, title_id="777", title_name=title, webtoon_type=kind, episode=EPISODE, cookies={"c": "v"}, download_root=str(root),
         folder_zero_fill=4, image_zero_fill=4, max_concurrent_downloads=workers, timeout_seconds=10)
-    # Scenario 9: 회차 폴더 "{루트}/{작품 폴더}/[0012] 부제목/0001.jpg…" — 금지 문자는 전각으로, 확장자는 주소에서(없으면 .jpg), 이미지는 동시에 받되 상한을 지킨다
+    # Scenario 9: 회차 폴더 이름 규칙, 실제 이미지 형식의 확장자, 동시 받기 상한을 지킨다.
     root = Path(tempfile.mkdtemp()); tracker = InflightTracker(rendezvous=2)      # 2개가 동시에 들어올 때까지 서로 기다린다(스레드 타이밍과 무관)
     many = '<div class="wt_viewer">' + "".join(f'<img src="https://img/{i}.jpg">' for i in range(1, 7)) + "</div>"
-    session = episode_session(lambda url, n, tr: FakeResponse(200, chunks=[url.encode()], tracker=tr), html=many, tracker=tracker)
+    session = episode_session(lambda url, n, tr: FakeResponse(200, chunks=[JPEG], tracker=tr), html=many, tracker=tracker)
     ok, episode_dir = await run(session, root)
-    assert ok is True and episode_dir == root / "작품： 이름" / "[0012] 열두 번째： 이야기"
-    assert sorted(p.name for p in episode_dir.iterdir()) == [f"{i:04d}.jpg" for i in range(1, 7)] and (episode_dir / "0003.jpg").read_bytes() == b"https://img/3.jpg"
+    assert ok is True and episode_dir.name == "[0012] 열두 번째： 이야기"
+    assert episode_dir.parent.parent == root / "작품： 이름"
+    assert sorted(p.name for p in episode_dir.iterdir()) == [f"{i:04d}.jpg" for i in range(1, 7)] and (episode_dir / "0003.jpg").read_bytes() == JPEG
     assert tracker.max == 2, f"동시 받기 상한(2)을 지켜야 한다: {tracker.max}"
     # 파일을 쓰는 스레드가 느린 환경(CI 러너)을 흉내 낸다 — 둘째 이미지의 파일 열기가 늦게 끝나도 결과가 같아야 한다(예전에는 "동시에 1개"로 재어져 실패했다)
     import aiofiles as _aiofiles, time as _time
@@ -106,15 +118,15 @@ async def whole_episode():
     downloader.aiofiles.open = SlowSecondOpen
     try:
         slow_tracker = InflightTracker(rendezvous=2)
-        ok, _ = await run(episode_session(lambda url, n, tr: FakeResponse(200, chunks=[url.encode()], tracker=tr), html=many, tracker=slow_tracker), Path(tempfile.mkdtemp()))
+        ok, _ = await run(episode_session(lambda url, n, tr: FakeResponse(200, chunks=[JPEG], tracker=tr), html=many, tracker=slow_tracker), Path(tempfile.mkdtemp()))
     finally:
         downloader.aiofiles.open = real_open
     assert ok is True and slow_tracker.max == 2, f"느린 환경에서도 동시 받기 상한(2)이 그대로여야 한다: {slow_tracker.max}"
-    ok, d = await run(episode_session(lambda url, n, tr: FakeResponse(200, chunks=[b"x"])), Path(tempfile.mkdtemp()))
-    assert ok and sorted(p.name for p in d.iterdir()) == ["0001.jpg", "0002.png", "0003.jpg"]           # b.png?x=1 → .png, 확장자 없는 c → .jpg
+    ok, d = await run(episode_session(lambda url, n, tr: FakeResponse(200, chunks=[PNG if "b.png" in url else JPEG])), Path(tempfile.mkdtemp()))
+    assert ok and sorted(p.name for p in d.iterdir()) == ["0001.jpg", "0002.png", "0003.jpg"]
     # Scenario 10: 웹툰 종류에 맞는 상세 주소(도전만화 등), 모르는 종류는 일반 웹툰 — 요청에는 titleId/no와 쿠키가 실린다
     for kind, expected in (("challenge", NAVER_DETAIL_URL_TEMPLATES["challenge"]), ("bestChallenge", NAVER_DETAIL_URL_TEMPLATES["bestChallenge"]), ("이상한 종류", DETAIL)):
-        session = episode_session(lambda url, n, tr: FakeResponse(200, chunks=[b"x"]))
+        session = episode_session(lambda url, n, tr: FakeResponse(200, chunks=[JPEG]))
         await run(session, Path(tempfile.mkdtemp()), kind=kind)
         assert session.calls[0][0] == expected and session.calls[0][1] == {"titleId": "777", "no": 12} and session.calls[0][3] == {"c": "v"}
     # Scenario 11: 이미지 주소를 하나도 못 얻으면 (False, None)이고 폴더를 만들지 않는다
@@ -122,8 +134,26 @@ async def whole_episode():
     assert await run(episode_session(lambda *a: FakeResponse(200), html="<html></html>"), root) == (False, None) and list(root.iterdir()) == []
     # Scenario 12: 이미지가 하나라도 끝내 실패하면 그 회차 폴더를 통째로 지우고 (False, None) — 다음 실행이 깨끗한 상태에서 다시 받는다(작품 폴더는 남는다)
     root = Path(tempfile.mkdtemp()); sleeps.clear()
-    result = await run(episode_session(lambda url, n, tr: FakeResponse(500) if url.endswith("b.png?x=1") else FakeResponse(200, chunks=[b"x"])), root)
+    result = await run(episode_session(lambda url, n, tr: FakeResponse(200, chunks=[b"<html>error</html>" if "b.png" in url else JPEG])), root)
     assert result == (False, None) and (root / "작품： 이름").is_dir() and list((root / "작품： 이름").iterdir()) == []
+
+    # A retry isolates its inputs from old same-number images and crashed attempts.
+    series_dir = root / "작품： 이름"
+    previous = series_dir / "[0012] 열두 번째： 이야기"
+    previous.mkdir()
+    (previous / "0001.jpg").write_bytes(JPEG)
+    (previous / "0002.jpg").write_bytes(JPEG)
+    interrupted = series_dir / ".episode-download-interrupted" / previous.name
+    interrupted.mkdir(parents=True)
+    (interrupted / "0002.jpg").write_bytes(JPEG)
+    session = episode_session(lambda *_: FakeResponse(200, chunks=[PNG]),
+                              html='<div class="wt_viewer"><img src="https://img/new.png"></div>')
+    ok, stage = await run(session, root)
+    assert ok and stage.parent != interrupted.parent
+    [archive] = zipper.zip_episode_folders(series_dir, only_episode_dir=stage, preserve_numbers=True)
+    with ZipFile(series_dir / archive) as complete:
+        assert complete.namelist() == ["0001.png"] and complete.read("0001.png") == PNG
+    assert previous.is_dir() and interrupted.is_dir() and not stage.parent.exists()
     print("9~12) 회차 하나 받기 OK")
 
 

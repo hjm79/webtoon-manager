@@ -248,10 +248,7 @@ async def kakao_manual_analyze(series_id: int):
     title = series_item.get("title") or str(series_id)
     folder = kakao_page_download.series_folder(root, title)
     existing = await asyncio.to_thread(kakao_page_download.scan_existing_files, folder)
-    plan = kakao_page_download.plan_by_folder_rules(
-        episodes, existing, series_item.get("title") or "", repository.get_kakao_downloaded_numbers(series_id),
-        repository.get_kakao_pending_numbers(series_id),
-    )
+    plan = await asyncio.to_thread(kakao_records.plan_for_catalog, series_id, episodes, existing, title)
     return {
         **_plan_summary(plan, series_id, title, folder),
         "cookie_saved": cookie_saved, "logged_in": logged_in,
@@ -275,6 +272,10 @@ async def _run_kakao_manual_download(series_id: int, numbers: list[int], use_ren
     success = False
     try:
         async with kakao_page_download.download_lock:
+            problem = await asyncio.to_thread(download_roots.download_root_problem, "kakao", settings)
+            if problem:
+                log_line(f"다운로드 보류 · {problem}")
+                return
             root = await asyncio.to_thread(download_roots.kakao_root, settings)
             async with kakao_page_download.new_session() as session:
                 client = kakao_page_download.client_from_saved_cookies(session, settings.request_timeout_seconds)

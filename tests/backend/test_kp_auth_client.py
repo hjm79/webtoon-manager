@@ -6,7 +6,7 @@ import time
 from http.cookies import SimpleCookie
 
 from app import repository, db
-from fakes import discord_fake
+from fakes import discord_fake, image_bytes
 db.get_connection()
 from app import kakao_page_auth as auth
 from app import kakao_page_download as kp
@@ -186,8 +186,9 @@ async def t5():
     assert kinds == [("NEXT", 0), ("NEXT", 5), ("NEXT", 8)], kinds                          # 첫화부터, 마지막 항목의 cursor_index로 이어서 요청
     assert all(c[2]["sort_type"] == "asc" and c[2]["window_size"] == 25 for c in s.calls) and s.calls[0][2]["series_id"] == 1234
     loop = FakeSession(lambda m, u, p, d: FakeResp(200, {"result": {"series_item": {}, "list": [ep(1, "a")], "has_next": True}}))
-    _, eps2 = await kp.KakaoPageClient(loop, dict(COOKIES), 10).list_episodes(1)
-    assert len(eps2) == 1 and len(loop.calls) <= 3                                          # 같은 페이지만 되풀이해도 무한 반복 안 함
+    assert await kp.KakaoPageClient(loop, dict(COOKIES), 10).list_episodes(1) is None and len(loop.calls) == 2
+    no_cursor = FakeSession(lambda *a: FakeResp(200, {"result": {"list": [{"item": ep(1, 'a')['item']}], "has_next": True}}))
+    assert await kp.KakaoPageClient(no_cursor, dict(COOKIES), 10).list_episodes(1) is None
     assert await kp.KakaoPageClient(FakeSession(lambda *a: FakeResp(500)), dict(COOKIES), 10).list_episodes(1) is None
     print("5) 회차 목록 OK (페이지 이어받기, 번호=사이트 순서, 무료·잠김·대여 판정, 무한반복 방지)")
 asyncio.run(t5())
@@ -198,9 +199,12 @@ async def t6():
     cl = kp.KakaoPageClient(FakeSession(lambda *a: FakeResp(200, {"item": {}, "viewer_data": {"imageDownloadData": {"files": files}}})), dict(COOKIES), 10)
     assert await cl.viewer_image_urls(1, 2) == ["https://x/1", "https://x/2", "https://x/3"]
     assert await kp.KakaoPageClient(FakeSession(lambda *a: FakeResp(200, {"item": {}})), dict(COOKIES), 10).viewer_image_urls(1, 2) is None
-    s = FakeSession(lambda m, u, p, d: FakeResp(200, body=b"IMG", ctype="image/png"))
+    png = image_bytes("PNG")
+    s = FakeSession(lambda *a: FakeResp(200, body=png, ctype="application/octet-stream"))
     got = await kp.KakaoPageClient(s, dict(COOKIES), 10).download_image("https://page-edge.kakao.com/sdownload/resource?kid=k&signature=S")
-    assert got == (b"IMG", "image/png") and s.calls[0][3]["Referer"] == "https://page.kakao.com/"
+    assert got == (png, "image/png") and s.calls[0][3]["Referer"] == "https://page.kakao.com/"
+    invalid = FakeSession(lambda *a: FakeResp(200, body=b"<html>denied</html>", ctype="image/png"))
+    assert await kp.KakaoPageClient(invalid, dict(COOKIES), 10).download_image("https://x") is None
     assert await kp.KakaoPageClient(FakeSession(lambda *a: FakeResp(500)), dict(COOKIES), 10).download_image("https://x") is None
     print("6) 이미지 목록/받기 OK (번호순, 실패 시 재시도 후 None)")
 asyncio.run(t6())

@@ -32,25 +32,41 @@ router = APIRouter()
 
 @router.post("/metadata/sync")
 async def sync_metadata():
-    """추적 중인 웹툰 폴더를 스캔해서 info.xml/cover.jpg 누락분만 다시 만든다."""
+    """받은 웹툰의 info.xml과 표지를 새로 받는다."""
+    if job_status.snapshot()["metadata_sync"]["status"] == "running":
+        return {"status": "running"}
+    settings = get_settings()
+    job_status.start("metadata_sync")
+
     async def _run():
-        settings = get_settings()
-        job_status.start("metadata_sync")
+        all_results: list[tracker.MetadataSyncStats] = []
+        errors = 0
+
+        def record(platform: str, stats: tracker.MetadataSyncStats) -> None:
+            all_results.append(stats)
+            job_status.log_line("metadata_sync", f"{platform} 정보 갱신 {stats.updated}개, 작품 실패 {stats.failed}개, 표지 실패 {stats.cover_failed}개")
+
         job_status.log_line("metadata_sync", "메타 동기화 시작")
         try:
-            count = await tracker.sync_metadata_for_all(settings)
-            job_status.log_line("metadata_sync", f"{count}개 웹툰 정리 완료")
+            record("네이버", await tracker.sync_metadata_for_all(settings))
+        except Exception as e:
+            errors += 1
+            job_status.log_line("metadata_sync", f"네이버 오류: {e}")
+
+        try:
             if await asyncio.to_thread(repository.get_setting, "kakao_webtoons_enabled") == "1":
                 job_status.log_line("metadata_sync", "카카오 메타 동기화 시작")
                 async with kakao_page_download.new_session() as kakao_session:
                     kakao_client = kakao_page_download.client_or_anonymous(kakao_session, settings.request_timeout_seconds)
-                    kakao_count = await tracker.sync_kakao_metadata(kakao_client, settings)
+                    record("카카오", await tracker.sync_kakao_metadata(kakao_client, settings))
                     kakao_page_download.persist_refreshed_cookies(kakao_client)
-                job_status.log_line("metadata_sync", f"카카오 {kakao_count}개 작품 정리 완료")
-            job_status.finish("metadata_sync", success=True)
         except Exception as e:
-            job_status.log_line("metadata_sync", f"오류: {e}")
-            job_status.finish("metadata_sync", success=False)
+            errors += 1
+            job_status.log_line("metadata_sync", f"카카오 오류: {e}")
+
+        failures = errors + sum(stats.failed + stats.cover_failed for stats in all_results)
+        updated = sum(stats.updated for stats in all_results)
+        job_status.finish("metadata_sync", success=failures == 0, outcome="partial" if failures and updated else None)
 
     asyncio.create_task(_run())
     return {"status": "started"}

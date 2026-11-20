@@ -6,7 +6,8 @@ from pathlib import Path
 import httpx
 
 from app import db, repository, archiver, download_roots, kakao_page_download as kp
-from app import kakao_cover, rclone_updater
+from app import kakao_cover, kakao_records, rclone_updater
+from app.kakao_page_download.models import read_zip_identity, zip_identity_comment
 db.get_connection()
 async def no_update(*args, **kwargs): return "rclone 업데이트 확인 생략(테스트)"
 rclone_updater.check_and_update = no_update              # 아카이빙 작업은 시작할 때 이 확인을 하는데 실제 GitHub에 접속한다 — 네트워크가 되는 CI에서 느려서 실패한 적이 있다
@@ -110,6 +111,9 @@ async def main():
         pfolder = kakao_root / "도굴왕_ 엔드라인"
         for old_ in pfolder.glob("*.zip"): old_.unlink()                                                             # 앞 단계에서 이미 옮긴 회차와 이름이 겹치면 충돌 정책(건너뜀)이 적용되므로 새 회차로
         for n_ in (11, 12, 13): zipfile_(pfolder, f"{n_:04d}_{n_}화.zip")
+        with zipfile.ZipFile(pfolder / "0011_11화.zip", "a") as episode_zip:
+            episode_zip.comment = zip_identity_comment(61641075, 117711)
+        assert 117711 not in kakao_records.product_receipts(61641075)
         repository.set_kakao_webtoon_status(61641075, repository.STATUS_ACTIVE)
         r = await c.post("/api/kakao-webtoons/61641075/unsubscribe"); assert r.status_code == 200
         assert repository.list_pending_finish_archive() == []                                                        # 완결이 아니면 대기열에 안 넣는다
@@ -123,6 +127,8 @@ async def main():
         assert moved == 3 and not list(pfolder.glob("*.zip")) and repository.list_pending_finish_archive() == []      # 마지막 회차까지 전부, 대기열 비움
         assert not pfolder.exists() or not any(pfolder.iterdir()), sorted(p_.name for p_ in pfolder.iterdir())        # 다 옮기면 빈 다운로드 폴더는 정리(info.xml/표지도 함께 이동)
         assert sorted(p_.name for p_ in (archive / "웹툰보관" / "도굴왕： 엔드라인").glob("001[123]_*.zip")) == ["0011_11화.zip", "0012_12화.zip", "0013_13화.zip"]   # 보관 폴더에 도착
+        assert kakao_records.product_receipts(61641075)[117711] == {11}
+        assert read_zip_identity(archive / "웹툰보관" / "도굴왕： 엔드라인" / "0011_11화.zip") == (61641075, 117711)
         # 네이버도 같은 도우미를 거쳐 그대로 동작
         repository.mark_finished("777"); repository.set_status("777", repository.STATUS_ACTIVE)
         await c.post("/api/webtoons/777/unsubscribe"); assert repository.list_pending_finish_archive() == ["777"]

@@ -6,6 +6,7 @@ import httpx
 
 from app import db, repository, kakao_page_download as kp, kakao_page_auth as auth
 from app import kakao_cover
+from fakes import image_bytes
 db.get_connection()
 import app.main as m
 
@@ -42,7 +43,7 @@ plan4 = kp.plan_by_folder_rules(eps, scan(["0031_전혀 다른 제목.zip"]), "�
 plan5 = kp.plan_by_folder_rules(eps, scan(["0031_31화.zip"])); assert plan5.marker.warning is False
 # 여러 파일(비교 모드)에서도 작품명이 붙은 이름으로 "이미 받음"을 인식(번호가 다른 경우)
 plan6 = kp.plan_by_folder_rules(eps, scan(["0030_탈조클럽 29화.zip", "0031_탈조클럽 30화.zip"]), "탈조클럽")
-assert {r.episode.number for r in plan6.rows if r.downloaded} == {29, 30, 31}                                    # 29화는 번호가 아니라 부제목(작품명 제거)으로 이미 받은 것으로 인식
+assert {r.episode.number for r in plan6.rows if r.downloaded} == {29, 30}                                        # ZIP 정렬용 번호가 다른 회차까지 받은 것으로 표시하지 않는다.
 print("1) 작품명이 붙은 표식 OK")
 
 # ── 1-2. 실제 응답(내림차순 첫 페이지): 32~36화는 hidden=True + 유료 + 미래의 free_change_dt — 사이트는 "N일 후 무료"로 보여 준다 ──
@@ -80,7 +81,7 @@ def handler(url, params):
     if url.endswith("/ticket/use"): return R(data={"result_code": 0, "result": {"ticket_uid": "1"}})
     if "content/about" in url: return R(data={"result_code": 0, "result": {"author_list": [{"name": "윤필", "role": "writer"}, {"name": "임정호", "role": "illustrator"}]}})
     if "viewer/data" in url: return R(data={"viewer_data": {"imageDownloadData": {"files": [{"no": 1, "secureUrl": f"https://dw-img-page.kakao.com/sdownload/resource?token=t{params['product_id']}"}]}}})
-    if "sdownload" in url: return R(body=b"\xff\xd8\xffx", ctype="image/jpeg")
+    if "sdownload" in url: return R(body=image_bytes("JPEG"), ctype="image/jpeg")
     raise AssertionError(url)
 class Sess:
     def __init__(self, *a, **k): pass

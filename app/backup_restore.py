@@ -11,6 +11,7 @@
 - 다시 입력해야 하는 비밀값(디스코드 웹훅, 봇 토큰, 카카오페이지 로그인 쿠키, 네이버 성인 쿠키 파일)을 알려 준다.
 """
 
+import logging
 from pathlib import Path
 
 from app import discord_config, download_roots, kakao_page_auth, kakao_page_download, repository
@@ -18,23 +19,86 @@ from app.cookie_loader import get_adult_cookies
 from app.file_utils import remove_forbidden_str, remove_forbidden_str_kakao
 
 _MAX_EXAMPLES = 3  # 경고에 예로 보여줄 작품 제목 수
+_PLATFORM_LABELS = {"naver": "네이버", "kakao": "카카오페이지"}
+log = logging.getLogger(__name__)
 
 
 def restore_backup(data, settings) -> dict:
     """백업을 복원하고 환경을 점검한 결과를 돌려준다: {"status", "warnings": [...], "reenter": [...]}.
     백업이 올바르지 않으면 ValueError(데이터는 그대로)."""
+    data, warnings = _guard_integrated_download_roots(data, settings)
     repository.restore_all(data)
-    report = check_environment(settings, fix=True)
-    report["status"] = "restored"
+    mount_problems = {}
+    for platform in _PLATFORM_LABELS:
+        try:
+            problem = download_roots.download_root_problem(platform, settings)
+        except Exception:
+            log.exception("복원 뒤 다운로드 저장소 확인 실패 (%s)", platform)
+            problem = "다운로드 폴더와 마운트 상태를 확인해 주세요."
+        if problem:
+            mount_problems[platform] = problem
+    report = {
+        "status": "restored_with_warnings" if mount_problems else "restored",
+        "warnings": warnings, "reenter": [], "download_mount_problems": mount_problems,
+    }
+    for platform, problem in mount_problems.items():
+        warnings.append(f"{_PLATFORM_LABELS[platform]} 다운로드 저장소 확인 필요. {problem}")
+    if mount_problems:
+        warnings.append("다운로드 대기열은 보존했습니다. 저장소를 복구하면 보류한 작업을 다시 시도합니다.")
+    try:
+        environment = check_environment(settings, fix=True, blocked_downloads=set(mount_problems))
+        warnings.extend(environment["warnings"])
+        report["reenter"] = environment["reenter"]
+    except Exception:
+        record_post_restore_failure(report, "다운로드·보관 환경 점검")
     return report
 
 
-def check_environment(settings, *, fix: bool = False) -> dict:
+def _matches_viewer_download_root(value: str | None, expected: Path) -> bool:
+    # Preserve the configured path while its volume is unavailable. The readiness
+    # check after committing the restore handles the actual mount and symlink state.
+    return bool(value) and Path(value) == expected
+
+
+def _guard_integrated_download_roots(data, settings) -> tuple[dict, list[str]]:
+    naver = download_roots.viewer_download_root("naver", settings)
+    rows = data.get("settings") if isinstance(data, dict) else None
+    if naver is None or not isinstance(rows, list):
+        return data, []
+
+    roots = {
+        download_roots.NAVER_ROOT_SETTING_KEY: (naver, "네이버"),
+        kakao_page_download.DOWNLOAD_ROOT_SETTING_KEY: (download_roots.viewer_download_root("kakao", settings), "카카오페이지"),
+    }
+    warnings = []
+    restored_rows = []
+    for row in rows:
+        key = row.get("key") if isinstance(row, dict) else None
+        value = row.get("value") if isinstance(row, dict) else None
+        if isinstance(key, str) and key in roots and isinstance(value, str) and value:
+            expected, label = roots[key]
+            if not _matches_viewer_download_root(value, expected):
+                current = repository.get_setting(key)
+                keep_current = _matches_viewer_download_root(current, expected)
+                row = {**row, "value": current if keep_current else None}
+                retained = "기존 설정을 유지했습니다." if keep_current else "플랫폼 기본 경로를 사용하도록 설정했습니다."
+                warnings.append(f"백업의 {label} 다운로드 폴더({value})가 통합 뷰어 연결 경로({expected})와 맞지 않아 {retained}")
+        restored_rows.append(row)
+    return ({**data, "settings": restored_rows} if warnings else data), warnings
+
+
+def record_post_restore_failure(report: dict, step: str) -> None:
+    log.exception("백업 데이터 저장 후 후속 작업 실패 (%s)", step)
+    report["status"] = "restored_with_warnings"
+    report["warnings"].append(f"백업 데이터는 저장되었습니다. {step} 작업을 완료하지 못했습니다.")
+
+
+def check_environment(settings, *, fix: bool = False, blocked_downloads: set[str] | None = None) -> dict:
     """지금 환경이 복원된 데이터를 쓸 수 있는 상태인지 점검한다. fix=True면 이 환경에 없는 다운로드 폴더 설정을 기본값으로 되돌린다."""
     warnings: list[str] = []
-    if fix:
+    if fix and download_roots.viewer_download_root("naver", settings) is None:
         warnings += _reset_missing_download_roots()
-    warnings += _missing_download_folder_warnings(settings)
+    warnings += _missing_download_folder_warnings(settings, blocked_downloads or set())
     warnings += _archive_environment_warnings(settings)
     return {"warnings": warnings, "reenter": _reenter_items(settings)}
 
@@ -57,10 +121,10 @@ def _examples(titles: list[str]) -> str:
     return f"{shown} 등" if len(titles) > _MAX_EXAMPLES else shown
 
 
-def _missing_download_folder_warnings(settings) -> list[str]:
+def _missing_download_folder_warnings(settings, blocked_downloads: set[str]) -> list[str]:
     warnings = []
     kakao_root = Path(download_roots.kakao_root(settings))
-    kakao_missing = [
+    kakao_missing = [] if "kakao" in blocked_downloads else [
         wt["title"] for wt in repository.list_kakao_webtoons_by_status(repository.STATUS_ACTIVE)
         if not (kakao_root / remove_forbidden_str_kakao(wt["title"])).is_dir()
     ]
@@ -71,7 +135,7 @@ def _missing_download_folder_warnings(settings) -> list[str]:
             "스케줄이 돌기 전에 확인하세요."
         )
     naver_root = Path(download_roots.naver_root(settings))
-    naver_missing = [
+    naver_missing = [] if "naver" in blocked_downloads else [
         wt.title for wt in repository.list_by_status(repository.STATUS_ACTIVE)
         if wt.last_downloaded_no > 0 and not (naver_root / remove_forbidden_str(wt.title)).is_dir()
     ]

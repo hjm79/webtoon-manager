@@ -163,6 +163,8 @@ def validate_backup(data) -> int:
         raise ValueError(f"백업 필수 항목이 빠졌습니다: {', '.join(missing)}")
 
     setting_keys = set()
+    from app.kakao_records import PRODUCT_RECEIPTS_PREFIX, _decode_products
+
     for table in _BACKUP_TABLES:
         if table not in data:
             continue
@@ -184,6 +186,11 @@ def validate_backup(data) -> int:
                     normalize_restored_queue(value)
                 if key.startswith("subscription_scope:"):
                     _validate_subscription_scope(value)
+                if key.startswith(PRODUCT_RECEIPTS_PREFIX):
+                    series_id = key.removeprefix(PRODUCT_RECEIPTS_PREFIX)
+                    if not series_id.isascii() or not series_id.isdecimal() or int(series_id) <= 0:
+                        raise ValueError("백업의 카카오페이지 상품별 기록 작품 ID가 올바르지 않습니다.")
+                    _decode_products(value)
             elif any(row[key] is None for key in _REQUIRED_ROW_FIELDS[table]):
                 raise ValueError(f"백업에 필수 값이 비어 있는 행이 있습니다: {table}")
     return version
@@ -195,10 +202,22 @@ def _validate_subscription_scope(raw: str | None) -> None:
         if (not isinstance(scope, dict) or scope.get("mode") not in ("all", "latest", "selected", "future")
                 or type(scope.get("initial_cutoff")) is not int or scope["initial_cutoff"] < 0):
             raise ValueError
-        for key in ("episode_nos", "pending_initial", "completed_numbers"):
-            numbers = scope.get(key, [] if key == "completed_numbers" else None)
+        for key in ("episode_nos", "pending_initial", "completed_numbers", "initial_episode_nos", "reopened_numbers"):
+            numbers = scope.get(key, None if key in ("episode_nos", "pending_initial") else [])
             if not isinstance(numbers, list) or any(type(n) is not int or n <= 0 for n in numbers):
                 raise ValueError
+        if "initial_products" in scope:
+            products = scope["initial_products"]
+            if (scope["mode"] == "all" or not isinstance(products, dict)
+                    or any(not key.isascii() or not key.isdigit() or int(key) <= 0
+                           or type(pid) is not int or pid <= 0 for key, pid in products.items())):
+                raise ValueError
+            if scope["mode"] in ("latest", "future"):
+                known = scope.get("known_products")
+                if (not isinstance(known, list) or any(type(pid) is not int or pid <= 0 for pid in known)
+                        or type(scope.get("boundary_product")) is not int or scope["boundary_product"] not in known
+                        or not set(products.values()).issubset(known)):
+                    raise ValueError
     except (TypeError, ValueError) as exc:
         raise ValueError("백업에 올바르지 않은 구독 회차 범위가 있습니다.") from exc
 

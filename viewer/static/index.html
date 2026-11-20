@@ -507,6 +507,21 @@ function renderListTabs(counts, hasQuery) {
   }
 }
 
+function escapeHtml(text) {
+  const replacements = { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" };
+  return String(text ?? "").replace(/[&<>"']/g, (character) => replacements[character]);
+}
+
+function externalWebUrl(value) {
+  try {
+    const url = new URL(value);
+    if ((url.protocol === "https:" || url.protocol === "http:") && !url.username && !url.password) return url.href;
+  } catch {
+    return "";
+  }
+  return "";
+}
+
 function emptyMessage(q) {
   if (!allSeries.length) return "스캔된 웹툰이 없습니다.<br>라이브러리 폴더를 확인해주세요.";
   if (q) return "검색 결과가 없습니다.";
@@ -541,14 +556,14 @@ function render() {
     card.className = "card" + (isSelected ? " selected" : "") + (isLater ? " later" : "");
     card.innerHTML = `
       <div class="cover-wrap">
-        <span class="platform-tag">${s.platform}</span>
-        ${s.unread_count > 0 ? `<span class="unread-badge">${s.unread_count}</span>` : ""}
-        <img src="${s.cover_url}" alt="${s.title}" loading="lazy">
+        <span class="platform-tag">${escapeHtml(s.platform)}</span>
+        ${s.unread_count > 0 ? `<span class="unread-badge">${escapeHtml(s.unread_count)}</span>` : ""}
+        <img src="${escapeHtml(s.cover_url)}" alt="${escapeHtml(s.title)}" loading="lazy">
         <button class="chapter-list-toggle" title="회차 목록" aria-label="회차 목록">≡</button>
         <button class="select-toggle" title="선택(읽음 상태 관리·목록 이동)" aria-label="선택(읽음 상태 관리·목록 이동)">${isSelected ? "●" : "○"}</button>
       </div>
-      <div class="title">${s.title}</div>
-      <div class="chapter-count">${s.progress_display}</div>
+      <div class="title">${escapeHtml(s.title)}</div>
+      <div class="chapter-count">${escapeHtml(s.progress_display)}</div>
     `;
     card.querySelector(".select-toggle").addEventListener("click", (e) => {
       e.stopPropagation();
@@ -1158,10 +1173,10 @@ function renderBrowseGrid(items) {
     const buttonDisabled = item.request_status !== null;
     card.innerHTML = `
       <div class="cover-wrap">
-        <span class="platform-tag">${item.platform}</span>
-        <img src="${item.cover_url}" alt="${item.title}" loading="lazy">
+        <span class="platform-tag">${escapeHtml(item.platform)}</span>
+        <img src="${escapeHtml(item.cover_url)}" alt="${escapeHtml(item.title)}" loading="lazy">
       </div>
-      <div class="title">${item.title}</div>
+      <div class="title">${escapeHtml(item.title)}</div>
       <div class="browse-card-actions">
         <button class="browse-info-btn" title="정보 보기">ℹ</button>
         <button class="browse-request-btn" ${buttonDisabled ? "disabled" : ""}>${buttonLabel}</button>
@@ -1354,7 +1369,7 @@ function createFolderRow(f, included) {
   const action = included ? "exclude" : "include";
   const label = included ? "제외" : "다시 추가";
   row.innerHTML = `
-    <span class="lib-name">${folderLabel(f)}</span>
+    <span class="lib-name">${escapeHtml(folderLabel(f))}</span>
     <button class="lib-action-btn${included ? "" : " add"}" data-action="${action}">${label}</button>
   `;
   const btn = row.querySelector("button");
@@ -1520,14 +1535,21 @@ restoreFileInput.addEventListener("change", async () => {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(data),
     });
-    if (!res.ok) throw new Error("restore failed");
-    alert("복원이 완료되었습니다.");
-    await load();
-    await renderFolderLists();
+    const result = await res.json();
+    if (!res.ok) throw new Error(typeof result.detail === "string" ? result.detail : "올바른 백업 파일인지 확인해 주세요.");
+    alert(["백업 데이터 복원이 완료되었습니다.", ...(result.warnings || [])].join("\n"));
   } catch (e) {
-    alert("복원에 실패했습니다. 올바른 백업 파일인지 확인해주세요.");
+    alert(`복원 요청을 완료하지 못했습니다. ${e.message}`);
+    return;
   } finally {
     restoreFileInput.value = "";
+  }
+  try {
+    await load();
+    await renderFolderLists();
+  } catch (error) {
+    console.error("Failed to reload library after restore", error);
+    alert("백업 데이터는 저장되었습니다. 화면을 새로고침해 주세요.");
   }
 });
 
@@ -1609,7 +1631,7 @@ function renderChapterRowStatus(row, ch) {
   const statusText = ch.read ? "읽음" : ch.reading ? "읽는 중" : "";
   const statusClass = ch.read ? "read" : ch.reading ? "reading" : "";
   row.innerHTML = `
-    <span class="sidebar-row-label">${ch.label}</span>
+    <span class="sidebar-row-label">${escapeHtml(ch.label)}</span>
     <span class="sidebar-row-status${statusClass ? " " + statusClass : ""}">${statusText}</span>
   `;
 }
@@ -1646,9 +1668,9 @@ function formatNotesRow(notes) {
   // 콜론이 없는 자유 텍스트면 그냥 원문 그대로 보여준다.
   const match = notes.match(/^([^:：]{1,10})[:：]\s*(.+)$/s);
   if (match) {
-    return `<div class="series-info-row"><b>${match[1].trim()}</b> ${match[2].trim()}</div>`;
+    return `<div class="series-info-row"><b>${escapeHtml(match[1].trim())}</b> ${escapeHtml(match[2].trim())}</div>`;
   }
-  return `<div class="series-info-row">${notes}</div>`;
+  return `<div class="series-info-row">${escapeHtml(notes)}</div>`;
 }
 
 async function renderSeriesInfoPanel(seriesId) {
@@ -1665,14 +1687,15 @@ async function renderSeriesInfoPanel(seriesId) {
   }
 
   const rows = [];
-  if (info.writer) rows.push(`<div class="series-info-row"><b>작가</b> ${info.writer}</div>`);
-  if (info.cover_artist) rows.push(`<div class="series-info-row"><b>그림</b> ${info.cover_artist}</div>`);
+  if (info.writer) rows.push(`<div class="series-info-row"><b>작가</b> ${escapeHtml(info.writer)}</div>`);
+  if (info.cover_artist) rows.push(`<div class="series-info-row"><b>그림</b> ${escapeHtml(info.cover_artist)}</div>`);
   if (info.notes) rows.push(formatNotesRow(info.notes));
-  if (info.genre) rows.push(`<div class="series-info-row"><b>장르</b> ${info.genre}</div>`);
-  if (info.age_rating) rows.push(`<div class="series-info-row"><b>연령등급</b> ${info.age_rating}</div>`);
-  if (info.summary) rows.push(`<div class="series-info-summary">${info.summary.replace(/\s*\n\s*/g, " ").trim()}</div>`);
-  if (info.web_url) {
-    chapterSidebarOrigin.href = info.web_url;
+  if (info.genre) rows.push(`<div class="series-info-row"><b>장르</b> ${escapeHtml(info.genre)}</div>`);
+  if (info.age_rating) rows.push(`<div class="series-info-row"><b>연령등급</b> ${escapeHtml(info.age_rating)}</div>`);
+  if (info.summary) rows.push(`<div class="series-info-summary">${escapeHtml(info.summary.replace(/\s*\n\s*/g, " ").trim())}</div>`);
+  const originUrl = externalWebUrl(info.web_url);
+  if (originUrl) {
+    chapterSidebarOrigin.href = originUrl;
     chapterSidebarOrigin.hidden = false;
   }
 
@@ -1780,7 +1803,7 @@ async function refreshDevicesList() {
     row.className = "lib-row";
     const lastSeen = new Date(device.last_seen_at).toLocaleString("ko-KR");
     row.innerHTML = `
-      <span class="lib-name">${simplifyDeviceLabel(device.label)} <span class="profile-allowed-count">마지막 접속: ${lastSeen}</span></span>
+      <span class="lib-name">${escapeHtml(simplifyDeviceLabel(device.label))} <span class="profile-allowed-count">마지막 접속: ${lastSeen}</span></span>
       <button class="lib-action-btn">삭제</button>
     `;
     row.querySelector(".lib-action-btn").addEventListener("click", async () => {
@@ -1801,13 +1824,13 @@ async function refreshProfilesList() {
     const row = document.createElement("div");
     row.className = "lib-row";
     const badge = profile.pending_request_count > 0
-      ? `<span class="profile-pending-badge">요청 ${profile.pending_request_count}</span>`
+      ? `<span class="profile-pending-badge">요청 ${escapeHtml(profile.pending_request_count)}</span>`
       : "";
     const deviceBadge = profile.pending_device_request_count > 0
-      ? `<span class="profile-pending-badge device">기기 ${profile.pending_device_request_count}</span>`
+      ? `<span class="profile-pending-badge device">기기 ${escapeHtml(profile.pending_device_request_count)}</span>`
       : "";
     row.innerHTML = `
-      <span class="lib-name">${profile.name}${badge}${deviceBadge} <span class="profile-allowed-count">허용 ${profile.allowed_count}개</span></span>
+      <span class="lib-name">${escapeHtml(profile.name)}${badge}${deviceBadge} <span class="profile-allowed-count">허용 ${escapeHtml(profile.allowed_count)}개</span></span>
       <button class="lib-action-btn">편집</button>
     `;
     row.querySelector(".lib-action-btn").addEventListener("click", () => openProfileEditor(profile.id));
@@ -1895,10 +1918,10 @@ function renderProfileBrowseFilters(currentFilters) {
     const checkboxes = values
       .map((value, i) => {
         const checked = currentSet.has(`${platform}::${value}`) ? "checked" : "";
-        return `<label><input type="checkbox" data-platform="${platform}" data-age="${value}" ${checked}> ${labels[i]}</label>`;
+        return `<label><input type="checkbox" data-platform="${escapeHtml(platform)}" data-age="${escapeHtml(value)}" ${checked}> ${escapeHtml(labels[i])}</label>`;
       })
       .join("");
-    group.innerHTML = `<div class="profile-filter-platform">${platform}</div>${checkboxes}`;
+    group.innerHTML = `<div class="profile-filter-platform">${escapeHtml(platform)}</div>${checkboxes}`;
     container.appendChild(group);
   }
 }
@@ -1927,9 +1950,9 @@ function renderProfileTimeWindows(currentWindows) {
     const endStr = existing ? minutesToTimeStr(existing.end_minute) : "21:00";
     row.innerHTML = `
       <label><input type="checkbox" data-day="${day}" ${existing ? "checked" : ""}> ${TIME_WINDOW_DAY_LABELS[day]}</label>
-      <input type="time" class="time-window-start" value="${startStr}">
+      <input type="time" class="time-window-start" value="${escapeHtml(startStr)}">
       <span>~</span>
-      <input type="time" class="time-window-end" value="${endStr}">
+      <input type="time" class="time-window-end" value="${escapeHtml(endStr)}">
     `;
     container.appendChild(row);
   }
@@ -1971,7 +1994,7 @@ function renderProfileRequests(requests, profileId) {
     const row = document.createElement("div");
     row.className = "lib-row";
     row.innerHTML = `
-      <span class="lib-name">${series ? series.title : req.series_id}</span>
+      <span class="lib-name">${escapeHtml(series ? series.title : req.series_id)}</span>
       <button class="lib-action-btn add" data-action="approve">허용</button>
       <button class="lib-action-btn" data-action="reject">거부</button>
     `;
@@ -2005,7 +2028,7 @@ function renderProfileDeviceRequests(deviceRequests, profileId) {
     row.className = "lib-row";
     const requestedAt = new Date(req.requested_at).toLocaleString("ko-KR");
     row.innerHTML = `
-      <span class="lib-name">${simplifyDeviceLabel(req.label)} <span class="profile-allowed-count">요청: ${requestedAt}</span></span>
+      <span class="lib-name">${escapeHtml(simplifyDeviceLabel(req.label))} <span class="profile-allowed-count">요청: ${requestedAt}</span></span>
       <button class="lib-action-btn add" data-action="approve">승인</button>
       <button class="lib-action-btn" data-action="reject">거부</button>
     `;
@@ -2025,9 +2048,9 @@ function populateProfileSeriesFilterOptions() {
   const platformSelect = document.getElementById("profileSeriesPlatformFilter");
   const ageSelect = document.getElementById("profileSeriesAgeFilter");
   const platforms = [...new Set(profileSeriesCatalogCache.map((s) => s.platform))].sort();
-  platformSelect.innerHTML = `<option value="">플랫폼 전체</option>` + platforms.map((p) => `<option value="${p}">${p}</option>`).join("");
+  platformSelect.innerHTML = `<option value="">플랫폼 전체</option>` + platforms.map((p) => new Option(p, p).outerHTML).join("");
   const ages = [...new Set(profileSeriesCatalogCache.map((s) => s.age_rating).filter(Boolean))].sort();
-  ageSelect.innerHTML = `<option value="">연령 전체</option>` + ages.map((a) => `<option value="${a}">${a}</option>`).join("");
+  ageSelect.innerHTML = `<option value="">연령 전체</option>` + ages.map((a) => new Option(a, a).outerHTML).join("");
 }
 
 function renderProfileSeriesChecklist() {
@@ -2057,7 +2080,7 @@ function renderProfileSeriesChecklist() {
     label.className = "profile-series-checkbox-row";
     const checked = allowedIds.has(series.id) ? "checked" : "";
     const sub = [series.platform, series.age_rating || "정보없음"].join(" · ");
-    label.innerHTML = `<input type="checkbox" value="${series.id}" ${checked}> ${series.title} <span class="profile-series-sub">${sub}</span>`;
+    label.innerHTML = `<input type="checkbox" value="${escapeHtml(series.id)}" ${checked}> ${escapeHtml(series.title)} <span class="profile-series-sub">${escapeHtml(sub)}</span>`;
     container.appendChild(label);
   }
 }
@@ -2076,6 +2099,12 @@ async function saveProfileEditor() {
   if (!editingProfileId) return;
   const name = document.getElementById("profileNameInput").value.trim();
   if (!name) return;
+  const windows = collectProfileTimeWindows();
+  if (windows.some(({ start_minute, end_minute }) =>
+    !Number.isInteger(start_minute) || !Number.isInteger(end_minute) || start_minute > end_minute)) {
+    alert("접속 시간대의 시작·종료 시각을 확인해 주세요. 자정을 넘기는 시간대는 요일별로 나눠 입력하세요.");
+    return;
+  }
 
   await fetch(`/api/admin/profiles/${editingProfileId}`, {
     method: "PUT",
@@ -2087,11 +2116,15 @@ async function saveProfileEditor() {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ filters: collectProfileBrowseFilters() }),
   });
-  await fetch(`/api/admin/profiles/${editingProfileId}/time-windows`, {
+  const timeResponse = await fetch(`/api/admin/profiles/${editingProfileId}/time-windows`, {
     method: "PUT",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ windows: collectProfileTimeWindows() }),
+    body: JSON.stringify({ windows }),
   });
+  if (!timeResponse.ok) {
+    alert("접속 시간대를 저장하지 못했습니다.");
+    return;
+  }
   await fetch(`/api/admin/profiles/${editingProfileId}/allowed-series`, {
     method: "PUT",
     headers: { "Content-Type": "application/json" },
@@ -2105,7 +2138,11 @@ async function saveProfileEditor() {
 async function deleteCurrentProfile() {
   if (!editingProfileId) return;
   if (!confirm("이 프로필을 삭제하시겠습니까? 그 프로필의 진행률/읽음기록도 함께 사라지고, 되돌릴 수 없습니다.")) return;
-  await fetch(`/api/admin/profiles/${editingProfileId}`, { method: "DELETE" });
+  const response = await fetch(`/api/admin/profiles/${editingProfileId}`, { method: "DELETE" });
+  if (!response.ok) {
+    alert("프로필을 삭제하지 못했습니다.");
+    return;
+  }
   closeProfileEditor();
   refreshProfilesList();
 }

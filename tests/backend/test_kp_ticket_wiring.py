@@ -6,6 +6,7 @@ import aiohttp
 
 from app import db, discord_config, discord_notify, repository, kakao_page_auth as auth, kakao_page_download as kp, job_status, scheduler
 from app import kakao_cover
+from fakes import image_bytes
 from app.config import get_settings
 db.get_connection()
 
@@ -30,7 +31,7 @@ def handler(method, url, params, data):
     if "content/about" in url: return R(data={"result_code": 0, "result": {"author_list": []}})
     if "viewer/data" in url:
         return R(data={"viewer_data": {"imageDownloadData": {"files": [{"no": i, "secureUrl": f"https://dw-img-page.kakao.com/sdownload/resource?token=t{params['product_id']}_{i}"} for i in (1, 2)]}}})
-    if "sdownload" in url: return R(body=b"\xff\xd8\xffx", ctype="image/jpeg")
+    if "sdownload" in url: return R(body=image_bytes("JPEG"), ctype="image/jpeg")
     raise AssertionError(url)
 class FakeSession:
     def __init__(self, *a, **k): pass

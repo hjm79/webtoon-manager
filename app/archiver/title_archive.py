@@ -2,11 +2,13 @@
 """
 
 import logging
+import os
+import stat
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
-from app import kakao_cover, rclone_client, repository
+from app import download_roots, kakao_cover, rclone_client, repository
 from app.archiver import cancel, origin as archive_origin
 from app import kakao_records
 
@@ -38,6 +40,7 @@ from app.archiver.transfer import (
     purge_empty_zip_files_local,
     resolve_archive_dest,
 )
+from app.config import get_settings
 
 log = logging.getLogger(__name__)
 
@@ -181,6 +184,20 @@ def _kakao_series_id(title_id: str) -> int | None:
         return None
 
 
+def _archive_source_ready(download_root: str, kakao: bool, title: str, report: ProgressReport) -> bool:
+    try:
+        platform = "kakao" if kakao else "naver"
+        problem = download_roots.download_root_problem(platform, get_settings(), path=download_root)
+        if problem is None and Path(download_root).is_dir() and os.access(download_root, os.R_OK | os.X_OK):
+            return True
+    except OSError:
+        problem = None
+    message = problem or "원본 다운로드 저장소를 읽을 수 없습니다."
+    report.failure(title, "-", message)
+    report.progress(f"[{title}] {message} 저장소가 복구되면 다시 시도합니다.")
+    return False
+
+
 def _archive_title(job: TitleArchiveJob, report: ProgressReport | None = None) -> int:
     """실제로 파일들을 옮기고 이력을 남긴다. 반환값은 옮긴 개수.
     job.dest_type이 'rclone'이면 로컬 shutil 대신 rclone CLI로 처리한다(Windows 마운트를
@@ -192,17 +209,32 @@ def _archive_title(job: TitleArchiveJob, report: ProgressReport | None = None) -
     호출부(scheduler)가 실행이 다 끝난 뒤 모아서 디스코드로 알릴 때 쓴다."""
     report = report or ProgressReport()
     if _dest_settings_missing(job.dest_type, job.archive_root, job.rclone_config_path, job.title_id):
+        report.failure(job.title_name, "-", "보관 저장소가 설정되어 있지 않습니다.")
         return 0
     if job.only_if_unsubscribed and not _finish_archive_still_requested(job.title_id):
         return 0
+    if not _archive_source_ready(job.download_root, job.kakao, job.title_name, report):
+        return 0
 
     title_dir = _title_folder(job.download_root, job.title_name, job.kakao)
+    try:
+        title_stat = title_dir.lstat()
+    except FileNotFoundError:
+        return 0
+    except OSError as e:
+        report.failure(job.title_name, "-", f"작품 원본 폴더를 확인하지 못했습니다: {e}")
+        return 0
+    if not stat.S_ISDIR(title_stat.st_mode):
+        report.failure(job.title_name, "-", "작품 원본이 일반 디렉터리가 아닙니다.")
+        return 0
     files = _list_episode_files_sorted(title_dir)
     if job.kakao and files:
         # 옮기기 직전에 폴더의 회차(남길 파일 포함)를 받은 회차 기록에 확정한다 — 아카이빙 이력은 보관 기간이 지나면 지워지므로, 그 뒤에도 기록이 이 작품이 받은 회차를 기억하게 한다
         series_id = _kakao_series_id(job.title_id)
         if series_id is not None:
-            kakao_records.remember_folder_episodes(series_id, [num for num, _path in files])
+            kakao_records.remember_folder_episodes(
+                series_id, [number for number, _ in files], episode_paths=[path for _, path in files],
+            )
     if job.keep_last and len(files) > 0:
         files = files[:-1]  # 마지막(가장 큰 번호)은 보존
     if job.read_numbers is not None:
@@ -236,9 +268,13 @@ def _archive_title(job: TitleArchiveJob, report: ProgressReport | None = None) -
 
     if metadata_files:
         if job.dest_type == "rclone":
-            _archive_metadata_files_rclone(job.rclone_config_path, metadata_files, remote, rclone_dest_path, keep_last=job.keep_last)
+            metadata_failures = _archive_metadata_files_rclone(
+                job.rclone_config_path, metadata_files, remote, rclone_dest_path, keep_last=job.keep_last,
+            )
         else:
-            _archive_metadata_files_local(metadata_files, local_dest_dir, keep_last=job.keep_last)
+            metadata_failures = _archive_metadata_files_local(metadata_files, local_dest_dir, keep_last=job.keep_last)
+        for filename, reason in metadata_failures:
+            report.failure(job.title_name, filename, f"메타데이터 전송 실패: {reason}")
     return moved
 
 
@@ -272,10 +308,11 @@ def run_periodic_archive(
         if not target.enabled:
             continue
         if target.source_type == "folder":
-            total += _archive_folder_target(
+            moved, _completed = _archive_folder_target(
                 target, policy, rclone_config_path, archive_root, keep_last=True,
                 progress_callback=progress_callback, conflict_log=conflict_log, failure_log=failure_log,
             )
+            total += moved
             continue
         source = resolve_webtoon_source(target.title_id)
         if source is None:
@@ -300,6 +337,7 @@ def manual_archive_now(
     archive_root: str, download_root: str, title_ids: list[str], rclone_config_path: str = "",
     progress_callback=None, full_move: bool = False, kakao_download_root: str | None = None,
     read_numbers_provider: ReadNumbersProvider | None = None,
+    *, conflict_log: list | None = None, failure_log: list | None = None,
 ) -> int:
     """수동 실행 — 기본은 지정된 것과 동일 규칙(마지막 파일 보존, 뷰어가 설정돼 있으면 읽은 회차만 — read_numbers_provider, 읽음 상태를 알 수 없는 작품은 옮기지 않음).
     완결 처리(full_move)와 폴더 대상은 읽음 상태를 보지 않는다.
@@ -317,45 +355,72 @@ def manual_archive_now(
             break  # 중단 요청 — 남은 대상은 시작하지 않는다
         target = repository.get_archive_target(title_id)
         if target is None:
+            ProgressReport(progress_callback, conflict_log, failure_log).failure(title_id, "-", "아카이빙 대상이 없습니다.")
             continue
         if target.source_type == "folder":
             folder_failures: list = []
-            total += _archive_folder_target(
+            moved, completed = _archive_folder_target(
                 target, policy, rclone_config_path, archive_root, keep_last=not full_move,
-                progress_callback=progress_callback, failure_log=folder_failures,
+                progress_callback=progress_callback, conflict_log=conflict_log, failure_log=folder_failures,
             )
+            total += moved
+            if failure_log is not None:
+                failure_log.extend(folder_failures)
             if full_move:
-                _delete_target_after_full_move(title_id, target.display_name or title_id, not folder_failures, ProgressReport(progress_callback))
+                _delete_target_after_full_move(title_id, target.display_name or title_id, completed and not folder_failures, ProgressReport(progress_callback))
             continue
         source = resolve_webtoon_source(title_id)
         if source is None:
+            ProgressReport(progress_callback, conflict_log, failure_log).failure(title_id, "-", "아카이빙 대상 작품을 찾지 못했습니다.")
             continue
         root = (kakao_download_root or download_root) if source.kakao else download_root
         own_failures: list = []
-        report = ProgressReport(progress_callback, None, own_failures)
+        own_conflicts: list = []
+        report = ProgressReport(progress_callback, own_conflicts, own_failures)
         skip, read_numbers = _lookup_read_numbers(None if full_move else read_numbers_provider, source, report)
-        if skip:
-            continue
-        total += _archive_title(
-            TitleArchiveJob(
-                archive_root=archive_root, download_root=root, title_id=title_id, title_name=source.title, base_path=target.dest_base_path,
-                policy=policy, trigger_type=trigger_type, keep_last=not full_move, dest_type=target.dest_type, rclone_config_path=rclone_config_path,
-                writer_names=source.writer_names, filename_template_preset_id=target.filename_template_preset_id, kakao=source.kakao, read_numbers=read_numbers,
-            ),
-            report,
-        )
+        if not skip:
+            total += _archive_title(
+                TitleArchiveJob(
+                    archive_root=archive_root, download_root=root, title_id=title_id, title_name=source.title, base_path=target.dest_base_path,
+                    policy=policy, trigger_type=trigger_type, keep_last=not full_move, dest_type=target.dest_type, rclone_config_path=rclone_config_path,
+                    writer_names=source.writer_names, filename_template_preset_id=target.filename_template_preset_id, kakao=source.kakao, read_numbers=read_numbers,
+                ),
+                report,
+            )
         if full_move:
-            title_dir = _title_folder(root, source.title, source.kakao)
-            _cleanup_empty_dirs(title_dir)
-            report.progress(f"[{source.title}] 완결 처리 — 다운로드 폴더 정리 확인")
-            _delete_target_after_full_move(title_id, source.title, not own_failures and not title_dir.exists(), report)
+            skipped_conflicts = any(conflict[2] == "skip" for conflict in own_conflicts)
+            completed = _complete_title_archive(root, source, skipped_conflicts, report)
+            _delete_target_after_full_move(title_id, source.title, completed, report)
+        if conflict_log is not None:
+            conflict_log.extend(own_conflicts)
+        if failure_log is not None:
+            failure_log.extend(own_failures)
     return total
+
+
+def _complete_title_archive(root: str, source: WebtoonSource, skipped_conflicts: bool, report: ProgressReport) -> bool:
+    if cancel.is_requested() or report.failure_log or skipped_conflicts:
+        return False
+    if not _archive_source_ready(root, source.kakao, source.title, report):
+        return False
+    title_dir = _title_folder(root, source.title, source.kakao)
+    _cleanup_empty_dirs(title_dir)
+    report.progress(f"[{source.title}] 완결 처리 — 다운로드 폴더 정리 확인")
+    try:
+        title_dir.lstat()
+    except FileNotFoundError:
+        return _archive_source_ready(root, source.kakao, source.title, report)
+    except OSError as e:
+        report.failure(source.title, "-", f"남은 원본 파일을 확인하지 못했습니다: {e}")
+    else:
+        report.failure(source.title, "-", "원본 폴더에 옮기지 않은 파일이 남아 있습니다.")
+    return False
 
 
 def _delete_target_after_full_move(title_id: str, title_name: str, completed: bool, report: ProgressReport) -> None:
     """완결 전체 이동이 문제없이 끝났으면(실패가 없고 원본 쪽이 정리됨) 그 대상의 아카이빙 설정을 삭제한다 — 더 옮길 게 없는 설정이 대상 목록과
     아카이빙 수동 실행 목록에 남지 않게. 일부 실패했거나 파일이 남았거나 보관 위치가 모자라 못 옮겼으면 설정을 남겨서 다시 시도할 수 있게 한다."""
-    if not completed or repository.get_archive_target(title_id) is None:
+    if not completed or cancel.is_requested() or repository.get_archive_target(title_id) is None:
         return
     repository.delete_archive_target(title_id)
     report.progress(f"[{title_name}] 완결 처리 완료 — 아카이빙 대상에서 삭제했습니다")
@@ -395,7 +460,8 @@ def process_pending_finish_archives(
 
         policy = get_conflict_policy()
         own_failures: list = []  # 이번 작품의 이동 실패만 따로 모아서, 문제없이 끝났는지 판단하고 호출부 목록에도 그대로 전달한다
-        report = ProgressReport(progress_callback, conflict_log, own_failures)
+        own_conflicts: list = []
+        report = ProgressReport(progress_callback, own_conflicts, own_failures)
         try:
             total += _archive_title(
                 TitleArchiveJob(
@@ -412,14 +478,18 @@ def process_pending_finish_archives(
         # 완결 전체이동은 마지막 파일도 예외 없이 옮기므로, 다 옮기고 나면 다운로드
         # 쪽 웹툰 폴더엔 아무 것도 안 남는 게 정상이다 — 파일이 하나라도 남아있으면
         # (예: 이동 중 일부 실패) 안전하게 그대로 두고, 완전히 비었을 때만 지운다.
-        title_dir = _title_folder(root, source.title, source.kakao)
-        _cleanup_empty_dirs(title_dir)
+        if not _finish_archive_still_requested(title_id):
+            completed = False
+        else:
+            skipped_conflicts = any(conflict[2] == "skip" for conflict in own_conflicts)
+            completed = _complete_title_archive(root, source, skipped_conflicts, report)
+        if conflict_log is not None:
+            conflict_log.extend(own_conflicts)
         if failure_log is not None:
             failure_log.extend(own_failures)
         if not _finish_archive_still_requested(title_id):
             repository.remove_pending_finish_archive(title_id)
             continue
-        completed = not cancel.is_requested() and not own_failures and not title_dir.exists()
         _delete_target_after_full_move(title_id, source.title, completed, report)
         if completed:
             repository.remove_pending_finish_archive(title_id)

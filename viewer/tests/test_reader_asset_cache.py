@@ -11,4 +11,8 @@ def test_unversioned_reader_scripts_and_styles_are_never_heuristically_cached(cl
 def test_reader_uses_new_cache_keys_for_clients_with_legacy_assets(client):
     response = client.get("/reader.html")
     assert 'reader-position.js?v=2' in response.text
-    assert 'style.css?v=reader-controls-3' in response.text
+    assert 'style.css?v=reader-controls-5' in response.text
+    stylesheet = client.get('/style.css?v=reader-controls-5')
+    assert stylesheet.status_code == 200
+    assert stylesheet.headers['cache-control'] == 'no-store'
+    assert '.reader-quick-tools' in stylesheet.text

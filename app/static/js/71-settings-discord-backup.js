@@ -135,7 +135,9 @@ function renderRestoreReport(report) {
     scheduleReload();
     return;
   }
-  resultEl.textContent = "복원 완료. 아래 안내를 확인해 주세요.";
+  resultEl.textContent = report.status === "restored_with_warnings"
+    ? "백업 데이터 복원 완료. 끝나지 않은 후속 작업을 아래에서 확인해 주세요."
+    : "복원 완료. 아래 안내를 확인해 주세요.";
   const addList = (title, cssClass, lines) => {
     if (lines.length === 0) return;
     const heading = document.createElement("strong");

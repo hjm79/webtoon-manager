@@ -4,7 +4,7 @@
 import asyncio
 import logging
 
-from fastapi import APIRouter
+from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
 from app import (
@@ -45,6 +45,8 @@ async def get_discord_settings():
 
 @router.post("/settings/discord", response_model=DiscordSettingsOut)
 async def update_discord_settings(payload: DiscordSettingsIn):
+    if payload.webhook_url.strip() and not discord_notify.valid_webhook_url(payload.webhook_url):
+        raise HTTPException(422, "디스코드에서 발급한 HTTPS 웹훅 주소를 입력해주세요.")
     await asyncio.to_thread(discord_config.set_webhook_url, payload.webhook_url)
     await asyncio.to_thread(discord_config.set_bot_token, payload.bot_token)
     await asyncio.to_thread(discord_config.set_notify_channel_id, payload.notify_channel_id)

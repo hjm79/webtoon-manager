@@ -58,6 +58,12 @@ def init_schema() -> None:
 # 플랫폼 원문에는 나올 수 없는 형태로 정함.
 NO_AGE_RATING = "__no_rating__"
 
+_PROFILE_CHILD_TABLES = (
+    "profile_browse_filters", "profile_allowed_series", "profile_progress",
+    "profile_read_chapters", "profile_settings", "profile_time_windows", "access_requests",
+    "profile_devices", "profile_device_requests", "profile_reading_sessions",
+)
+
 
 def create_profile(name: str) -> dict:
     profile_id = secrets.token_hex(6)
@@ -116,12 +122,30 @@ def reissue_profile_token(profile_id: str) -> str:
     return new_token
 
 
-def delete_profile(profile_id: str) -> None:
-    with db.db_connection() as conn:
-        conn.execute("DELETE FROM profiles WHERE id = ?", (profile_id,))
-        conn.execute("DELETE FROM profile_browse_filters WHERE profile_id = ?", (profile_id,))
-        conn.execute("DELETE FROM profile_allowed_series WHERE profile_id = ?", (profile_id,))
-        conn.commit()
+def delete_profiles(conn: sqlite3.Connection, profile_ids: list[str]) -> None:
+    """Delete profiles and their state within the caller's write transaction."""
+    if not profile_ids:
+        return
+    # Older databases may never have initialized optional profile tables.
+    tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
+    profile_params = [(profile_id,) for profile_id in profile_ids]
+    actor_params = [(f"profile:{profile_id}",) for profile_id in profile_ids]
+    for table in _PROFILE_CHILD_TABLES:
+        if table in tables:
+            conn.executemany(f"DELETE FROM {table} WHERE profile_id = ?", profile_params)
+    for table in ("progress_write_intents", "reading_coverage"):
+        if table in tables:
+            conn.executemany(f"DELETE FROM {table} WHERE actor_key = ?", actor_params)
+    conn.executemany("DELETE FROM profiles WHERE id = ?", profile_params)
+
+
+def delete_profile(profile_id: str) -> bool:
+    with db.db_connection() as conn, conn:
+        conn.execute("BEGIN IMMEDIATE")
+        if conn.execute("SELECT 1 FROM profiles WHERE id = ?", (profile_id,)).fetchone() is None:
+            return False
+        delete_profiles(conn, [profile_id])
+        return True
 
 
 def set_browse_filters(profile_id: str, platform_age_pairs: list[tuple[str, str]]) -> None:

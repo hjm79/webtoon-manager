@@ -18,9 +18,8 @@ from app import (
 from app import archiver
 from app.archiver import cancel
 from app import rclone_client
-from app import rclone_updater
 from app.config import get_settings
-from app.scheduler.archive_job import read_numbers_provider_for
+from app.scheduler.archive_job import archive_job_running, finish_archive_job, read_numbers_provider_for
 from app.path_guard import PathOutsideRootError, resolve_under_root
 
 from app.api.common import (
@@ -612,47 +611,36 @@ async def run_archive_now(payload: ArchiveRunIn):
 
     if restore_in_progress():
         raise HTTPException(status_code=409, detail="백업 복원이 끝난 뒤 보관 작업을 실행해주세요.")
+    if archive_job_running():
+        raise HTTPException(status_code=409, detail="이미 보관 작업이 실행 중입니다.")
     settings = get_settings()
     cancel.reset()  # 지난 중단 요청을 이어받지 않는다
     job_status.start("archive")
 
     async def _run():
+        conflicts: list[tuple[str, str, str]] = []
+        failures: list[tuple[str, str, str]] = []
         try:
-            update_result = await rclone_updater.check_and_update()
-            job_status.log_line("archive", update_result)
-        except Exception as e:
-            job_status.log_line("archive", f"rclone 업데이트 확인 중 오류(무시하고 계속): {e}")
-
-        try:
+            title_ids = payload.title_ids or [t.title_id for t in repository.list_archive_targets() if t.enabled]
             # 뷰어 서버가 설정돼 있으면 읽은 회차만 옮기고 읽음 상태를 알 수 없는 작품은 옮기지 않는다(완결 처리 이동은 읽음 상태를 보지 않는다)
             async with read_numbers_provider_for(settings) as provider:
-                if payload.title_ids:
-                    moved = await asyncio.to_thread(
-                        archiver.manual_archive_now, settings.archive_root, download_roots.naver_root(settings), payload.title_ids, settings.rclone_config_path,
-                        lambda msg: job_status.log_line("archive", msg), payload.full_move, download_roots.kakao_root(settings), provider,
-                    )
-                else:
-                    all_ids = [t.title_id for t in repository.list_archive_targets() if t.enabled]
-                    moved = await asyncio.to_thread(
-                        archiver.manual_archive_now, settings.archive_root, download_roots.naver_root(settings), all_ids, settings.rclone_config_path,
-                        lambda msg: job_status.log_line("archive", msg), False, download_roots.kakao_root(settings), provider,
-                    )
-            if cancel.is_requested():
-                job_status.log_line("archive", "사용자 요청으로 중단했습니다 (이미 옮긴 파일은 그대로, 남은 파일은 다음 실행에서 이어서 옮깁니다)")
+                moved = await asyncio.to_thread(
+                    archiver.manual_archive_now, settings.archive_root, download_roots.naver_root(settings), title_ids, settings.rclone_config_path,
+                    lambda msg: job_status.log_line("archive", msg), bool(payload.title_ids) and payload.full_move,
+                    download_roots.kakao_root(settings), provider, conflict_log=conflicts, failure_log=failures,
+                )
             if payload.title_ids:
                 job_status.log_line("archive", f"{moved}개 파일 이동 완료")
-                viewer_scan.note_library_changed(moved)  # 옮긴 파일이 있으면 뷰어 서버가 다시 훑게 한다(연동이 켜져 있을 때만)
             else:
                 job_status.log_line("archive", f"지정 웹툰 {moved}개 파일 이동 완료")
-
                 pending_moved = await asyncio.to_thread(
                     archiver.process_pending_finish_archives, settings.archive_root, download_roots.naver_root(settings), settings.rclone_config_path,
-                    lambda msg: job_status.log_line("archive", msg), None, None, download_roots.kakao_root(settings),
+                    lambda msg: job_status.log_line("archive", msg), conflicts, failures, download_roots.kakao_root(settings),
                 )
                 job_status.log_line("archive", f"완결 구독해제 대기열 {pending_moved}개 파일 이동 완료")
-                viewer_scan.note_library_changed(moved + pending_moved)
-
-            job_status.finish("archive", success=True)
+                moved += pending_moved
+            viewer_scan.note_library_changed(moved)
+            finish_archive_job(moved, conflicts, failures)
         except Exception as e:
             job_status.log_line("archive", f"오류: {e}")
             job_status.finish("archive", success=False)
@@ -763,24 +751,28 @@ async def bulk_move(payload: BulkMoveIn):
 
     if restore_in_progress():
         raise HTTPException(status_code=409, detail="백업 복원이 끝난 뒤 폴더 이동을 실행해주세요.")
+    if archive_job_running():
+        raise HTTPException(status_code=409, detail="이미 보관 작업이 실행 중입니다.")
     job_status.start("bulk_move")
 
     async def _run():
         try:
+            conflicts: list[tuple[str, str, str]] = []
+            failures: list[tuple[str, str, str]] = []
             moved = await asyncio.to_thread(
                 archiver.bulk_move_folder,
                 source_local_root, dest_local_root, settings.rclone_config_path,
                 payload.source_type, payload.source_path,
                 payload.dest_type, payload.dest_path,
                 lambda msg: job_status.log_line("bulk_move", msg), filename_template,
-                payload.regenerate_kakao_cover,
+                payload.regenerate_kakao_cover, conflict_log=conflicts, failure_log=failures,
             )
             # 이력은 이제 bulk_move_folder 안에서 파일마다 한 줄씩 직접 남긴다
             # (주기/수동/완결 이동과 동일한 단위) — 여기서 요약 한 줄을 따로 더
             # 남기면 파일 단위 기록과 중복/불일치하므로 더 이상 남기지 않는다.
-            job_status.log_line("bulk_move", f"완료 — {moved}개 파일 이동")
+            job_status.log_line("bulk_move", f"{moved}개 파일 이동")
             viewer_scan.note_library_changed(moved)  # 폴더 일괄 이동도 보관 폴더에 파일을 만들므로 뷰어 서버가 다시 훑게 한다
-            job_status.finish("bulk_move", success=True)
+            finish_archive_job(moved, conflicts, failures, job_name="bulk_move")
         except ValueError as e:
             job_status.log_line("bulk_move", f"오류: {e}")
             job_status.finish("bulk_move", success=False)

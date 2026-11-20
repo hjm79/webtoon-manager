@@ -7,6 +7,8 @@ Gateway 연결로 완결 감지 즉시 버튼 메시지를 보내고 클릭을 �
 """
 
 import logging
+import re
+from urllib.parse import urlsplit
 
 import aiohttp
 
@@ -14,6 +16,17 @@ from app import discord_config
 from app.constants import DISCORD_MESSAGE_CHUNK_LIMIT
 
 log = logging.getLogger(__name__)
+
+_WEBHOOK_PATH = re.compile(r"/api/(?:v[0-9]+/)?webhooks/[0-9]+/[A-Za-z0-9_-]+")
+
+
+def valid_webhook_url(value: str) -> bool:
+    try:
+        url = urlsplit(value.strip())
+    except ValueError:
+        return False
+    return (url.scheme == "https" and url.netloc.lower() in {"discord.com", "discordapp.com"}
+            and _WEBHOOK_PATH.fullmatch(url.path) is not None and not (url.query or url.fragment))
 
 
 def _split_message(text: str, limit: int = DISCORD_MESSAGE_CHUNK_LIMIT) -> list[str]:
@@ -39,16 +52,19 @@ async def send_webhook_notification(session: aiohttp.ClientSession, message: str
     webhook_url = discord_config.get_webhook_url()
     if not webhook_url or not message.strip():
         return False
+    if not valid_webhook_url(webhook_url):
+        log.warning("디스코드 웹훅 형식이 올바르지 않습니다.")
+        return False
     all_sent = True
     for chunk in _split_message(message):
         try:
-            async with session.post(webhook_url, json={"content": chunk}) as resp:
+            async with session.post(webhook_url, json={"content": chunk}, allow_redirects=False) as resp:
                 if resp.status != 204:
                     all_sent = False
-                    log.error("웹훅 전송 실패: %s %s", resp.status, await resp.text())
+                    log.error("웹훅 전송 실패: HTTP %s", resp.status)
         except Exception as e:
             all_sent = False
-            log.error("웹훅 전송 예외: %s", e)
+            log.error("웹훅 연결 실패 (%s)", type(e).__name__)
     return all_sent
 
 
@@ -57,13 +73,17 @@ async def send_test_webhook_message() -> tuple[bool, str]:
     webhook_url = discord_config.get_webhook_url()
     if not webhook_url:
         return False, "웹훅 URL이 설정되지 않았습니다."
+    if not valid_webhook_url(webhook_url):
+        return False, "디스코드 웹훅 URL 형식을 확인해주세요."
     try:
         async with aiohttp.ClientSession() as session:
             async with session.post(
-                webhook_url, json={"content": "✅ 웹훅 테스트 메시지입니다. 정상적으로 연결되어 있습니다."}
+                webhook_url, json={"content": "✅ 웹훅 테스트 메시지입니다. 정상적으로 연결되어 있습니다."},
+                allow_redirects=False,
             ) as resp:
                 if resp.status == 204:
                     return True, "테스트 메시지를 전송했습니다."
-                return False, f"전송 실패: HTTP {resp.status} — {await resp.text()}"
+                return False, f"전송 실패: HTTP {resp.status}"
     except Exception as e:
-        return False, f"전송 실패: {e}"
+        log.warning("디스코드 웹훅 테스트 연결 실패 (%s)", type(e).__name__)
+        return False, "디스코드 웹훅에 연결하지 못했습니다."

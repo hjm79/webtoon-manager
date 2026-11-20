@@ -8,6 +8,7 @@ from app import db, repository
 from fakes import discord_fake
 from app import kakao_page_auth as auth, kakao_page_download as kp
 from app import kakao_cover
+from fakes import image_bytes
 from app.config import get_settings
 db.get_connection()
 import app.main as m
@@ -36,7 +37,7 @@ def handler(method, url, params, data):
     if "viewer/data" in url:
         files = [{"no": i, "secureUrl": f"https://page-edge.kakao.com/sdownload/resource?kid=k{params['product_id']}_{i}&signature=S"} for i in (1, 2)]
         return FakeResp(200, {"item": {}, "viewer_data": {"imageDownloadData": {"files": files}}})
-    if "sdownload" in url: return FakeResp(500) if S["fail_images"] else FakeResp(200, body=b"\xff\xd8\xffx", ctype="image/jpeg")
+    if "sdownload" in url: return FakeResp(500) if S["fail_images"] else FakeResp(200, body=image_bytes("JPEG"), ctype="image/jpeg")
     if "search/series" in url: return FakeResp(200, {"result": {"list": S["search"], "is_end": True}})
     if "dayofweek" in url: return FakeResp(200, {"result": {"list": [], "is_end": True}})
     if url.endswith("/ticket/my"):

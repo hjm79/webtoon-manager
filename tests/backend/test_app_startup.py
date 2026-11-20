@@ -3,7 +3,7 @@
 테스트는 앱 객체를 직접 만져서 기능을 확인하지만, 실제 서버는 lifespan을 거쳐 시작한다. 여기가 빠지면(예: 작업 종료 연결을 빼먹음) 기능 테스트는 모두 통과하는데 실제로는 동작하지 않는다.
 - 시작: 환경변수 경고, 기본 태그, 디스코드 봇, 받은 회차 기록 만들기(실패해도 계속), 리포트 연결(작업 종료 알림 + 옛 발송 시각 설정 정리), 스케줄러(고정 작업), 카카오 목록 갱신(켜져 있을 때만)
 - 종료: 스케줄러 종료, 디스코드 봇 종료
-- 정적 파일: 화면 파일은 항상 서버에 확인하게(Cache-Control: no-cache) — 예전에 브라우저 캐시 때문에 예전 화면이 계속 보인 적이 있다
+- 정적 파일: HTML은 새로 받고 JS와 CSS는 서버에 재검증한다.
 """
 import logging
 import os
@@ -56,8 +56,8 @@ with startup() as client:
     assert report_dispatch.on_job_finished in job_status._finish_listeners, "다운로드 작업이 끝나면 리포트가 알도록 연결돼야 한다"
     assert calls == {"start_bot": 1, "stop_bot": 0, "backfill": 1, "refresh": 1}, calls                                              # 카카오 관리가 켜져 있으니 목록 갱신을 시작
     tags = repository.list_watched_tags(); assert tags and all(not t.enabled for t in tags), "기본 태그는 꺼진 채로 채워진다"
-    # 정적 파일 — 항상 서버에 확인(no-cache), 없는 파일은 404. API도 응답한다
-    index = client.get("/"); assert index.status_code == 200 and index.headers["cache-control"] == "no-cache" and "<title>웹툰</title>" in index.text
+    # HTML은 저장하지 않고 JS와 CSS는 재검증한다. API도 응답한다.
+    index = client.get("/"); assert index.status_code == 200 and index.headers["cache-control"] == "no-store" and "<title>웹툰</title>" in index.text
     js = client.get("/js/00-core.js"); assert js.status_code == 200 and js.headers["cache-control"] == "no-cache"
     assert client.get("/style.css").headers["cache-control"] == "no-cache" and client.get("/js/없는파일.js").status_code == 404
     assert client.get("/api/settings").status_code == 200

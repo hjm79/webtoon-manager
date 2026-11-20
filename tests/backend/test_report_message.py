@@ -18,7 +18,7 @@ ok_row = lambda title, no=1, platform=None, title_id="1": {"title_name": title, 
 fail_row = lambda title, platform=None: {"title_name": title, "platform": platform}
 
 # Scenario 1: 네이버만 — 예전 형식 그대로(꼬리표 없음). 뷰어 링크가 있는 작품만 "바로가기", 같은 작품의 여러 회차는 한 줄, 가나다 순
-msg = build([ok_row("나작품", 1), ok_row("가작품", 2), ok_row("가작품", 3)], [], {"가작품": "https://viewer/가"})
+msg = build([ok_row("나작품", 1), ok_row("가작품", 2), ok_row("가작품", 3)], [], {("naver", "가작품"): "https://viewer/가"})
 assert msg == "\n".join([HEADER, "", "📁 받은 작품 (2):", "• 가작품 [바로가기](<https://viewer/가>)\n• 나작품"]), msg
 
 # Scenario 2: 받은 게 없으면 "없음", 실패가 있으면 실패 섹션(중복 이름은 하나로, 가나다 순)
@@ -28,7 +28,7 @@ assert msg == "\n".join([HEADER, "", "📁 받은 작품 (0):", "없음", "", "�
 
 # Scenario 3: 카카오가 섞이면 플랫폼 꼬리표 — 이름순이 아니라 네이버가 먼저(그래서 카카오 작품 이름이 가나다 순으로 앞서도 뒤에 나온다), 그 안에서 가나다 순. 카카오는 받은 회차 수/범위(한 개면 "N번", 여럿이면 "처음~끝번")와 뷰어 링크(없으면 카카오페이지 작품 링크)
 rows = [ok_row("가카오B", 5, "kakao", "777"), ok_row("가카오B", 3, "kakao", "777"), ok_row("가카오B", 4, "kakao", "777"), ok_row("가카오A", 9, "kakao", "888"), ok_row("나네이버", 1, None, "1")]
-msg = build(rows, [fail_row("가카오F", "kakao"), fail_row("나네이버F")], {"kakao:가카오A": "https://viewer/ka"})
+msg = build(rows, [fail_row("가카오F", "kakao"), fail_row("나네이버F")], {("kakao", "가카오A"): "https://viewer/ka"})
 assert msg == "\n".join([HEADER, "", "📁 받은 작품 (3):",
     "• [네이버] 나네이버\n• [카카오] 가카오A · 1개 회차(9번) [바로가기](<https://viewer/ka>)\n• [카카오] 가카오B · 3개 회차(3~5번) [바로가기](<https://page.kakao.com/content/777>)",
     "", "❌ 실패한 작품 (2):", "[네이버] 나네이버F\n[카카오] 가카오F"]), msg

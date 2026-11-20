@@ -110,6 +110,29 @@ async def api_cases():
     print("Saved/inherited/separate roots, safe draft queries and unchanged settings OK")
 
 
+async def integrated_cases():
+    import app.api.app_settings as app_settings
+    from app.config import get_settings
+    base = Path(get_settings().download_root)
+    settings = get_settings().model_copy(update={"viewer_internal_url": "http://viewer:8000"})
+    configured = ("naver_download_root", "kakao_download_root")
+    with patch.object(app_settings, "get_settings", return_value=settings), \
+         patch.object(storage, "_mount_for", return_value={"point": str(base), "type": "ext4"}):
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=main.app), base_url="http://test") as client:
+            body = {"naver": "", "kakao": str(base.parent / "outside")}
+            before = [repository.get_setting(key) for key in configured]
+            assert (await client.post("/api/settings/download-roots", json=body)).status_code == 400
+            assert before == [repository.get_setting(key) for key in configured]
+            with patch.object(storage, "_mount_for", return_value={"point": "/", "type": "overlay"}):
+                assert (await client.post("/api/settings/download-roots", json={})).status_code == 400
+            response = await client.post("/api/settings/download-roots", json={})
+            assert response.status_code == 200, response.text
+            state = response.json()
+            assert state["naver"]["effective"] == str(base / "naver")
+            assert state["kakao"]["effective"] == str(base / "kakao")
+            assert [repository.get_setting(key) for key in configured] == [None, None]
+
+
 async def timeout_cases():
     clear_cache()
     release = threading.Event()
@@ -136,4 +159,5 @@ async def timeout_cases():
 if __name__ == "__main__":
     unit_cases()
     asyncio.run(api_cases())
+    asyncio.run(integrated_cases())
     asyncio.run(timeout_cases())

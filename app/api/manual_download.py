@@ -13,6 +13,7 @@ from app import (
     manual_download,
     naver_api,
     repository,
+    subscription_scope,
 )
 from app.api.common import metadata_zip_response
 from app.config import get_settings
@@ -38,6 +39,7 @@ class ManualAnalyzeOut(BaseModel):
     title: str
     thumbnail_url: str = ""  # 화면에서 구독할 때 같이 보낸다
     subscription: str | None = None  # 이 프로그램의 구독 상태(active 등, 등록 안 했으면 None)
+    individual_records: bool = False
     episodes: list[ManualAnalyzeEpisodeOut]
 
 
@@ -80,7 +82,7 @@ async def manual_download_analyze(title_id: str):
         raise HTTPException(status_code=400, detail="titleId는 숫자만 입력할 수 있습니다.")
     settings = get_settings()
     tracked = await asyncio.to_thread(repository.get, title_id)
-    recorded_up_to = tracked.last_downloaded_no if tracked and tracked.status == repository.STATUS_ACTIVE else 0   # 구독 중인 작품만 "여기까지 받음" 기록을 반영한다
+    recorded_up_to = tracked.last_downloaded_no if tracked and tracked.status == repository.STATUS_ACTIVE else None
     try:
         info, rows = await manual_download.analyze(title_id, settings, recorded_up_to)
     except naver_api.NaverApiError as e:
@@ -92,6 +94,7 @@ async def manual_download_analyze(title_id: str):
         title=info.title_name,
         thumbnail_url=info.thumbnail_url,
         subscription=tracked.status if tracked else None,
+        individual_records=subscription_scope.get("naver", title_id)["explicit"],
         episodes=[
             ManualAnalyzeEpisodeOut(
                 episode_no=r.episode_no, subtitle=r.subtitle, owned=r.owned, is_locked=r.is_locked, recorded=r.recorded
@@ -122,15 +125,25 @@ class ManualRecordIn(BaseModel):
 
 @router.post("/manual-download/record")
 async def manual_download_record(payload: ManualRecordIn):
-    """수동 다운로드에서 고른 회차를 "받은 것으로" 또는 "받지 않은 것으로" 기록한다 — 구독 중인 네이버 웹툰만. 네이버는 "여기까지 받음" 한 지점만 기억한다."""
+    """수동 다운로드에서 고른 회차의 수신 기록을 수정한다."""
+    from app.scheduler.download_job import release_title_download, reserve_title_download
+
     if not payload.title_id.strip().isdigit():
         raise HTTPException(status_code=400, detail="titleId는 숫자만 입력할 수 있습니다.")
     if not any(n > 0 for n in payload.episode_nos):
         raise HTTPException(status_code=400, detail="기록할 회차를 선택해주세요.")
     try:
+        reserve_title_download("naver")
+    except ValueError as e:
+        raise HTTPException(status_code=409, detail=str(e)) from e
+    try:
         return await manual_download.mark_record(payload.title_id.strip(), payload.episode_nos, payload.downloaded, get_settings())
     except manual_download.ManualRecordError as e:
         raise HTTPException(status_code=e.status_code, detail=str(e)) from e
+    except naver_api.NaverApiError as e:
+        raise HTTPException(status_code=502, detail=f"회차 목록을 불러오지 못했습니다: {e}") from e
+    finally:
+        release_title_download("naver")
 
 
 @router.get("/manual-download/metadata-zip")

@@ -49,7 +49,6 @@ EMBED_ALLOWED_ORIGINS = embedding.parse_allowed_origins(os.environ.get("EMBED_AL
 
 app = FastAPI(title="webtoon-server")
 
-# 커버/페이지 이미지는 내용이 거의 안 바뀌니 캐싱이 오히려 유리해서 캐시 금지 대상에서 뺀다.
 _CACHEABLE_IMAGE_PATH = re.compile(r"^/api/series/[^/]+/cover$|^/api/chapters/[^/]+/pages/\d+$")
 _SUPPORTER_COVER_PATH = re.compile(r"^/api/supporter/covers/[A-Za-z0-9_-]{1,128}$")
 
@@ -60,29 +59,16 @@ def _is_supporter_endpoint(path):
 
 @app.middleware("http")
 async def cache_control_for_api(request, call_next):
-    """
-    /api/* 응답은 매번 최신 상태를 반영해야 하는 동적 데이터라(읽음 진행률, 안읽음 개수 등),
-    브라우저가 임의로 캐싱하면 안 된다. 실제로 브라우저 자체 뒤로가기로 목록 화면에 돌아왔을 때
-    fetch 자체는 다시 일어나면서도 브라우저가 이전 응답을 재사용해 안읽음 개수가 갱신 안
-    되는 문제가 있었다 - 이 헤더가 없으면 캐시 여부가 브라우저 판단에 맡겨지는 게 원인이었다.
-
-    반대로 커버/페이지 이미지는 내용이 거의 안 바뀌니(바뀌면 서버가 자체적으로
-    cover_mtime/파일 mtime 기준으로 캐시를 무효화함) 오히려 적극적으로, 오래 캐싱해도
-    된다는 걸 명시해야 한다 - 그냥 "금지 안 함" 정도로는 브라우저가 알아서 캐싱해준다는
-    보장이 없어서, 실제로 리더 갔다가 메인화면에 돌아올 때마다 섬네일을 매번 새로
-    받아오는 문제가 있었다.
-
-    다만 서버가 자기 캐시를 정확히 갱신해도 브라우저는 그걸 모르므로, 커버가 바뀌었을 때
-    오래된 이미지가 7일간 계속 보이지 않으려면 "주소가 바뀌어야" 한다 - 커버 주소에
-    붙는 ?v= 값이 그 역할을 한다(covers.cover_version). 그리고 에러 응답(404/504 등)은
-    캐싱하면 안 된다: 나중에 이미지가 생기거나 일시적 실패가 풀려도 7일간 계속 에러로
-    보이게 되기 때문이다 - 그래서 정상(200) 응답에만 이 긴 캐시를 붙인다.
-    """
+    """Cache versioned covers privately and recheck access and content for unversioned images."""
     response = await call_next(request)
     path = request.url.path
     if path.startswith("/api/"):
-        if _CACHEABLE_IMAGE_PATH.match(path) and response.status_code == 200:
-            response.headers["Cache-Control"] = "public, max-age=604800"
+        if (_CACHEABLE_IMAGE_PATH.match(path) and response.status_code in (200, 304)
+                and not getattr(request.state, "profile", None)):
+            if path.endswith("/cover") and request.query_params.get("v"):
+                response.headers["Cache-Control"] = "private, max-age=604800"
+            else:
+                response.headers["Cache-Control"] = "private, no-cache"
         else:
             response.headers["Cache-Control"] = "no-store"
     return response
@@ -155,15 +141,8 @@ async def profile_and_admin_gate(request, call_next):
             device_id = secrets.token_urlsafe(24)
         request.state.profile_device_id = device_id
 
-        device_status = "approved"
-        if profile_devices.is_device_registered(profile["id"], device_id):
-            profile_devices.touch_device(profile["id"], device_id)
-        elif profile_devices.count_devices(profile["id"]) < profile_devices.MAX_DEVICES_PER_PROFILE:
-            label = request.headers.get("user-agent", "알 수 없는 기기")[:120]
-            profile_devices.register_device(profile["id"], device_id, label)
-        else:
-            pending = profile_devices.get_pending_request(profile["id"], device_id)
-            device_status = "pending" if pending else "needs_request"
+        label = request.headers.get("user-agent", "알 수 없는 기기")[:120]
+        device_status = await asyncio.to_thread(profile_devices.access_status, profile["id"], device_id, label)
 
         if device_status != "approved" and rest not in ("/api/device/status", "/api/device/request"):
             if rest.startswith("/api/"):
@@ -176,7 +155,7 @@ async def profile_and_admin_gate(request, call_next):
             request.scope["path"] = rest
             response = await call_next(request)
 
-        if not rest.startswith("/api/"):
+        if not rest.startswith("/api/") or _CACHEABLE_IMAGE_PATH.fullmatch(rest):
             # "/p/<토큰>/" 같은 페이지 경로는 같은 URL이라도 승인 상태에 따라 완전히
             # 다른 내용(대기 화면 vs 실제 화면)을 내려주는 것이라, 브라우저가 예전
             # 응답을 캐시해서 재사용하면 안 된다 - 그러면 승인된 뒤에도 브라우저가

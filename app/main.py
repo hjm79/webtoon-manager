@@ -8,19 +8,21 @@ RedactingFilter를 전역 로깅에 건다 (요구사항: 민감 정보 마스�
 """
 
 import asyncio
+import hashlib
 import logging
 from contextlib import asynccontextmanager
+from pathlib import Path
 
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.staticfiles import StaticFiles
-from starlette.responses import JSONResponse, Response
+from starlette.responses import HTMLResponse, JSONResponse, Response
 from starlette.types import Scope
 
 from app.api.routes import router as api_router
 from app.api import viewer_proxy
 from app.discord_bot import start_bot, stop_bot
 from app.log_redaction import RedactingFilter
-from app import kakao_catalog, kakao_records, kakao_page_auth, report_dispatch, repository
+from app import download_roots, kakao_catalog, kakao_records, kakao_page_auth, report_dispatch, repository
 from app.config import get_settings, warn_removed_env_variables
 from app.scheduler import create_scheduler
 from app.scheduler import download_job
@@ -32,7 +34,10 @@ def _configure_logging() -> None:
         level=logging.INFO,
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     )
-    logging.getLogger().addFilter(RedactingFilter())
+    for logger in (logging.getLogger(), logging.getLogger("uvicorn")):
+        for handler in logger.handlers:
+            if not any(isinstance(f, RedactingFilter) for f in handler.filters):
+                handler.addFilter(RedactingFilter())
 
 
 @asynccontextmanager
@@ -41,13 +46,15 @@ async def lifespan(app: FastAPI):
     warn_removed_env_variables(logging.getLogger(__name__))  # 예전 환경변수가 남아 있으면 조용히 무시되지 않게 알린다
     ensure_default_tags_seeded()
     await start_bot()
-    # rclone 최신화는 이제 컨테이너 시작 시점이 아니라, 아카이빙 잡이 실행될 때마다
-    # 확인한다(app/rclone_updater.py) — "컨테이너를 자주 재시작 안 하니 시작 시점
-    # 확인은 사실상 이미지 빌드 시점 고정과 다를 게 없다"는 지적을 반영해 변경.
     # 받은 회차 기록이 없는 카카오 작품은 폴더와 아카이빙 이력으로 한 번 만들어 둔다 — 스케줄이 돌기 전에(아카이빙이 먼저 폴더를 비우기 전에) 끝낸다.
     # 실패해도 시작을 막지 않는다(첫 자동 다운로드 때 같은 방식으로 만든다).
     try:
-        await asyncio.to_thread(kakao_records.backfill_and_log, get_settings())
+        settings = get_settings()
+        mount_problem = await asyncio.to_thread(download_roots.download_root_problem, "kakao", settings)
+        if mount_problem:
+            logging.getLogger(__name__).warning("카카오 받은 회차 대조 보류 · %s", mount_problem)
+        else:
+            await asyncio.to_thread(kakao_records.backfill_and_log, settings)
     except Exception:
         logging.getLogger(__name__).exception("받은 회차 기록 만들기 실패(건너뜀)")
     # 다운로드 리포트는 이제 발송 시각 스케줄이 아니라 다운로드가 끝날 때 보낸다 — 작업이 끝나면 report_dispatch가 알도록 연결하고, 옛 발송 시각 설정은 지운다.
@@ -79,19 +86,35 @@ async def kakao_auth_pending_response(request, exc):
                         headers={'Cache-Control': 'no-store'})
 app.include_router(api_router)
 viewer_proxy.install(app)
-class NoCacheStaticFiles(StaticFiles):
-    """
-    js/*.js / style.css / index.html에 파일명 해시가 없어서, 브라우저가 자체 판단으로
-    캐싱해버리면 서버는 최신 버전인데 화면은 예전 버전을 계속 보여주는 문제가
-    실제로 있었다(고쳤다고 안내드려도 브라우저 캐시 때문에 반영이 안 보임) —
-    매번 서버에 검증(If-None-Match)하도록 강제해서, 실제로 안 바뀌었으면
-    304로 가볍게 넘어가고 바뀌었으면 항상 새로 받도록 한다.
-    """
+
+
+class VersionedStaticFiles(StaticFiles):
+    def __init__(self, directory: Path):
+        super().__init__(directory=directory, html=True)
+        assets = (directory / "style.css", *sorted((directory / "js").glob("*.js")))
+        digest = hashlib.sha256()
+        self.asset_paths = {asset.relative_to(directory).as_posix() for asset in assets}
+        for path in sorted(self.asset_paths):
+            digest.update(path.encode() + b"\0" + hashlib.sha256((directory / path).read_bytes()).digest())
+        self.revision_path = f"ui/{digest.hexdigest()[:20]}/"
+
+        # The document and its scripts must use the same build even when a browser
+        # or a proxy still has cached responses for the previous asset URLs.
+        index = (directory / "index.html").read_text(encoding="utf-8")
+        for path in self.asset_paths:
+            index = index.replace(f'="/{path}"', f'="/{self.revision_path}{path}"')
+        self.index = index
 
     async def get_response(self, path: str, scope: Scope) -> Response:
+        if path in (".", "index.html") and scope["method"] in ("GET", "HEAD"):
+            return HTMLResponse(self.index, headers={"Cache-Control": "no-store"})
+        if path.startswith("ui/"):
+            if not path.startswith(self.revision_path) or path[len(self.revision_path):] not in self.asset_paths:
+                raise HTTPException(status_code=404)
+            path = path[len(self.revision_path):]
         response = await super().get_response(path, scope)
         response.headers["Cache-Control"] = "no-cache"
         return response
 
 
-app.mount("/", NoCacheStaticFiles(directory="app/static", html=True), name="static")
+app.mount("/", VersionedStaticFiles(directory=Path(__file__).parent / "static"), name="static")

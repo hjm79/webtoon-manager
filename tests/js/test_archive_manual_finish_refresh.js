@@ -23,7 +23,7 @@ const { makeApp, sleep, idle, ok, done } = require("./harness");
   const check = (id, on = true) => { const cb = w.document.querySelector(`#archive-manual-select-list input[value="${id}"]`); cb.checked = on; };
   run("window.__p = loadArchiveManualSelectList();"); await w.__p; await idle();
 
-  // Scenario 1: 완결 처리로 이동 — A는 문제없이 끝나 대상이 삭제되고, B는 실패해 남는다. 실행 중에는 목록이 그대로다
+  // Scenario 1: 완결 처리로 이동 — A가 정리된 뒤에도 목록에 남은 항목의 선택을 유지한다.
   check("A"); check("B"); $("archive-manual-full-move-toggle").checked = true; $("archive-manual-full-move-toggle").dispatchEvent(new w.Event("change"));
   onRun = () => { targets = targets.filter((t) => t.title_id !== "A"); };
   $("btn-run-archive-now").click(); await idle();
@@ -36,7 +36,7 @@ const { makeApp, sleep, idle, ok, done } = require("./harness");
   ok(JSON.stringify(listIds()) === JSON.stringify(["B", "C"]), "끝난 뒤 이동을 마친 웹툰은 사라짐: " + listIds());
   ok(JSON.stringify(checkedIds()) === JSON.stringify(["B"]), "남은 항목의 선택은 유지: " + checkedIds());
   ok($("archive-manual-full-move-toggle").checked === false && $("archive-manual-full-move-warning").classList.contains("hidden"), "성공하면 완결 처리로 이동 체크와 경고가 풀린다");
-  ok(/완결 처리 완료/.test($("archive-log").textContent) && $("archive-status-badge").textContent === "success", "진행 로그와 상태는 그대로 남는다: " + $("archive-log").textContent);
+  ok(/완결 처리 완료/.test($("archive-log").textContent) && $("archive-status-badge").textContent === "완료", "진행 로그와 완료 상태는 그대로 남는다");
   // 아카이빙 대상 목록(위 카드)도 같이 다시 그려진다 — 서버 목록을 다시 읽었다
   const getsBefore = targetGets; await poll(); ok(targetGets === getsBefore, "끝난 뒤 계속 폴링해도 다시 읽지 않는다(한 번만 갱신)");
 
@@ -47,6 +47,15 @@ const { makeApp, sleep, idle, ok, done } = require("./harness");
   jobStatus = { status: "error", log: ["[웹툰B] 이동 실패: 0002.zip — 디스크 오류"] };
   await poll();
   ok(JSON.stringify(listIds()) === JSON.stringify(["B", "C"]) && $("archive-manual-full-move-toggle").checked === true, "오류로 끝나면 체크는 유지: " + $("archive-manual-full-move-toggle").checked);
+
+  // 일부만 완료되면 처리된 대상만 사라지고 미처리 항목을 다시 실행할 수 있다.
+  check("C");
+  onRun = () => { targets = targets.filter((t) => t.title_id !== "B"); };
+  $("btn-run-archive-now").click(); await idle(); await poll();
+  jobStatus = { status: "partial", log: ["이동 1개, 충돌로 건너뜀 1개, 실패 0건"] };
+  await poll();
+  ok(JSON.stringify(listIds()) === JSON.stringify(["C"]) && JSON.stringify(checkedIds()) === JSON.stringify(["C"]), "완료한 대상만 사라지고 미처리 대상 선택을 유지한다");
+  ok($("archive-status-badge").textContent === "일부 미처리" && $("archive-manual-full-move-toggle").checked, "일부 미처리 상태와 완결 처리 체크 표시");
 
   // Scenario 3: 완결 처리가 아닌 일반 수동 이동은 대상이 그대로라서 목록을 다시 읽지 않는다
   $("archive-manual-full-move-toggle").checked = false; check("C");

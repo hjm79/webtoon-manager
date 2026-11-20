@@ -13,13 +13,98 @@
 - 표식 파일 하나만 있고 아카이빙 이력도 없으면(예전 도구가 남긴 폴더) 파일 번호가 사이트와 다를 수 있어서, 첫 다운로드 때 사이트와 맞춰 본 위치로 기록한다.
 """
 
+import json
 import logging
 from datetime import datetime, timezone
 from pathlib import Path
 
 from app import repository
+from app.db import write_transaction
 
 log = logging.getLogger(__name__)
+PRODUCT_RECEIPTS_PREFIX = "kakao_product_receipts:"
+
+
+def _decode_products(raw: str | None) -> dict[int, set[int]]:
+    if raw is None:
+        return {}
+    data = json.loads(raw)
+    if not isinstance(data, dict) or any(
+        not key.isascii() or not key.isdecimal() or int(key) <= 0
+        or not isinstance(numbers, list) or not numbers
+        or any(type(number) is not int or number <= 0 for number in numbers)
+        for key, numbers in data.items()
+    ):
+        raise ValueError("카카오페이지 상품별 받은 회차 기록이 올바르지 않습니다.")
+    return {int(key): set(numbers) for key, numbers in data.items()}
+
+
+def product_receipts(series_id: int) -> dict[int, set[int]]:
+    return _decode_products(repository.get_setting(f"{PRODUCT_RECEIPTS_PREFIX}{series_id}"))
+
+
+def _save_products(conn, key: str, products: dict[int, set[int]]) -> None:
+    encoded = json.dumps({pid: sorted(numbers) for pid, numbers in products.items()})
+    conn.execute("INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", (key, encoded))
+
+
+def discard_removed_receipts(conn, series_id: int, numbers: set[int]) -> None:
+    if not numbers:
+        return
+    key = f"{PRODUCT_RECEIPTS_PREFIX}{series_id}"
+    row = conn.execute("SELECT value FROM settings WHERE key=?", (key,)).fetchone()
+    if row is None:
+        return
+    products = _decode_products(row["value"])
+    kept = {pid: marks - numbers for pid, marks in products.items() if marks - numbers}
+    if kept != products:
+        _save_products(conn, key, kept)
+
+
+def record_download(series_id: int, number: int, product_id: int, *, clear_pending: bool = True) -> None:
+    """Preserve the published ZIP's identity after archiving."""
+    key = f"{PRODUCT_RECEIPTS_PREFIX}{series_id}"
+    with write_transaction() as conn:
+        track = conn.execute("SELECT downloaded_numbers, pending_numbers FROM kakao_webtoons WHERE title_id=?", (series_id,)).fetchone()
+        if track is None:
+            return
+        stored = conn.execute("SELECT value FROM settings WHERE key=?", (key,)).fetchone()
+        products = _decode_products(stored["value"] if stored is not None else None)
+        products.setdefault(product_id, set()).add(number)
+        _save_products(conn, key, products)
+        # A NULL legacy receipt still needs the original file/archive backfill.
+        recorded = track["downloaded_numbers"]
+        if recorded is not None:
+            recorded = json.dumps(sorted(set(json.loads(recorded)) | {number}))
+        pending = set(json.loads(track["pending_numbers"] or "[]"))
+        if clear_pending:
+            pending.discard(number)
+        conn.execute("UPDATE kakao_webtoons SET downloaded_numbers=?, pending_numbers=? WHERE title_id=?",
+                     (recorded, json.dumps(sorted(pending)) if pending else None, series_id))
+
+
+def plan_for_catalog(series_id: int, episodes, existing, title: str, *, recorded: set[int] | None = None,
+                     pending: set[int] | None = None):
+    """Give automatic, manual and preview paths the same read-only ownership decisions."""
+    from app import subscription_scope
+    from app.kakao_page_download.models import plan_by_folder_rules
+
+    scope = subscription_scope.get("kakao", series_id)
+    initial = scope.get("initial_products", {})
+    number_by_product = {episode.product_id: episode.number for episode in episodes}
+    stale = set()
+    for old_number, product_id in initial.items():
+        current_number = number_by_product.get(product_id)
+        if current_number != int(old_number):
+            stale.add(int(old_number))
+            if current_number is not None:
+                stale.add(current_number)
+    if recorded is None:
+        recorded = repository.get_kakao_downloaded_numbers(series_id)
+    if pending is None:
+        pending = repository.get_kakao_pending_numbers(series_id)
+    return plan_by_folder_rules(episodes, existing, title, recorded, pending,
+                                series_id=series_id, product_receipts=product_receipts(series_id), stale_numbers=stale)
 
 
 def archived_numbers(series_id: int) -> set[int]:
@@ -64,7 +149,7 @@ def sync_before_planning(series_id: int, existing, plan_without_record) -> set[i
     return recorded or None
 
 
-def remember_folder_episodes(series_id: int, folder_numbers) -> None:
+def remember_folder_episodes(series_id: int, folder_numbers, *, episode_paths=()) -> None:
     """아카이빙으로 옮기기 직전에 호출한다 — 폴더에 있는(옮길 것과 남길 것 모두) 회차를 받은 회차 기록에 확정해 둔다.
     아카이빙 이력은 보관 기간이 지나면 지워지고 파일도 폴더를 떠나서, 이 기록이 이 작품이 받은 회차를 기억하는 유일하게 오래 남는 곳이다.
     기록이 없는 작품이면 기존 방식(아카이빙 이력)으로 먼저 채운 뒤 더한다. 추적하지 않는 작품이면 아무것도 하지 않는다."""
@@ -75,6 +160,14 @@ def remember_folder_episodes(series_id: int, folder_numbers) -> None:
     if record is None:
         record = archived_numbers(series_id)
     repository.set_kakao_downloaded_numbers(series_id, record | numbers)
+    if episode_paths:
+        from app.kakao_page_download.models import parse_existing_zip_name, read_zip_identity
+
+        for path in episode_paths:
+            episode = parse_existing_zip_name(path.name)
+            identity = read_zip_identity(path)
+            if episode is not None and identity is not None and identity[0] == series_id:
+                record_download(series_id, episode.number, identity[1], clear_pending=False)
 
 
 def mark(series_id: int, numbers, downloaded: bool, existing) -> dict:

@@ -14,6 +14,7 @@
 import asyncio
 import logging
 from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
 
 import aiohttp
@@ -249,7 +250,8 @@ async def _automatic_scope(platform: str, title_id: str, settings: Settings) -> 
             kakao_page_download.persist_refreshed_cookies(client)
         if listing is None:
             raise ValueError("회차 목록 조회 실패")
-        episodes = [{"episode_no": r.number, "available": r.accessible and not r.hidden, "owned": False} for r in listing[1]]
+        episodes = [{"episode_no": r.number, "product_id": r.product_id,
+                     "available": r.accessible and not r.hidden, "owned": False} for r in listing[1]]
     if not episodes:
         raise ValueError("회차 목록이 비어 있어 자동 구독을 보류합니다")
     return policy, subscription_scope.make_choice(platform, title_id, policy["mode"], episodes, latest_count=policy["latest_count"])
@@ -310,7 +312,14 @@ async def _fetch_info_only(
             return title_id, None
 
 
-async def sync_metadata_for_all(settings) -> int:
+@dataclass(frozen=True)
+class MetadataSyncStats:
+    updated: int = 0
+    failed: int = 0
+    cover_failed: int = 0
+
+
+async def sync_metadata_for_all(settings) -> MetadataSyncStats:
     """
     추적 중인(구독중/구독해제/제외됨 전부) 웹툰 폴더를 스캔해서 info.xml/cover를
     다시 만들어준다. 폴더가 아예 없으면(다운로드한 적 없는 웹툰) 건너뛴다.
@@ -327,10 +336,11 @@ async def sync_metadata_for_all(settings) -> int:
     """
     targets = [wt for wt in repository.list_all() if (Path(download_roots.naver_root(settings)) / remove_forbidden_str(wt.title)).is_dir()]
     if not targets:
-        return 0
+        return MetadataSyncStats()
 
     semaphore = asyncio.Semaphore(settings.artist_scan_concurrency)
     fixed = 0
+    cover_failed = 0
     async with aiohttp.ClientSession() as session:
         fetch_results = await asyncio.gather(
             *[_fetch_info_only(session, semaphore, wt.title_id, settings) for wt in targets]
@@ -338,6 +348,7 @@ async def sync_metadata_for_all(settings) -> int:
         info_by_id = {title_id: info for title_id, info in fetch_results}
 
         for wt in targets:
+            metadata_written = False
             try:
                 info = info_by_id.get(wt.title_id)
                 if info is None:
@@ -348,56 +359,63 @@ async def sync_metadata_for_all(settings) -> int:
                 repository.update_genres_and_tags(wt.title_id, info.genres_ko, info.tags)
 
                 comicinfo.write_comicinfo_file(webtoon_dir, info)
-                if info.thumbnail_url:
-                    # 메타 동기화는 커버도 새로 받아 교체한다(받기 실패 시 기존 커버는 그대로 남는다)
-                    await comicinfo.download_cover_image(session, webtoon_dir, info, settings.request_timeout_seconds)
-                job_status.log_line("metadata_sync", f"[{wt.title}] info.xml 갱신 / 커버 이미지 교체")
+                metadata_written = True
                 fixed += 1
+                if info.thumbnail_url and not await comicinfo.download_cover_image(session, webtoon_dir, info, settings.request_timeout_seconds):
+                    # 메타 동기화는 커버도 새로 받아 교체한다(받기 실패 시 기존 커버는 그대로 남는다)
+                    cover_failed += 1
+                    job_status.log_line("metadata_sync", f"[{wt.title}] info.xml 갱신 / 표지 갱신 실패")
+                else:
+                    job_status.log_line("metadata_sync", f"[{wt.title}] info.xml 갱신" + (" / 커버 이미지 교체" if info.thumbnail_url else ""))
             except Exception as e:
+                cover_failed += metadata_written
                 log.error("메타 동기화 중 예외 (titleId=%s) — 다음 웹툰으로 진행: %s", wt.title_id, e)
                 job_status.log_line("metadata_sync", f"[{wt.title}] 처리 중 오류: {e}")
-    return fixed
+    return MetadataSyncStats(fixed, len(targets) - fixed, cover_failed)
 
 
-async def sync_kakao_metadata(client: kakao_page_download.KakaoPageClient, settings: Settings) -> int:
+async def sync_kakao_metadata(client: kakao_page_download.KakaoPageClient, settings: Settings) -> MetadataSyncStats:
     """
     추적 중인 카카오페이지 웹툰(구독/구독해제/목록/제외됨 전부)의 작품 폴더에서 info.xml과 커버를 카카오페이지의 최신 정보로
     교체한다. 예전 카카오웹툰 시절에 받은 커버(다른 확장자 포함)와 info.xml도 이걸로 카카오페이지 것으로 바뀐다. 폴더가 없으면
     (받은 적 없는 작품) 건너뛰고 카카오에 묻지도 않는다. 작품 정보를 못 받으면 그 작품의 기존 파일은 그대로 두고, 표지만 못
-    받으면 info.xml만 갱신하고 기존 커버를 유지한다. 한 작품에서 예외가 나도 나머지는 계속한다. info.xml을 갱신한 작품 수를 돌려준다.
+    받으면 info.xml만 갱신하고 기존 커버를 유지한다. 한 작품에서 예외가 나도 나머지는 계속한다.
     """
     root = Path(download_roots.kakao_root(settings))
     targets = [(row, root / remove_forbidden_str_kakao(row["title"])) for row in repository.get_kakao_webtoons_map().values()]
     targets = [(row, folder) for row, folder in targets if folder.is_dir()]
     if not targets:
-        return 0
+        return MetadataSyncStats()
 
     semaphore = asyncio.Semaphore(settings.artist_scan_concurrency)
 
-    async def _run_one(row: dict, folder: Path) -> bool:
+    async def _run_one(row: dict, folder: Path) -> tuple[bool, bool]:
         title, series_id = row["title"], row["title_id"]
         async with semaphore:
+            metadata_written = False
             try:
                 series_item = await client.fetch_series_item(series_id)
                 about = await client.fetch_about(series_id)
                 if series_item is None:
                     job_status.log_line("metadata_sync", f"[카카오] {title} — 작품 정보 조회 실패로 건너뜀")
-                    return False
+                    return False, False
                 kakao_page_download.write_info_xml(series_item, series_id, folder, about)
+                metadata_written = True
                 replaced = await asyncio.to_thread(kakao_cover.replace_cover, folder, series_id)
                 job_status.log_line(
                     "metadata_sync", f"[카카오] {title} — info.xml 갱신 / " + ("커버 교체" if replaced else "커버는 받지 못해 기존 유지")
                 )
-                return True
+                return True, not replaced
             except Exception as e:
                 log.error("카카오 메타 동기화 중 예외 (series_id=%s) — 다음 작품으로 진행: %s", series_id, e)
                 job_status.log_line("metadata_sync", f"[카카오] {title} — 처리 중 오류: {e}")
-                return False
+                return metadata_written, metadata_written
             finally:
                 await asyncio.sleep(settings.delay_seconds)
 
     results = await asyncio.gather(*(_run_one(row, folder) for row, folder in targets))
-    return sum(1 for r in results if r)
+    updated = sum(metadata_written for metadata_written, _ in results)
+    return MetadataSyncStats(updated, len(targets) - updated, sum(cover_failed for _, cover_failed in results))
 
 
 async def refresh_inactive_metadata(session: aiohttp.ClientSession, settings: Settings) -> int:

@@ -92,20 +92,22 @@ async def kakao_uses_saved_values():
     STATE.update({"total": 25, "have": set()}); calls.clear(); sleeps.clear()
     await scheduler._download_kakao_subscriptions(S, [])
     assert calls == [10, 10, 10] and [x for x in sleeps if x] == [300.0, 300.0], (calls, sleeps)
+    assert any("받음 25회차" in line for line in job_status.snapshot()["download"]["log"])
     # Scenario 9: 설정 화면에서 3회차/0.5분으로 바꾸면 재시작 없이 다음 실행부터 그대로 적용 — 7회차는 3+3+1, 사이에 30초씩
     repository.set_setting(download_pacing.CAP_KEY, "3"); repository.set_setting(download_pacing.REST_KEY, "0.5")
     STATE.update({"total": 7, "have": set()}); calls.clear(); sleeps.clear()
     await scheduler._download_kakao_subscriptions(S, [])
     assert calls == [3, 3, 3] and [x for x in sleeps if x] == [30.0, 30.0], (calls, sleeps)
+    assert any("받음 7회차" in line for line in job_status.snapshot()["download"]["log"])
     print("8~9) 카카오 자동 다운로드가 저장한 값을 쓴다 OK")
 
 
 async def naver_uses_saved_values():
     # Scenario 10: 네이버 자동 다운로드도 같은 값을 쓴다(상한마다 쉬었다가 이어받기)
     done = []
-    async def fake_single(**k): done.append(k["episode"].episode_no); return True, None
+    async def fake_single(**k): done.append(k["episode"].episode_no); return True, Path(DL) / "[0001]"
     scheduler.naver_download.download_single_episode = fake_single
-    scheduler.naver_download.zip_episode_folders = lambda d: None
+    scheduler.naver_download.zip_episode_folders = lambda d, **options: ["episode.zip"]
     download_roots.naver_root = lambda s: DL
     repository.upsert_new("1", "네이버 작품")
     plan = NS(info=NS(title_name="네이버 작품", webtoon_type="webtoon"), pending=[NS(episode_no=n, subtitle=f"{n}화") for n in range(1, 8)], cookies={}, webtoon_dir=Path(DL))

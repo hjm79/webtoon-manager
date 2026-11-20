@@ -148,20 +148,28 @@ def _select_report_rows(test: bool, until: str | None) -> tuple[list[dict], bool
     return rows, bool(rows)
 
 
-async def _resolve_reader_urls(session: aiohttp.ClientSession, settings, success_rows: list[dict]) -> dict[str, str]:
-    """받은 작품의 웹툰 뷰어 바로가기 링크(뷰어 서버가 설정돼 있을 때만). 키: 네이버는 제목, 카카오는 "kakao:제목".
+async def _resolve_reader_urls(session: aiohttp.ClientSession, settings, success_rows: list[dict]) -> dict[tuple[str, str], str]:
+    """받은 작품의 웹툰 뷰어 바로가기 링크(뷰어 서버가 설정돼 있을 때만). 키는 플랫폼과 제목이다.
     웹툰서버는 실제 디스크 폴더명 기준으로 매칭하는데, 폴더를 만들 때는 ':' 같은 금지문자를 치환해서 저장한다 — 네이버는 전각 문자로
     (예: "제목 : 부제" → "제목 ： 부제"), 카카오는 밑줄 규칙으로. 원본 제목을 그대로 조회하면 문자가 안 맞아 실패한 사례가 있어서
     폴더명 생성과 같은 치환을 거쳐 조회한다."""
     webtoon_server_url = viewer_connection.internal_base(repository.get_setting(_SETTING_KEY_WEBTOON_SERVER_URL))
-    urls: dict[str, str] = {}
+    urls: dict[tuple[str, str], str] = {}
     if not webtoon_server_url:
         return urls
-    for platform, folder_name, key_prefix in (("naver", remove_forbidden_str, ""), ("kakao", remove_forbidden_str_kakao, "kakao:")):
-        for title in sorted({r["title_name"] for r in success_rows if (r.get("platform") or "naver") == platform}):
-            url = await webtoon_server_client.fetch_reader_url(session, webtoon_server_url, folder_name(title), settings.request_timeout_seconds)
+    for platform, folder_name in (("naver", remove_forbidden_str), ("kakao", remove_forbidden_str_kakao)):
+        work_ids: dict[str, set[str]] = {}
+        for row in success_rows:
+            if (row.get("platform") or "naver") == platform:
+                work_ids.setdefault(row["title_name"], set()).add(str(row.get("title_id") or ""))
+        for title, ids in sorted(work_ids.items()):
+            title_id = next(iter(ids)) if len(ids) == 1 else None
+            url = await webtoon_server_client.fetch_reader_url(
+                session, webtoon_server_url, folder_name(title), settings.request_timeout_seconds,
+                platform=platform, title_id=title_id,
+            )
             if url:
-                urls[f"{key_prefix}{title}"] = url
+                urls[platform, title] = url
     return urls
 
 

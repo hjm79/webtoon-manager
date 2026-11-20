@@ -234,15 +234,16 @@ async def fetch_all_episodes(
     timeout_seconds: int,
 ) -> list[EpisodeInfo]:
     """
-    전체 회차를 no 오름차순으로 반환한다. list API 자체에 접근 불가(성인+미인증 등, 첫 페이지 실패)면
-    빈 리스트를 반환하며, 이 경우 상위 로직에서 "다운로드 가능한 회차 없음"으로 처리된다.
-    첫 페이지는 받았는데 뒤쪽 페이지가 끝내 실패하면 NaverApiError를 낸다(불완전한 목록을 돌려주지 않는다).
+    전체 회차를 no 오름차순으로 반환한다. 페이지 조회에 실패하거나 불완전한 목록이면 NaverApiError를 낸다.
     """
     first_page = await _fetch_episode_list_page(session, title_id, 1, cookies, timeout_seconds)
-    if not first_page:
-        return []
+    if not isinstance(first_page, dict) or not isinstance(first_page.get("articleList"), list):
+        raise NaverApiError(f"회차 목록 1페이지를 받지 못했습니다 (titleId={title_id})")
 
-    total_pages = (first_page.get("pageInfo") or {}).get("totalPages", 1) or 1
+    pagination = first_page.get("pageInfo") or {}
+    total_pages = pagination.get("totalPages", 1) if isinstance(pagination, dict) else None
+    if type(total_pages) is not int or total_pages < 0:
+        raise NaverApiError(f"잘못된 회차 목록 페이지 수 (titleId={title_id})")
 
     pages_raw = [first_page]
     if total_pages > 1:
@@ -251,18 +252,27 @@ async def fetch_all_episodes(
             for page in range(2, total_pages + 1)
         ]
         later_pages = await asyncio.gather(*tasks)
-        failed_pages = [page for page, data in zip(range(2, total_pages + 1), later_pages) if not data]
+        failed_pages = [page for page, data in zip(range(2, total_pages + 1), later_pages)
+                        if not isinstance(data, dict) or not data.get("articleList")]
         if failed_pages:
             # 한 페이지라도 빠진 목록을 그대로 쓰면 빠진 회차를 모른 채 더 큰 번호를 받아서, 그 사이 회차가 영영 누락된다 — 불완전한 목록은 오류로 올린다.
             raise NaverApiError(f"회차 목록 {', '.join(str(p) for p in failed_pages)}페이지를 받지 못했습니다 (titleId={title_id}, 전체 {total_pages}페이지)")
         pages_raw.extend(later_pages)
 
     episodes: list[EpisodeInfo] = []
-    for page_data in pages_raw:
-        for article in page_data.get("articleList") or []:
+    seen_numbers: set[int] = set()
+    for page, page_data in enumerate(pages_raw, 1):
+        articles = page_data.get("articleList")
+        if not isinstance(articles, list) or (not articles and total_pages > 1):
+            raise NaverApiError(f"불완전한 회차 목록 {page}페이지 (titleId={title_id})")
+        for article in articles:
+            number = article.get("no") if isinstance(article, dict) else None
+            if type(number) is not int or number <= 0 or number in seen_numbers:
+                raise NaverApiError(f"잘못되거나 중복된 회차가 있는 {page}페이지 (titleId={title_id})")
+            seen_numbers.add(number)
             episodes.append(
                 EpisodeInfo(
-                    episode_no=article.get("no", 0),
+                    episode_no=number,
                     subtitle=article.get("subtitle", ""),
                     is_locked=bool(article.get("thumbnailLock")),
                 )

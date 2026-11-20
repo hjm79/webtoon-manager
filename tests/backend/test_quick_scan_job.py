@@ -39,11 +39,11 @@ repository.upsert_new("x2", "제외-요일모름"); repository.set_status("x2", 
 # Scenario 1: 전체 실행 — 시작(대상 수, 플랫폼별, 기타 먼저/오늘부터), 건너뛴 수, 진행, 완료 요약, 이력 문장 두 줄. 성공으로 끝난다
 run()
 assert calls["collect"] == {"today": "tue", "max_age_hours": qj.MANUAL_MAX_AGE_HOURS, "scope": None} and calls["scan"] == ["n1", 1, "n2"], calls
-assert status()["status"] == "success"
+assert status()["status"] == "partial"
 lines = status()["log"]
 assert "빠른 상태 스캔 시작 — 대상 3개 (네이버 2개, 카카오 1개): 요일을 모르는 기타 2개를 먼저, 이어서 오늘(화)부터 요일별로 확인합니다" in text(), text()
 assert "최근 1시간 안에 확인한 4개는 건너뜁니다" in text() and "빠른 상태 스캔 진행 3/3개" in text()
-assert "빠른 상태 스캔 완료 — 확인 3개: 요일 새로 알아냄 2개, 새로 완결·서비스 종료·판매 중지 1개, 확인 실패 1개" in text(), text()
+assert "빠른 상태 스캔 결과 — 확인 3개: 요일 새로 알아냄 2개, 새로 완결·서비스 종료·판매 중지 1개, 확인 실패 1개" in text(), text()
 assert any("기타 원인 — 네이버" in l and "완결 1" in l and "요일 확인 대기 1" in l for l in lines), "기타 원인 한 줄이 실행 이력에 남는다: " + text()
 assert any("제외됨 완결·서비스 종료·판매 중지 웹툰 1개는 제외됨 목록에 표시하지 않습니다(필요하면 수동 다운로드에서 분석해서 구독할 수 있습니다)" in l for l in lines), text()
 print("1) 전체 실행 OK")
@@ -57,12 +57,15 @@ print("2) 범위 지정 OK")
 
 # Scenario 3: 확인할 작품이 없으면 그렇다고 남기고(이력 문장은 그대로), 성공으로 끝난다
 quick_scan.collect_targets = lambda **k: ([], 7); calls.pop("scan", None)
-run(); assert "scan" not in calls and "빠른 상태 스캔 완료" not in text(), "대상이 없으면 스캔도 하지 않는다"
+run(); assert "scan" not in calls and "빠른 상태 스캔 결과" not in text(), "대상이 없으면 스캔도 하지 않는다"
 assert status()["status"] == "success" and "확인할 작품이 없습니다" in text() and "최근 1시간 안에 확인한 7개는 건너뜁니다" in text() and "기타 원인" in text(), text()
 print("3) 대상 없음 OK")
 
 # Scenario 4: 스캔이 예외로 실패하면 "오류"로 끝나고 오류를 남긴다. 겹치는 실행은 건너뛴다(시간 제한 안에 끝나야 한다)
 quick_scan.collect_targets = fake_collect
+async def all_failed(targets, settings, progress=None): return ScanStats(scanned=len(targets), failed=len(targets))
+quick_scan.scan = all_failed
+run(); assert status()["status"] == "error" and "확인 실패 3개" in text(), text()
 async def boom(targets, settings, progress=None): raise RuntimeError("스캔 장애")
 quick_scan.scan = boom; run(); assert status()["status"] == "error" and "오류: 스캔 장애" in text(), text()
 quick_scan.scan = fake_scan

@@ -24,7 +24,7 @@ const { listItem } = require("./factories");
   ok(scanRequests.length === 1 && scanRequests[0] === null, "범위 없이 요청: " + JSON.stringify(scanRequests));
   jobs = { quick_scan: { status: "running", log: ["2026-11-03T01:00:00+00:00 — 빠른 상태 스캔 시작 — 대상 12개", "2026-11-03T01:00:05+00:00 — 빠른 상태 스캔 진행 3/12개"] } };
   run("refreshJobStatus();"); await idle();
-  ok($("quick_scan-status-badge").textContent === "running" && $("quick_scan-log").textContent.includes("진행 3/12개"), "진행 중 표시: " + $("quick_scan-log").textContent.slice(-40));
+  ok($("quick_scan-status-badge").textContent === "실행 중" && $("quick_scan-log").textContent.includes("진행 3/12개"), "진행 중 표시: " + $("quick_scan-log").textContent.slice(-40));
 
   // Scenario 2: 전체목록 새로고침 — 오늘(화)과 기타, 선택한 요일 탭이 있으면 그것까지 범위로 스캔을 요청한다(중복 없이). 요청은 목록을 다시 받은 뒤에
   scanRequests.length = 0; jobs = { quick_scan: { status: "idle", log: [], started_at: null } };
@@ -50,6 +50,11 @@ const { listItem } = require("./factories");
   await wait(6000); await idle(); ok(gets("/api/naver-list") === afterClick + 1, "그 뒤로는 다시 안 불러온다");
   const b2 = gets("/api/naver-list"); $("btn-refresh-naver-list").click(); await idle(); await wait(100); await idle(); const b2c = gets("/api/naver-list");
   jobs.quick_scan.status = "error"; await wait(2500); await idle(); ok(gets("/api/naver-list") === b2c, "오류로 끝나면 다시 불러오지 않는다");
+  $("btn-refresh-naver-list").click(); await idle(); await wait(100); await idle(); const partialBefore = gets("/api/naver-list");
+  jobs.quick_scan.status = "partial"; await wait(2500); await idle();
+  ok(gets("/api/naver-list") === partialBefore + 1, "일부 확인이 끝나면 갱신된 작품을 다시 불러온다");
+  run("refreshJobStatus();"); await idle();
+  ok($("quick_scan-status-badge").textContent === "일부 미처리" && $("quick_scan-status-badge").classList.contains("job-partial"), "일부 미처리 상태를 표시한다");
   // 새로고침을 연달아 누르면 앞의 감시는 버리고 마지막 것만 — 끝났을 때 목록은 한 번만 다시 불러온다
   const b3 = gets("/api/naver-list"); $("btn-refresh-naver-list").click(); await idle(); await wait(100); $("btn-refresh-naver-list").click(); await idle(); await wait(100); await idle(); const b3c = gets("/api/naver-list");
   jobs.quick_scan.status = "success"; await wait(2500); await idle(); ok(gets("/api/naver-list") === b3c + 1, "연달아 눌러도 끝났을 때 한 번만: " + (gets("/api/naver-list") - b3c));

@@ -15,6 +15,7 @@ import asyncio
 import logging
 import random
 import shutil
+import tempfile
 from pathlib import Path
 from typing import Optional
 
@@ -29,7 +30,9 @@ from app.constants import (
     RETRY_BACKOFF_BASE_SECONDS,
 )
 from app.file_utils import (
+    EPISODE_DOWNLOAD_STAGE_PREFIX,
     episode_folder_name,
+    episode_image_format,
     guess_image_extension,
     image_file_name,
     remove_forbidden_str,
@@ -96,6 +99,7 @@ async def _download_single_image(
     cookies: dict[str, str],
     timeout_seconds: int,
 ) -> bool:
+    partial_path = file_path.with_suffix(".part")
     for attempt in range(IMAGE_DOWNLOAD_MAX_RETRIES + 1):
         try:
             async with session.get(
@@ -106,14 +110,14 @@ async def _download_single_image(
             ) as response:
                 if response.status == 200:
                     file_path.parent.mkdir(parents=True, exist_ok=True)
-                    async with aiofiles.open(file_path, "wb") as f:
+                    async with aiofiles.open(partial_path, "wb") as f:
                         async for chunk in response.content.iter_chunked(8192):
                             await f.write(chunk)
-                    # 실제로 정상 이미지도 크기가 아주 작을 수 있어서(간단한 컷 등, 실제로
-                    # 1845바이트짜리 정상 이미지가 5KB 기준에 걸려 오탐 실패한 사례 있음)
-                    # 여기서 크기로 판단하지 않는다 — HTTP 200이면 그대로 성공 처리한다.
-                    # 깨진 다운로드가 남는 문제는 실행 실패 시 폴더를 정리하는 별도 로직으로
-                    # 이미 커버된다(다운로드 도중에는 크기 추측으로 재시도하지 않는다).
+                    image_format = await asyncio.to_thread(episode_image_format, partial_path)
+                    if image_format is None:
+                        raise ValueError("이미지 데이터를 읽을 수 없습니다.")
+                    extension = "jpg" if image_format == "jpeg" else image_format
+                    partial_path.replace(file_path.with_suffix(f".{extension}"))
                     return True
                 if response.status != 200 and attempt >= IMAGE_DOWNLOAD_MAX_RETRIES:
                     log.error("이미지 다운로드 최종 실패: %s (HTTP %s)", img_url, response.status)  # 예전에는 예외일 때만 기록해서 HTTP 오류의 원인을 알 수 없었다
@@ -121,6 +125,8 @@ async def _download_single_image(
             if attempt >= IMAGE_DOWNLOAD_MAX_RETRIES:
                 log.error("이미지 다운로드 최종 실패: %s (%s)", img_url, e)
                 return False
+        finally:
+            partial_path.unlink(missing_ok=True)
 
         if attempt < IMAGE_DOWNLOAD_MAX_RETRIES:
             delay = RETRY_BACKOFF_BASE_SECONDS * (2**attempt) * (1 + random.uniform(0, 0.2))
@@ -156,12 +162,10 @@ async def download_single_episode(
     if not img_urls:
         return False, None
 
-    episode_dir = (
-        Path(download_root)
-        / safe_title
-        / episode_folder_name(episode.episode_no, episode.subtitle, folder_zero_fill)
-    )
-    episode_dir.mkdir(parents=True, exist_ok=True)
+    series_dir = Path(download_root) / safe_title
+    series_dir.mkdir(parents=True, exist_ok=True)
+    stage = Path(tempfile.mkdtemp(prefix=EPISODE_DOWNLOAD_STAGE_PREFIX, dir=series_dir))
+    episode_dir = stage / episode_folder_name(episode.episode_no, episode.subtitle, folder_zero_fill)
 
     semaphore = asyncio.Semaphore(max_concurrent_downloads)
 
@@ -175,12 +179,11 @@ async def download_single_episode(
         file_name = image_file_name(image_index + 1, image_zero_fill, ext)
         tasks.append(_bounded(img_url, episode_dir / file_name))
 
-    outcomes = await asyncio.gather(*tasks, return_exceptions=True)
-    success = sum(1 for o in outcomes if o is True) == len(img_urls)
-    if not success:
-        # 일부만 받은 채로 폴더가 남으면, 다음 재시도 때 그 위에 다시 받으면서
-        # 어떤 이미지가 실제로 실패했었는지 구분이 안 되고 자리만 차지한다 —
-        # 실패하면 통째로 지워서 다음 실행이 깨끗한 상태에서 다시 받게 한다.
-        shutil.rmtree(episode_dir, ignore_errors=True)
-        return False, None
-    return True, episode_dir
+    success = False
+    try:
+        outcomes = await asyncio.gather(*tasks, return_exceptions=True)
+        success = all(outcome is True for outcome in outcomes)
+        return (True, episode_dir) if success else (False, None)
+    finally:
+        if not success:
+            shutil.rmtree(stage, ignore_errors=True)

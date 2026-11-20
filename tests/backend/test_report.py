@@ -45,7 +45,7 @@ class Settings:
 async def main():
     s = Sess()
     looked_up = []
-    async def fake_reader(session, base, name, timeout): looked_up.append(name); return 'http://viewer/x'
+    async def fake_reader(session, base, name, timeout, *, platform, title_id=None): looked_up.append(name); return 'http://viewer/x'
     webtoon_server_client.fetch_reader_url = fake_reader                  # 뷰어 서버가 설정돼 있어도 쓰이지 않아야 한다
     repository.set_setting('webtoon_server_url', 'http://viewer')
     results = await scheduler.collect_kakao_new_episodes(s, Settings())

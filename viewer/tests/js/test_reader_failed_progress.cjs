@@ -3,12 +3,11 @@ const test = require("node:test");
 const fs = require("node:fs");
 const path = require("node:path");
 const vm = require("node:vm");
-const { createWriter } = require("../../static/reader-progress.js");
+const { createWriter, createReadingEvidence } = require("../../static/reader-progress.js");
 const html = fs.readFileSync(path.join(__dirname, "../../static/reader.html"), "utf8");
 const update = html.match(/function updateCurrentFromVisible\([\s\S]*?(?=\nfunction onPositionChange)/)[0];
 const finish = html.match(/function confirmLastChapterAtDocumentEnd\([\s\S]*?(?=\nwindow.addEventListener\("scroll", confirmLastChapterAtDocumentEnd)/)[0];
-const blocked = html.match(/function blockedByImageFailure\([^]*?\n\}/)[0];
-const save = html.match(/function saveProgressNow\([\s\S]*?(?=\nfunction scheduleSaveProgress)/)[0];
+const save = html.match(/function progressImageState\([\s\S]*?(?=\nfunction scheduleSaveProgress)/)[0];
 const bannerHelper = html.match(/function setProgressSaveError\(visible\) \{[\s\S]*?\n\}/)[0];
 const boundary = html.match(/async function moveToChapterBoundary\([^]*?(?=\ndocument.getElementById\("chapterTop"\))/)[0];
 
@@ -22,21 +21,26 @@ function reader(images, page = 0) {
   const banner = { hidden: true, querySelector: () => label };
   const context = {
     seriesId: "series", seriesData: { title: "test", chapters: [{ id: "earlier" }, { id: "last" }] },
-    currentChapterId: "last", currentPageIndex: page, currentPageOffset: 0,
+    currentChapterId: "last", pendingJumpChapterId: null, readingFromChapterId: images[0]?.dataset.chapter ?? "last", completedChapterPosition: null,
+    readingEvidence: createReadingEvidence(), completedChapters: new Set(), persistedCompletedChapters: new Set(),
+    progressRevision: 1, savedProgressRevision: 0, hasReadingInput: true, readingInputUntil: 0,
+    closingProgressSaved: false, currentPageIndex: page, currentPageOffset: 0,
     endOfDocumentCheckQueued: false, saveTimer: null,
     requestAnimationFrame: (callback) => callback(), clearTimeout() {},
     window: { scrollY: 0, innerHeight: 800 },
     document: { documentElement: { scrollHeight: 800 }, getElementById: () => banner },
     pagesEl: { querySelectorAll: () => images, classList: { contains: () => false },
       querySelector: () => images.at(-1) },
-    loadedChapters: [{ id: "last", pageCount: 4 }],
+    loadedChapters: [{ id: "last", pageCount: 4, lastImg: images.filter(img => img.dataset.chapter === "last").at(-1) }],
+    visiblePages: new Map(images.map((img, index) => [index, img])),
+    chapterIndexById: (id) => ["earlier", "last"].indexOf(id),
     chapterById: () => null, chapterTitleEl: { textContent: "" }, highlightSidebar() {},
     updateReaderPosition() {}, updateUrlState() {}, onPositionChange() {},
     CSS: { escape: (value) => value }, encodeURIComponent, Promise,
     embedBridge: { active: true },
     postReaderEvent: (type, body) => events.push({ type, ...body }),
     fetch: async (url, options) => { requests.push({ url, body: (({ client_session_id, client_sequence, ...position }) => position)(JSON.parse(options.body)) }); return { ok: true }; },
-    stopContinuousScroll() {}, stopAutoScroll() {}, cancelPendingAnchor() {}, setChromeHidden() {},
+    stopContinuousScroll() {}, stopAutoScroll() {}, cancelPendingAnchor() {}, setChromeHidden() {}, scheduleSaveProgress() {},
     positionAtImage: async (img, fraction) => moves.push({ img, fraction }),
   };
   context.progressWriter = createWriter({ clientSessionId: "00000000-0000-4000-8000-000000000001",
@@ -44,7 +48,7 @@ function reader(images, page = 0) {
       method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body), keepalive,
     }) });
   vm.createContext(context);
-  vm.runInContext([update, finish, blocked, bannerHelper, save, boundary].join("\n"), context);
+  vm.runInContext([update, finish, bannerHelper, save, boundary].join("\n"), context);
   return { context, requests, events, moves, banner, label };
 }
 
@@ -61,6 +65,15 @@ test("a failed image in an earlier loaded chapter also blocks advancing into the
   f.context.updateCurrentFromVisible(); f.context.confirmLastChapterAtDocumentEnd();
   assert.equal(f.context.currentPageIndex, 0);
   assert.equal(f.requests.length, 0);
+});
+
+test("a failed image before an explicit chapter jump does not block saving its target", async () => {
+  const f = reader([image("earlier", 10, { top: -2000, failed: true }), image("last", 3)]);
+  f.context.readingFromChapterId = "last";
+  f.context.pendingJumpChapterId = "last";
+  assert.equal(await f.context.saveProgressNow(), true);
+  assert.equal(f.requests[0].body.page_index, 3);
+  assert.deepEqual(f.requests[0].body.read_chapter_ids, []);
 });
 
 test("chapter end movement cannot preassign progress beyond a known failure", async () => {
@@ -105,4 +118,11 @@ test("known geometry idle placeholders before a distant resumed image remain all
   const f = reader([placeholder, image("last", 3)]);
   f.context.updateCurrentFromVisible();
   assert.equal(f.context.currentPageIndex, 3);
+});
+
+test("an unrendered chapter selection cannot cause a new progress write", async () => {
+  const f = reader([]);
+  assert.equal(await f.context.saveProgressNow({ keepalive: true, urgent: true }), true);
+  assert.equal(f.requests.length, 0);
+  assert.equal(f.banner.hidden, true);
 });

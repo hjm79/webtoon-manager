@@ -11,15 +11,20 @@ def get_setting(key: str) -> str | None:
 
 
 def set_setting(key: str, value: str | None) -> None:
+    set_settings({key: value})
+
+
+def set_settings(values: dict[str, str | None]) -> None:
     with write_transaction() as conn:
-        if value is None:
-            conn.execute("DELETE FROM settings WHERE key = ?", (key,))
-        else:
-            conn.execute(
-                "INSERT INTO settings (key, value) VALUES (?, ?) "
-                "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-                (key, value),
-            )
+        for key, value in values.items():
+            if value is None:
+                conn.execute("DELETE FROM settings WHERE key = ?", (key,))
+            else:
+                conn.execute(
+                    "INSERT INTO settings (key, value) VALUES (?, ?) "
+                    "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                    (key, value),
+                )
 
 
 def is_author_auto_register_enabled() -> bool:

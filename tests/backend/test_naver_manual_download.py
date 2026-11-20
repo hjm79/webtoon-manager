@@ -1,5 +1,7 @@
 """네이버 수동 다운로드(download_selected) 특성 테스트 — 실패 조건, 선택한 회차만 번호순, 잠긴 회차 건너뜀, 실패해도 계속, 구독 중이면 마지막 회차 갱신."""
 import asyncio
+from pathlib import Path
+from unittest.mock import AsyncMock, patch
 from types import SimpleNamespace as NS
 
 from app import db, repository, manual_download as md, job_status, naver_api
@@ -14,10 +16,13 @@ async def fake_info(session, title_id, timeout): return state["info"]
 async def fake_all(session, title_id, cookies, timeout): state["cookies_used"] = cookies; return state["episodes"]
 async def fake_single(**kw):
     state["attempts"].append(kw["episode"].episode_no); state["kw"] = kw
-    return kw["episode"].episode_no not in state["fail"], None
+    return kw["episode"].episode_no not in state["fail"], Path(DL) / f"[{kw['episode'].episode_no:04d}]"
 async def fake_cover(session, d, info, t): state["cover"] += 1
 naver_api.fetch_title_info = fake_info; naver_api.fetch_all_episodes = fake_all; naver_api.free_episodes_only = lambda eps: [e for e in eps if not e.is_locked]
-md.download_single_episode = fake_single; md.zip_episode_folders = lambda d: state["zips"].append(str(d))
+def fake_zip(d, **options):
+    state["zips"].append(str(d))
+    return ["episode.zip"]
+md.download_single_episode = fake_single; md.zip_episode_folders = fake_zip
 md.find_last_downloaded_episode_no = lambda d, eps: state["folder_last"]
 md.get_adult_cookies = lambda path: state["adult_cookies"]
 md.write_comicinfo_file = lambda d, info: state["xml"].append(info.title_name)
@@ -55,6 +60,16 @@ async def main():
     reset(episodes=[EP(n) for n in range(1, 5)], fail={2}); s = await run("3", [1, 2, 3, 4])
     assert state["attempts"] == [1, 2, 3, 4] and s["status"] == "error" and "❌ 2화 \"2화\" 다운로드 실패" in logs(s)
     assert hist("3") == [(1, "success"), (2, "failed"), (3, "success"), (4, "success")] and len(state["zips"]) == 3
+    reset(episodes=[EP(1)])
+    with patch.object(md, "zip_episode_folders", return_value=[]):
+        failed_zip = await run("5", [1])
+    assert failed_zip["status"] == "error" and "ZIP 저장 실패" in logs(failed_zip)
+    assert hist("5") == [(1, "failed")]
+
+    from app.scheduler.download_job import download_busy
+    with patch.object(md, "_refresh_metadata", AsyncMock(side_effect=PermissionError)):
+        failed_meta = await run("6", [1])
+    assert failed_meta["status"] == "error" and not download_busy() and not hist("6")
     print("4) 실패해도 계속 OK")
 
     # ── 5. 구독 중인 작품이면 마지막 회차를 폴더 기준으로 갱신(앞설 때만), 구독 안 한 작품이면 건드리지 않는다 ──

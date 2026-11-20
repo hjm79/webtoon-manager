@@ -7,7 +7,12 @@
 """
 
 import re
+
+from PIL import Image
+
 from app.constants import FORBIDDEN_CHAR_TABLE_FROM, FORBIDDEN_CHAR_TABLE_TO
+
+EPISODE_DOWNLOAD_STAGE_PREFIX = ".episode-download-"
 
 _WINDOWS_WEIRD_SPACES = [
     "\u00a0",  # NO-BREAK SPACE
@@ -69,6 +74,16 @@ def guess_image_extension(img_url: str) -> str:
     if "." in last_segment:
         return "." + last_segment.split(".")[-1].split("?")[0]
     return ".jpg"
+
+
+def episode_image_format(source) -> str | None:
+    """Return the decoded episode raster format, or None if invalid."""
+    try:
+        with Image.open(source, formats=("JPEG", "PNG", "GIF", "WEBP", "AVIF")) as image:
+            image.load()
+            return image.format.lower()
+    except (OSError, ValueError, Image.DecompressionBombError):
+        return None
 
 
 def title_key(title: str) -> str:

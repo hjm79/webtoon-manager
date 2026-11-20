@@ -10,11 +10,13 @@
 
 import logging
 import re
+from threading import local
 
 from app import discord_config, kakao_page_auth
 
 _MASK = "***REDACTED***"
 _MIN_SECRET_LENGTH = 10  # 이보다 짧은 값은 일반 문장과 겹쳐 오탐이 나기 쉬워서 값 비교로는 가리지 않는다
+_redaction_context = local()
 # 이름이 정확히 token/signature/credential인 쿼리 매개변수만(예: mytoken=은 제외 — 앞이 단어 경계여야 한다)
 _QUERY_SECRET_RE = re.compile(r"(?i)\b(token|signature|credential)=([^&\s\"'<>;)]+)")
 
@@ -28,16 +30,35 @@ def _secret_values() -> list[str]:
     return [s for s in secrets if s and len(s) >= _MIN_SECRET_LENGTH]
 
 
-def redact(message: str) -> str:
-    message = _QUERY_SECRET_RE.sub(lambda m: f"{m.group(1)}=***", message)
+def _available_secrets() -> list[str]:
+    if getattr(_redaction_context, "loading", False):
+        return []
+    _redaction_context.loading = True
     try:
-        secrets = _secret_values()
+        return _secret_values()
     except Exception:
-        return message  # 비밀 목록을 못 읽어도 로그는 계속 나간다
+        return []
+    finally:
+        _redaction_context.loading = False
+
+
+def _redact(message: str, secrets: list[str]) -> str:
+    message = _QUERY_SECRET_RE.sub(lambda m: f"{m.group(1)}=***", message)
     for secret in secrets:
         if secret in message:
             message = message.replace(secret, _MASK)
     return message
+
+
+def redact(message: str) -> str:
+    return _redact(message, _available_secrets())
+
+
+def redact_lines(lines: list[str]) -> list[str]:
+    if not lines:
+        return []
+    secrets = _available_secrets()
+    return [_redact(line, secrets) for line in lines]
 
 
 class RedactingFilter(logging.Filter):
@@ -46,4 +67,6 @@ class RedactingFilter(logging.Filter):
     def filter(self, record: logging.LogRecord) -> bool:
         record.msg = redact(record.getMessage())
         record.args = ()
+        if record.exc_info and not record.exc_text:
+            record.exc_text = redact(logging.Formatter().formatException(record.exc_info))
         return True

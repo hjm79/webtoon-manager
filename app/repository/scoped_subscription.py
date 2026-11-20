@@ -11,7 +11,7 @@ from app.repository.kakao_webtoons import _row_to_kakao_webtoon
 
 _QUEUE_KEY = "workflow_download_queue"
 _RETRYABLE_DOWNLOAD_STATES = {"retry_download", "failed"}
-_QUEUE_STATES = {"queued", "running", "blocked_auth", "retry_wait"} | _RETRYABLE_DOWNLOAD_STATES
+_QUEUE_STATES = {"queued", "running", "blocked_auth", "blocked_storage", "retry_wait"} | _RETRYABLE_DOWNLOAD_STATES
 
 
 def normalize_restored_queue(value: str | None) -> str:
@@ -67,9 +67,10 @@ def _append_queue(conn, platform: str, title_id: str, title: str) -> list[dict]:
     return items
 
 
-def list_download_queue() -> list[dict]:
+def list_download_queue(*, include_failed: bool = True) -> list[dict]:
     with read_lock() as conn:
-        return _queue(conn)
+        items = _queue(conn)
+        return items if include_failed else [row for row in items if row["state"] != "failed"]
 
 
 def enqueue_download(platform: str, title_id: str, title: str) -> list[dict]:
@@ -114,6 +115,16 @@ def resume_kakao_auth_queue(*, connection=None) -> None:
         _save_queue(conn, items)
 
 
+def clear_failed_download(platform: str, title_id: str | int) -> None:
+    """Only clear a terminal failure after a successful independent run."""
+    with write_transaction() as conn:
+        items = _queue(conn)
+        updated = [row for row in items if not (row["platform"] == platform
+                   and row["title_id"] == str(title_id) and row["state"] == "failed")]
+        if len(updated) != len(items):
+            _save_queue(conn, updated)
+
+
 def cancel_queued_download(platform: str, title_id: str) -> bool:
     with write_transaction() as conn:
         items = _queue(conn)
@@ -139,12 +150,24 @@ def set_scoped_subscription_status(platform: str, title_id: str, status: str) ->
         conn.execute(f"UPDATE {table} SET status = ?, updated_at = ? WHERE title_id = ?", (status, _now(), title_id))
 
 
+def set_naver_download_record(title_id: str, episode_no: int, scope: dict | None) -> bool:
+    with write_transaction() as conn:
+        updated = conn.execute("UPDATE webtoons SET last_downloaded_no = ?, updated_at = ? WHERE title_id = ? AND status = ?",
+                               (episode_no, _now(), title_id, STATUS_ACTIVE))
+        if not updated.rowcount:
+            return False
+        if scope is not None:
+            conn.execute("UPDATE settings SET value = ? WHERE key = ?",
+                         (json.dumps(scope), f"subscription_scope:naver:{title_id}"))
+    return True
+
+
 def download_subscription_snapshot(platforms: set[str], *, include_queued: bool = False) -> tuple[list, list]:
     with read_lock() as conn:
         naver = conn.execute("SELECT * FROM webtoons WHERE status = ? ORDER BY title", (STATUS_ACTIVE,)).fetchall() if "naver" in platforms else []
         kakao = conn.execute("SELECT * FROM kakao_webtoons WHERE status = ? ORDER BY title", (STATUS_ACTIVE,)).fetchall() if "kakao" in platforms else []
         if not include_queued:
-            queued = {(row["platform"], row["title_id"]) for row in _queue(conn)}
+            queued = {(row["platform"], row["title_id"]) for row in _queue(conn) if row["state"] != "failed"}
             naver = [row for row in naver if ("naver", str(row["title_id"])) not in queued]
             kakao = [row for row in kakao if ("kakao", str(row["title_id"])) not in queued]
     return [_row_to_record(row) for row in naver], [_row_to_kakao_webtoon(row) for row in kakao]

@@ -14,7 +14,9 @@ function img(page, top, height, loaded = true) {
 }
 function tracker(images) {
   let changes = 0;
-  const c = { currentChapterId: "chapter-1", currentPageIndex: 0, currentPageOffset: 0,
+  const c = { currentChapterId: "chapter-1", pendingJumpChapterId: null, currentPageIndex: 0, currentPageOffset: 0,
+    hasReadingInput: false, readingFromChapterId: null, activeProgressScope: () => null,
+    visiblePages: new Map(images.map((image, index) => [index, image])),
     window: { innerHeight: 800 }, pagesEl: { classList: { contains: () => false }, querySelectorAll: () => images },
     onPositionChange: () => { changes++; } };
   vm.createContext(c); vm.runInContext(current, c);
@@ -90,11 +92,12 @@ test("manual input during loading prevents a late image response from moving the
 
 test("current chapter end navigation targets the last image without loading intervening pages", async () => {
   const source = html.match(/async function moveToChapterBoundary\([^]*?(?=\ndocument.getElementById\("chapterTop"\))/)[0];
-  const image = { getBoundingClientRect: () => ({ height: 2000 }) };
+  const image = { dataset: { page: "79" }, getBoundingClientRect: () => ({ height: 2000 }) };
   const moves = [];
   const c = { currentChapterId: "chapter-1", currentPageIndex: 0, currentPageOffset: 0,
-    window: { innerHeight: 800 }, loadedChapters: [{ id: "chapter-1", pageCount: 80 }],
-    pagesEl: { querySelector: (selector) => { assert.match(selector, /data-page="79"/); return image; } },
+    readingInputUntil: 0, hasReadingInput: false, completedChapterPosition: null,
+    window: { innerHeight: 800 }, loadedChapters: [{ id: "chapter-1", pageCount: 80, lastImg: image }],
+    pagesEl: { querySelector: () => { throw new Error("chapter end should use its loaded last image"); } },
     CSS: { escape: (v) => v }, stopContinuousScroll() {}, stopAutoScroll() {}, cancelPendingAnchor() {},
     positionAtImage: async (img, fraction) => moves.push({ img, fraction }), updateCurrentFromVisible() {},
     updateReaderPosition() {}, setChromeHidden() {} };
